@@ -132,6 +132,11 @@ gert::TilingContextPara MakeTilingPara(const MsaTilingSpec& spec, const MsaSocPa
         outputs.push_back(spec.hasScore ? Present(spec.scoreShape, ge::DT_FLOAT) : Absent(ge::DT_FLOAT));
         outputs.push_back(spec.hasIndices ? Present(spec.indicesShape, ge::DT_INT32) : Absent(ge::DT_INT32));
         outputs.push_back(spec.hasValues ? Present(spec.valuesShape, ge::DT_FLOAT) : Absent(ge::DT_FLOAT));
+        std::vector<int64_t> countShape = spec.indicesShape.size() >= 2 ?
+                                              std::vector<int64_t>{spec.indicesShape[0], spec.indicesShape[1]} :
+                                              std::vector<int64_t>{};
+        outputs.push_back(spec.returnChoice != 0 && !countShape.empty() ? Present(countShape, ge::DT_INT32) :
+                                                                          Absent(ge::DT_INT32));
     } else {
         outputs.push_back(Present(spec.scoreShape, ge::DT_FLOAT));
     }

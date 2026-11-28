@@ -275,7 +275,7 @@ void CheckHeadDim(const at::Tensor& query, int64_t keyHeadDim)
 
 } // namespace
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> msa_index_score_v2(
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> msa_index_score_v2(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& start_loc,
     const c10::optional<at::Tensor>& block_table, const c10::optional<at::Tensor>& query_scale,
     const c10::optional<at::Tensor>& key_scale, const c10::optional<at::Tensor>& atten_mask,
@@ -413,6 +413,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> msa_index_score_v2(
     at::Tensor sparse_values = (return_choice == 2) ?
                                    at::empty({score_heads, total_q, topk_count}, query.options().dtype(at::kFloat)) :
                                    at::empty({0}, query.options().dtype(at::kFloat));
+    at::Tensor sparse_count = topk ? at::empty({score_heads, total_q}, query.options().dtype(at::kInt)) :
+                                     at::empty({0}, query.options().dtype(at::kInt));
     // The ACLNN handler may be queued without owning input tensors. Keep host-length copies alive until completion.
     const bool host_lengths = actual_seq_qlen->device().is_cpu() || actual_seq_klen->device().is_cpu();
     if (host_lengths) {
@@ -443,11 +445,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> msa_index_score_v2(
     TensorWrapper keyScaleArg{keyScale, is_mxfp4 ? ACL_FLOAT8_E8M0 : ACL_FLOAT};
     ACLNN_CMD(aclnnMsaIndexScoreV2, queryArg, keyArg, start_loc, block_table, queryScaleArg, keyScaleArg, atten_mask,
               device_qlen, device_klen, layoutKeyStr, sparse_mode, init_blocks, local_blocks, layoutQueryStr,
-              poolBlockSize, return_choice, topk_count, compress_factor, score, sparse_indices, sparse_values);
+              poolBlockSize, return_choice, topk_count, compress_factor, score, sparse_indices, sparse_values,
+              sparse_count);
     if (host_lengths) {
         c10_npu::getCurrentNPUStream(query.device().index()).synchronize();
     }
-    return {score, sparse_indices, sparse_values};
+    return {score, sparse_indices, sparse_values, sparse_count};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

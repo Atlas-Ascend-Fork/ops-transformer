@@ -260,8 +260,8 @@ def msa_index_score(
 
     Returns:
         ``return_choice=0``：``[N1, T1, RoundUp(MB, 16)]`` float32。
-        ``return_choice=1``：``[N1, T1, topk]`` int32。
-        ``return_choice=2``：indices 与同 shape 的 float32 values。
+        ``return_choice=1``：``[N1, T1, topk]`` int32 索引，以及 ``[N1, T1]`` int32 的每行有效块数。
+        ``return_choice=2``：索引、同 shape 的 float32 分数，以及 ``[N1, T1]`` int32 的每行有效块数。
     """
     _check_v1_query(query)
     if return_choice != 0:
@@ -284,8 +284,8 @@ def msa_index_score(
             compress_factor,
         )
         if return_choice == 1:
-            return outputs[0]
-        return outputs[0], outputs[1]
+            return outputs[0], outputs[1]
+        return outputs[0], outputs[1], outputs[2]
     return torch.ops.cann_ops_transformer._msa_index_score(
         query,
         key,

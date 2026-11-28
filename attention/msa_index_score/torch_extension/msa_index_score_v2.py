@@ -396,7 +396,7 @@ def _msa_index_score_v2(
     if layout == "BBND" and key.dim() == 3 and int(key.size(1)) == 128:
         key = key.unsqueeze(2)
     # The C++ wrapper follows the PR15456 tensor order.
-    score, indices, _values = _get_op_module().msa_index_score_v2(
+    score, indices, _values, _count = _get_op_module().msa_index_score_v2(
         query,
         key,
         start_loc,
@@ -457,8 +457,8 @@ def msa_index_score_v2(
     块长 16 支持 compress_factor > 1，实际序列长度仍按压缩前的 token 数传入。
 
     return_choice 为 0 时返回 score，块长 128 为 float32，块长 16 为 float16。
-    Atlas A2/A3 的 fp16、bf16、A8C8 及 Ascend 950 支持为 1 时返回 int32 索引，
-    为 2 时返回索引和 float32 分值。
+    Atlas A2/A3 的 fp16、bf16、A8C8 及 Ascend 950 支持为 1 时返回 int32 索引和每行有效块数，
+    为 2 时再返回 float32 分值。有效块数 shape 为 ``[H, T1]``，H 在块长 16 时为 1。
     块长 128 的 topk 支持 1 到 128，块长 16 的 topk 固定为 128。
     """
     layout_query = _normalize_layout_query(layout_query)
@@ -482,8 +482,8 @@ def msa_index_score_v2(
     host_klen = _host_lengths(
         actual_seq_klen, start_loc, key, layout_key, compress_factor, block_table
     )
-    if int(return_choice) == 2:
-        _score, indices, values = _get_op_module().msa_index_score_v2(
+    if int(return_choice) in (1, 2):
+        _score, indices, values, count = _get_op_module().msa_index_score_v2(
             query,
             key,
             start_loc,
@@ -503,7 +503,9 @@ def msa_index_score_v2(
             int(topk),
             int(compress_factor),
         )
-        return indices, values
+        if int(return_choice) == 1:
+            return indices, count
+        return indices, values, count
     return torch.ops.cann_ops_transformer._msa_index_score_v2(
         query,
         key,

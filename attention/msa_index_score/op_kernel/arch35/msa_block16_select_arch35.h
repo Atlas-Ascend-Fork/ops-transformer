@@ -978,7 +978,7 @@ class Selector final {
 public:
     __aicore__ inline void Init(GM_ADDR scores, GM_ADDR selectedIds, GM_ADDR selectedValues, uint32_t tokens,
                                 uint32_t scoreStride, uint32_t usedCubeCores, bool returnValues,
-                                const VisibleMeta& meta, TPipe* pipe)
+                                const VisibleMeta& meta, TPipe* pipe, GM_ADDR counts)
     {
         groups_ = 1U;
         tokens_ = tokens;
@@ -1011,9 +1011,14 @@ public:
         scores_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(scores));
         selectedIds_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(selectedIds));
         selectedValues_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(selectedValues));
+        hasCount_ = counts != nullptr;
+        if (hasCount_) {
+            selectedCounts_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(counts));
+        }
         // 评分释放并重置流水后，为每个 AIV 独立申请工作区。
         pipe_->InitBuffer(ub_, kSelectUbBytes);
         LocalTensor<uint8_t> base = ub_.Get<uint8_t>();
+        countSlot_ = base[kSelectUbBytes - 32U].ReinterpretCast<int32_t>();
         halfInput_ = base[159744].ReinterpretCast<half>();
         score_ = base[0].ReinterpretCast<float>();
         index_ = base[4096].ReinterpretCast<uint32_t>();
@@ -2065,6 +2070,21 @@ private:
             SetFlag<HardEvent::MTE3_S>(EVENT_ID0);
             WaitFlag<HardEvent::MTE3_S>(EVENT_ID0);
         }
+        if (hasCount_) {
+            uint32_t validCount = 0U;
+            for (uint32_t i = 0U; i < topK_; ++i) {
+                if (static_cast<int32_t>(orderIndices_.GetValue(i)) >= 0) {
+                    ++validCount;
+                }
+            }
+            countSlot_.SetValue(0, static_cast<int32_t>(validCount));
+            SetFlag<HardEvent::S_MTE3>(EVENT_ID1);
+            WaitFlag<HardEvent::S_MTE3>(EVENT_ID1);
+            DataCopyExtParams countCopy{1U, static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
+            DataCopyPad(selectedCounts_[row], countSlot_, countCopy);
+            SetFlag<HardEvent::MTE3_S>(EVENT_ID1);
+            WaitFlag<HardEvent::MTE3_S>(EVENT_ID1);
+        }
         if (returnValues_) {
             const uint64_t scoreOffset = static_cast<uint64_t>(row) * scoreStrideToken_;
             for (uint32_t i = 0U; i < topK_; ++i) {
@@ -2116,6 +2136,9 @@ private:
     LocalTensor<half> halfInput_;
     GlobalTensor<int32_t> selectedIds_;
     GlobalTensor<float> selectedValues_;
+    GlobalTensor<int32_t> selectedCounts_;
+    LocalTensor<int32_t> countSlot_;
+    bool hasCount_ = false;
     bool returnValues_ = false;
     bool hasMeta_ = false;
     bool cachedReady_ = false;
@@ -2143,11 +2166,11 @@ private:
 };
 
 __aicore__ inline void Run(GM_ADDR scores, GM_ADDR indices, GM_ADDR values, uint32_t tokens, uint32_t stride,
-                           uint32_t cubeCores, bool returnValues, const VisibleMeta& meta)
+                           uint32_t cubeCores, bool returnValues, const VisibleMeta& meta, GM_ADDR counts)
 {
     TPipe pipe;
     Selector selector;
-    selector.Init(scores, indices, values, tokens, stride, cubeCores, returnValues, meta, &pipe);
+    selector.Init(scores, indices, values, tokens, stride, cubeCores, returnValues, meta, &pipe, counts);
     selector.Process();
 }
 } // namespace FusedSelect

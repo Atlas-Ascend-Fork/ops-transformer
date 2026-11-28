@@ -25,7 +25,7 @@
 
 ## 功能说明
 
-- **算子功能**：计算 MSA（MiniMax Sparse Attention）Index Branch 的 KV 块分数。通过 `returnChoice` 选择输出完整分数、TopK 块号，或 TopK 块号及对应分数。Prefill 和 Decode 使用同一接口。
+- **算子功能**：计算 MSA（MiniMax Sparse Attention）Index Branch 的 KV 块分数。通过 `returnChoice` 选择输出完整分数，或 TopK 块号及每行有效块数，或再附上对应分数。Prefill 和 Decode 使用同一接口。
 
 - **计算公式**：
 
@@ -39,11 +39,13 @@
     - **块长 128**：按 head 输出 $S$。由 `initBlocks` 标出的前缀块写入 $10^{30}$，由 `startLoc` 和 `localBlocks` 标出的局部块写入 $10^{29}$，两者重叠时取局部块的值。
     - **块长 16**：在块内 max 后再取 head 间 max，$score=D^{-1/2}\log_2(e)\cdot\max_h S_h$，输出 head 维为 1，dtype 为 FLOAT16。前缀块和局部块保留原分数。
     - **压缩 key**：每个逻辑块仍覆盖 `poolBlockSize` 个原始 token，最多对 `poolBlockSize / compressFactor` 行 key 取 max。例如块长 16、压缩倍数 4 时，每块最多归约 4 行。有效 KV 长度仍按原始 token 计；在因果模式下，以每行覆盖的第一个 token 判断该行是否可见。
-    - **融合 TopK 和输出顺序**：`returnChoice=0` 输出完整 score，取 1 时输出 `sparseIndices`，取 2 时一并输出 `sparseValues`。TopK 按可见块的分数选取，同分优先取较小块号。
+    - **融合 TopK 和输出顺序**：`returnChoice=0` 输出完整 score。取 1 时输出 `sparseIndices` 和 `sparseCount`，取 2 时再输出 `sparseValues`。TopK 按可见块的分数选取，同分优先取较小块号。
 
       块长 128 每个 head 最多选 `topk` 个块，按块号升序写出。块长 16 在跨 head 归约后最多选 128 个块。可见块不超过 128 时按块号升序全部写出，否则优先保留可见前缀和局部块，并将最大入选块号移至最后一个有效槽。
 
       TopK 不足的槽位填块号 `-1`。对应分数与 score 的对齐补位使用相同的填充值，块长 128 为 FLOAT 最小有限值，块长 16 为 $-\infty$。
+
+      `sparseCount` 与 TopK 结果一起写出。`sparseCount[h,t]` 等于该行 `sparseIndices` 中大于等于 0 的个数，即该行实际入选的 KV 块数。块长 128 的 shape 为 `[N1, T1]`，块长 16 为 `[1, T1]`，dtype 为 INT32。没有入选块时该位置为 0。`returnChoice=0` 时传 `nullptr`。
 
 - **参数介绍**：
 
@@ -83,6 +85,7 @@ aclnnStatus aclnnMsaIndexScoreV2GetWorkspaceSize(
     const aclTensor *score,
     const aclTensor *sparseIndices,
     const aclTensor *sparseValues,
+    const aclTensor *sparseCount,
     uint64_t        *workspaceSize,
     aclOpExecutor  **executor);
 aclnnStatus aclnnMsaIndexScoreV2(
@@ -273,7 +276,7 @@ aclnnStatus aclnnMsaIndexScoreV2(
       <td>returnChoice</td>
       <td>输入</td>
       <td>输出模式。</td>
-      <td>各平台支持的输入类型均支持 0、1、2。取 0 时输出完整 score，取 1 时输出 TopK 块号，取 2 时输出 TopK 块号及对应分数。</td>
+      <td>各平台支持的输入类型均支持 0、1、2。取 0 时输出完整 score，取 1 时输出 TopK 块号和每行有效块数，取 2 时再输出对应分数。</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -327,6 +330,16 @@ aclnnStatus aclnnMsaIndexScoreV2(
       <td>FLOAT</td>
       <td>ND</td>
       <td>与sparseIndices相同</td>
+      <td>-</td>
+    </tr>
+    <tr>
+      <td>sparseCount</td>
+      <td>输出</td>
+      <td>每行有效块个数。</td>
+      <td>returnChoice=1 或 2 时必选，禁止传入 nullptr。returnChoice=0 时传 nullptr。取值是该行 sparseIndices 中大于等于 0 的个数，可直接作为 generic_block_sparse_attention 的 sparseBlockCount。</td>
+      <td>INT32</td>
+      <td>ND</td>
+      <td>2（块长 128 为 [N1, T1]，块长 16 为 [1, T1]）</td>
       <td>-</td>
     </tr>
     <tr>
@@ -690,6 +703,7 @@ int ExecuteMsaIndexScore(TensorResources& resources, aclrtStream stream,
       resources.scoreTensor,
       nullptr, // sparseIndices
       nullptr, // sparseValues
+      nullptr, // sparseCount
       workspaceSize,
       &executor);
   if (!CHECK_RET(ret == ACL_SUCCESS)) {
@@ -867,4 +881,4 @@ std::vector<int64_t> queryShapeBnsd = {B, N1, S1, D};
 std::vector<int64_t> keyShapeBnsd = {B, N2, S2, D};
 ```
 
-调用融合 TopK 时，显式传入 `returnChoice=1` 或 2 及所需的 `topk`（块长 16 时传 128），并将 `score` 设为 `nullptr`。按参数表创建 `sparseIndices`，在 `returnChoice=2` 时同时创建 `sparseValues`。压缩 key 时还须显式传入对应的 `compressFactor`，例如 4。
+调用融合 TopK 时，显式传入 `returnChoice=1` 或 2 及所需的 `topk`（块长 16 时传 128），并将 `score` 设为 `nullptr`。按参数表创建 `sparseIndices` 和 `sparseCount`，在 `returnChoice=2` 时同时创建 `sparseValues`。压缩 key 时还须显式传入对应的 `compressFactor`，例如 4。

@@ -35,7 +35,7 @@
     sparse\_indices[h,t,j]=\begin{cases}I_j&j<m\\-1&j\ge m\end{cases},\quad sparse\_values[h,t,j]=\begin{cases}score[h,t,I_j]&j<m\\-\infty&j\ge m\end{cases}
     $$
 
-    `return_choice=1`时不写`sparse_values`。`validBlocks=0`时各槽为$-1$和$-\infty$。
+    `return_choice`为1或2时同时写出`sparse_count[h,t]`，等于该行大于等于0的索引个数，也就是$m$。`return_choice=1`时不写`sparse_values`。`validBlocks=0`时各槽为$-1$和$-\infty$，`sparse_count`为0。
 
 - **主要计算过程**：
 
@@ -70,12 +70,13 @@
 | local_blocks | 属性 | 当前query附近强制保留的窗口长度，默认1。与raw score对齐时置0。 | INT64 | - |
 | layout_query | 属性 | `TND` / `BSND` / `BNSD`。默认`TND`。（aclnnMsaIndexScore接口不支持设置，固定为`TND`；aclnnMsaIndexScoreV2接口支持设置） | STRING | - |
 | pool_block_size | 属性 | 每个score归约的token数，只允许16 / 128，默认128。（aclnnMsaIndexScore接口不支持设置，固定为128；aclnnMsaIndexScoreV2接口支持设置） | INT64 | - |
-| return_choice | 属性 | 0只输出score，默认0。1只输出`sparse_indices`。2同时输出`sparse_indices`和`sparse_values`。TopK要求块长128。<term>Ascend 950PR&950DT系列产品</term>支持fp16、bf16、fp8与MXFP4；<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>只支持fp16和bf16。 | INT64 | - |
+| return_choice | 属性 | 0只输出score，默认0。1输出`sparse_indices`和`sparse_count`。2再输出`sparse_values`。TopK要求块长128。<term>Ascend 950PR&950DT系列产品</term>支持fp16、bf16、fp8与MXFP4；<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>只支持fp16和bf16。 | INT64 | - |
 | topk | 属性 | TopK的k，默认16，仅`return_choice`非0时生效，范围1到128。 | INT64 | - |
 | compress_factor | 属性 | key的压缩倍数。1表示不压缩，默认1。4表示输入时已把4个token压成一行，当前仅预留。 | INT64 | - |
 | score | 输出 | 逐block重要性分数。仅`return_choice=0`。块长128的shape为$[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]$；块长16做完head间max后head维为1，shape为$[1, T1, RoundUp(maxBlockNumPerSeq, 16)]$。 | FLOAT | ND |
 | sparse_indices | 输出 | TopK选中的逻辑block列号。`return_choice`为1或2。shape为$[N1, T1, topk]$。不足k为-1。 | INT32 | ND |
 | sparse_values | 输出 | 与`sparse_indices`对应的分数。仅`return_choice=2`。shape与indices相同。不足k为`-inf`。 | FLOAT | ND |
+| sparse_count | 输出 | 每行有效块个数，等于该行`sparse_indices`中大于等于0的个数。`return_choice`为1或2。shape为`[N1, T1]`。 | INT32 | ND |
 
 `layout_query`与`pool_block_size`由本接口固定为`TND`与128，不在`aclnnMsaIndexScore`参数表中。可配置这两项的是[aclnnMsaIndexScoreV2](./docs/aclnnMsaIndexScoreV2.md)。
 

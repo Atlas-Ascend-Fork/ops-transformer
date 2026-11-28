@@ -480,7 +480,7 @@ if register is not None:
         return ctypes.POINTER(AclTensor)()
 
     def _expand_optional_slots(input_args, kwargs):
-        """补上省掉的可选输入，并把唯一的 score 放进三个输出槽的第一格。"""
+        """补上省掉的可选输入，并把唯一的 score 放进输出槽的第一格。"""
         declared = [
             name for name in INPUT_SLOTS if isinstance(kwargs.get(name), torch.Tensor)
         ]
@@ -502,6 +502,7 @@ if register is not None:
         rest = tail[ATTR_COUNT + 1 :]
         expanded.extend(attrs)
         expanded.append(score)
+        expanded.append(_null_tensor_ptr())
         expanded.append(_null_tensor_ptr())
         expanded.append(_null_tensor_ptr())
         expanded.extend(rest)
@@ -567,7 +568,8 @@ if register is not None:
                 "char *layoutKeyOptional, int64_t sparseMode, int64_t initBlocks, int64_t localBlocks, "
                 "int64_t returnChoice, int64_t topk, int64_t compressFactor, "
                 "const aclTensor *scoreOptional, const aclTensor *sparseIndicesOptional, "
-                "const aclTensor *sparseValuesOptional, uint64_t *workspaceSize, aclOpExecutor **executor)"
+                "const aclTensor *sparseValuesOptional, const aclTensor *sparseCountOptional, "
+                "uint64_t *workspaceSize, aclOpExecutor **executor)"
             )
 
     @register("function_msa_index_score")

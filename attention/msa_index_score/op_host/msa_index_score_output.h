@@ -20,6 +20,7 @@ namespace MsaIndexScoreOutput {
 constexpr size_t SCORE = 0;
 constexpr size_t INDICES = 1;
 constexpr size_t VALUES = 2;
+constexpr size_t COUNT = 3;
 constexpr size_t ABSENT = std::numeric_limits<size_t>::max();
 
 // Runtime output indices can shift when an optional IR output is omitted.
@@ -46,6 +47,13 @@ inline void SetShape(gert::Shape* shape, bool enabled, int64_t heads, int64_t to
 {
     if (shape != nullptr) {
         *shape = enabled ? gert::Shape{heads, totalQ, width} : gert::Shape{0};
+    }
+}
+
+inline void SetShape2(gert::Shape* shape, bool enabled, int64_t heads, int64_t totalQ)
+{
+    if (shape != nullptr) {
+        *shape = enabled ? gert::Shape{heads, totalQ} : gert::Shape{0};
     }
 }
 

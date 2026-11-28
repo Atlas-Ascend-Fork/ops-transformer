@@ -23,8 +23,8 @@ extern aclnnStatus aclnnInnerMsaIndexScoreGetWorkspaceSize(
     const aclTensor* actualSeqQlenOptional, const aclTensor* actualSeqKlenOptional, char* layoutKeyOptional,
     int64_t sparseMode, int64_t initBlocks, int64_t localBlocks, char* layoutQueryOptional, int64_t poolBlockSize,
     int64_t returnChoice, int64_t topk, int64_t compressFactor, const aclTensor* scoreOptional,
-    const aclTensor* sparseIndicesOptional, const aclTensor* sparseValuesOptional, uint64_t* workspaceSize,
-    aclOpExecutor** executor);
+    const aclTensor* sparseIndicesOptional, const aclTensor* sparseValuesOptional, const aclTensor* sparseCountOptional,
+    uint64_t* workspaceSize, aclOpExecutor** executor);
 
 extern aclnnStatus aclnnInnerMsaIndexScore(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                            const aclrtStream stream);
@@ -39,7 +39,8 @@ aclnnStatus aclnnMsaIndexScoreGetWorkspaceSize(
     const aclTensor* actualSeqQlenOptional, const aclTensor* actualSeqKlenOptional, char* layoutKeyOptional,
     int64_t sparseMode, int64_t initBlocks, int64_t localBlocks, int64_t returnChoice, int64_t topk,
     int64_t compressFactor, const aclTensor* scoreOptional, const aclTensor* sparseIndicesOptional,
-    const aclTensor* sparseValuesOptional, uint64_t* workspaceSize, aclOpExecutor** executor)
+    const aclTensor* sparseValuesOptional, const aclTensor* sparseCountOptional, uint64_t* workspaceSize,
+    aclOpExecutor** executor)
 {
     aclDataType queryType = ACL_DT_UNDEFINED;
     if (query != nullptr && aclGetDataType(query, &queryType) == ACL_SUCCESS && queryType == ACL_INT8) {
@@ -50,7 +51,7 @@ aclnnStatus aclnnMsaIndexScoreGetWorkspaceSize(
         query, key, startLoc, blockTableOptional, queryScaleOptional, keyScaleOptional, attenMaskOptional,
         actualSeqQlenOptional, actualSeqKlenOptional, layoutKeyOptional, sparseMode, initBlocks, localBlocks,
         const_cast<char*>("TND"), 128, returnChoice, topk, compressFactor, scoreOptional, sparseIndicesOptional,
-        sparseValuesOptional, workspaceSize, executor);
+        sparseValuesOptional, sparseCountOptional, workspaceSize, executor);
 }
 
 aclnnStatus aclnnMsaIndexScore(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)

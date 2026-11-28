@@ -209,7 +209,7 @@ if _TORCHAIR_AVAILABLE:
             "topk": attr.Int(16),
             "compress_factor": attr.Int(compress_factor),
         }
-        outputs = ["score", "sparse_indices", "sparse_values"]
+        outputs = ["score", "sparse_indices", "sparse_values", "sparse_count"]
         return ge_op(
             op_type="MsaIndexScore",
             inputs=inputs,
@@ -243,7 +243,8 @@ if _TORCHAIR_AVAILABLE:
             .attr("compress_factor", attr.Int(1))
             .output("score", "DT_FLOAT, DT_FLOAT16")
             .output("sparse_indices", "DT_INT32")
-            .output("sparse_values", "DT_FLOAT, DT_FLOAT16"),
+            .output("sparse_values", "DT_FLOAT, DT_FLOAT16")
+            .output("sparse_count", "DT_INT32"),
         )
 
     @register_fx_node_ge_converter(

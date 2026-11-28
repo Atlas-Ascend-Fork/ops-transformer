@@ -191,8 +191,8 @@ cann_ops_transformer.msa_index_score(
 ## Output
 
 - `return_choice=0`: `[N1, T1, RoundUp(MB,16)]` float32 score.
-- `return_choice=1`: `[N1, T1, topk]` int32 indices. Slots past the valid count are -1.
-- `return_choice=2`: indices and float32 values of the same shape. Invalid values are $-\infty$.
+- `return_choice=1`: `[N1, T1, topk]` int32 indices and `[N1, T1]` int32 `sparse_count`. Slots past the valid count are -1.
+- `return_choice=2`: indices, float32 values of the same shape, and `sparse_count`. Invalid values are $-\infty$. `sparse_count[h,t]` is the number of indices in that row that are greater than or equal to 0.
 
 ## Example
 

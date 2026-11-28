@@ -14,7 +14,7 @@
  *
  * 入参顺序与 op_def / aclnn 对齐：
  *   query, key, start_loc, block_table, query_scale, key_scale, atten_mask, actual_seq_qlen, actual_seq_klen, score,
- *   sparse_indices, sparse_values, workspace, tiling
+ *   sparse_indices, sparse_values, sparse_count, workspace, tiling
  * atten_mask 仅做 host 校验；device 侧按 sparse_mode 解析因果，不消费该 GM。
  */
 
@@ -35,7 +35,7 @@ using namespace MsaIndexScoreNs;
     do { \
         MsaIndexScoreKernel<ElementQ, IsQuant> op; \
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices, \
-                sparseValues, userWs, tilingData); \
+                sparseValues, sparseCount, userWs, tilingData); \
         op.Process(); \
     } while (0)
 
@@ -44,7 +44,7 @@ using namespace MsaIndexScoreNs;
     do { \
         MsaIndexScoreKernel<ElementQ, false, true> op; \
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices, \
-                sparseValues, userWs, tilingData); \
+                sparseValues, sparseCount, userWs, tilingData); \
         op.Process(); \
     } while (0)
 
@@ -52,7 +52,7 @@ using namespace MsaIndexScoreNs;
     do { \
         MsaIndexScoreKernel<ElementQ, false, false, (MSA_A5_USE_C2UB != 0), false, false, true> op; \
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices, \
-                sparseValues, userWs, tilingData); \
+                sparseValues, sparseCount, userWs, tilingData); \
         op.Process(); \
     } while (0)
 
@@ -61,7 +61,7 @@ using namespace MsaIndexScoreNs;
         MsaIndexScoreKernel<ElementQ, false, true, (MSA_A5_USE_C2UB != 0), false, false, false, false, false, true> \
             op; \
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices, \
-                sparseValues, userWs, tilingData); \
+                sparseValues, sparseCount, userWs, tilingData); \
         op.Process(); \
     } while (0)
 
@@ -69,7 +69,7 @@ using namespace MsaIndexScoreNs;
     do { \
         if (!RunNativeFp8Pipeline<ElementQ, Fused, Balanced, Bypass>(query, key, blockTable, actualSeqQlen, \
                                                                      actualSeqKlen, score, userWs, sparseIndices, \
-                                                                     sparseValues, tilingData)) { \
+                                                                     sparseValues, sparseCount, tilingData)) { \
             MSA_INVOKE_KERNEL_COMPRESSED_PAGE(ElementQ); \
         } \
     } while (0)
@@ -80,14 +80,14 @@ using namespace MsaIndexScoreNs;
                             true> \
             op; \
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices, \
-                sparseValues, userWs, tilingData); \
+                sparseValues, sparseCount, userWs, tilingData); \
         op.Process(); \
     } while (0)
 
 #if (__CCE_AICORE__ != 310)
 __aicore__ inline void RunA8c8Topk(const MsaIndexScoreTilingData* __restrict tiling, GM_ADDR score,
-                                   GM_ADDR sparseIndices, GM_ADDR sparseValues, GM_ADDR actualSeqQlen,
-                                   GM_ADDR actualSeqKlen, bool writeValues)
+                                   GM_ADDR sparseIndices, GM_ADDR sparseValues, GM_ADDR sparseCount,
+                                   GM_ADDR actualSeqQlen, GM_ADDR actualSeqKlen, bool writeValues)
 {
     // Every launched AIC/AIV reaches this boundary, even if it scored no rows.
     AscendC::SyncAll<false>();
@@ -107,7 +107,7 @@ __aicore__ inline void RunA8c8Topk(const MsaIndexScoreTilingData* __restrict til
         Catlass::Arch::Resource<Catlass::Arch::AtlasA2> resource;
         MsaIndexScoreTopk<true> topk;
         topk.Run(tiling, gScore, gIndices, gValues, gQlen, gKlen, writeValues,
-                 resource.ubBuf.template GetBufferByByte<float>(0));
+                 resource.ubBuf.template GetBufferByByte<float>(0), sparseCount);
     }
 }
 #endif
@@ -116,8 +116,8 @@ template <uint32_t schMode>
 __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR startLoc, GM_ADDR blockTable,
                                            GM_ADDR queryScale, GM_ADDR keyScale, GM_ADDR attenMask,
                                            GM_ADDR actualSeqQlen, GM_ADDR actualSeqKlen, GM_ADDR score,
-                                           GM_ADDR sparseIndices, GM_ADDR sparseValues, GM_ADDR workspace,
-                                           GM_ADDR tiling)
+                                           GM_ADDR sparseIndices, GM_ADDR sparseValues, GM_ADDR sparseCount,
+                                           GM_ADDR workspace, GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
     KERNEL_TASK_TYPE(36, KERNEL_TYPE_MIX_AIC_1_1);
@@ -174,19 +174,19 @@ __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR s
                             MsaBatchPacketPolicy::Uniform>
             op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData, queryScale);
+                sparseValues, sparseCount, userWs, tilingData, queryScale);
         op.Process();
     } else if constexpr (scoreMode == MSA_TILING_KEY_INT8_INT8_FIXED_WIDE_SCORE) {
         MsaIndexScoreKernel<int8_t, true, true, false, false, true> op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData, queryScale);
+                sparseValues, sparseCount, userWs, tilingData, queryScale);
         op.Process();
     } else if constexpr (scoreMode == MSA_TILING_KEY_INT8_INT8_FIXED_MIX_ONE) {
         constexpr bool MIX_ONE_WIDE = true;
         constexpr bool PLAN_REQUESTS = true;
         MsaIndexScoreKernel<int8_t, true, true, true, false, false, MIX_ONE_WIDE, PLAN_REQUESTS> op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData, queryScale);
+                sparseValues, sparseCount, userWs, tilingData, queryScale);
         op.Process();
     } else if constexpr (scoreMode == MSA_TILING_KEY_INT8_INT8_FIXED_PAIRED) {
         constexpr bool MIX_ONE_WIDE = false;
@@ -195,17 +195,17 @@ __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR s
                             MsaBatchPacketPolicy::Uniform>
             op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData, queryScale);
+                sparseValues, sparseCount, userWs, tilingData, queryScale);
         op.Process();
     } else if constexpr (scoreMode == MSA_TILING_KEY_INT8_INT8_FIXED_GROUP_MASK) {
         MsaIndexScoreKernel<int8_t, true, true, false, true> op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData, queryScale);
+                sparseValues, sparseCount, userWs, tilingData, queryScale);
         op.Process();
     } else if constexpr (scoreMode == MSA_TILING_KEY_INT8_INT8_FIXED_PAIRED_GROUP_MASK) {
         MsaIndexScoreKernel<int8_t, true, true, true, true> op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData, queryScale);
+                sparseValues, sparseCount, userWs, tilingData, queryScale);
         op.Process();
 #endif
 #if (__CCE_AICORE__ == 310)
@@ -230,7 +230,7 @@ __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR s
     } else if constexpr (schMode == MSA_TILING_KEY_MXFP4_TOPK) {
         MsaMxFp4Kernel<true> op;
         op.Init(query, key, blockTable, queryScale, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, userWs,
-                tilingData, sparseIndices, sparseValues);
+                tilingData, sparseIndices, sparseValues, sparseCount);
         op.ProcessFp4();
     } else if constexpr (schMode == MSA_TILING_KEY_MXFP4) {
         MsaMxFp4Kernel<> op;
@@ -240,7 +240,7 @@ __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR s
     } else if constexpr (schMode == MSA_TILING_KEY_MXFP4_BLK16) {
         MsaMxFp4Kernel<> op;
         op.Init(query, key, blockTable, queryScale, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, userWs,
-                tilingData, sparseIndices, sparseValues);
+                tilingData, sparseIndices, sparseValues, sparseCount);
         op.ProcessBlock16();
     } else if constexpr (schMode == MSA_TILING_KEY_MXFP4_PREFILL) {
         MsaMxFp4Kernel<> op;
@@ -306,19 +306,20 @@ __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR s
                             true>
             op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData);
+                sparseValues, sparseCount, userWs, tilingData);
         op.Process();
     } else if constexpr (schMode == MSA_TILING_KEY_FP16_TOPK_A2) {
         MsaIndexScoreKernel<half, false, false, false, false, false, false, false, MsaBatchPacketPolicy::Disabled, true>
             op;
         op.Init(query, key, blockTable, keyScale, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                sparseValues, userWs, tilingData);
+                sparseValues, sparseCount, userWs, tilingData);
         op.Process();
 #endif
     }
 #if (__CCE_AICORE__ != 310)
     if constexpr (a8c8Topk) {
-        RunA8c8Topk(tilingData, score, sparseIndices, sparseValues, actualSeqQlen, actualSeqKlen, writeA8c8TopkValues);
+        RunA8c8Topk(tilingData, score, sparseIndices, sparseValues, sparseCount, actualSeqQlen, actualSeqKlen,
+                    writeA8c8TopkValues);
     }
 #endif
 }

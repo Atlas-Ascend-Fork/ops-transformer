@@ -92,7 +92,7 @@ public:
 
     __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR blockTable, GM_ADDR scale, GM_ADDR actualSeqQlen,
                                 GM_ADDR actualSeqKlen, GM_ADDR startLoc, GM_ADDR score, GM_ADDR sparseIndices,
-                                GM_ADDR sparseValues, GM_ADDR workspace,
+                                GM_ADDR sparseValues, GM_ADDR sparseCount, GM_ADDR workspace,
                                 const MsaIndexScoreTilingData* __restrict tiling, GM_ADDR queryScale = nullptr)
     {
         tiling_ = tiling;
@@ -133,9 +133,11 @@ public:
             if (tiling_->returnChoice == MSA_RETURN_INDICES_VALUES) {
                 gSparseValues_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(sparseValues));
             }
+            sparseCount_ = sparseCount;
         } else {
             (void)sparseIndices;
             (void)sparseValues;
+            (void)sparseCount;
             gScore_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(score));
         }
         gWorkspace_.SetGlobalBuffer(reinterpret_cast<__gm__ ElementS*>(workspace));
@@ -924,7 +926,7 @@ private:
             MsaIndexScoreTopk<> topk;
             auto ubTrunk = resource.ubBuf.template GetBufferByByte<float>(0);
             topk.Run(tiling_, gScore_, gSparseIndices_, gSparseValues_, gActualSeqQlen_, gActualSeqKlen_,
-                     tiling_->returnChoice == MSA_RETURN_INDICES_VALUES, ubTrunk);
+                     tiling_->returnChoice == MSA_RETURN_INDICES_VALUES, ubTrunk, sparseCount_);
         }
     }
 
@@ -946,6 +948,7 @@ private:
     AscendC::GlobalTensor<int32_t> gStartLoc_;
     AscendC::GlobalTensor<float> gScore_;
     AscendC::GlobalTensor<int32_t> gSparseIndices_;
+    GM_ADDR sparseCount_ = nullptr;
     AscendC::GlobalTensor<float> gSparseValues_;
     AscendC::GlobalTensor<ElementS> gWorkspace_;
 };
