@@ -30,8 +30,21 @@ The `docs` directory structure is described as follows:
   │   ├── ...
   ├── menu_aclnn_api.md                  # Full aclnn API index file
   ├── menu_torch_api.md                  # Full torch_extension API index file
+  ├── ascend950_op_list.md               # Ascend 950 operator list
   ├── op_api_list.md                     # aclnn API list
   ├── op_list.md                         # Full operator list
+  └── torch_api_list.md                  # torch_extension API list
+├── en                                   # English documentation
+  ├── context                            # Common documentation
+  ├── debug                              # Operator debugging guides
+  ├── develop                            # Operator development guides
+  ├── figures                            # Image directory
+  ├── install                            # Environment installation and compilation guides
+  ├── invocation                         # Operator invocation guides
+  ├── menu_aclnn_api.md                  # aclnn API index file
+  ├── menu_torch_api.md                  # torch_extension API index file
+  ├── op_api_list.md                     # aclnn API list
+  ├── op_list.md                         # Operator list
   └── torch_api_list.md                  # torch_extension API list
 ├── CONTRIBUTING_DOCS.md                 # Document contribution description
 ├── QUICKSTART.md                        # Quick start

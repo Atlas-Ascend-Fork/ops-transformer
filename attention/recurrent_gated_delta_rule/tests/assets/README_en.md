@@ -61,7 +61,7 @@ attention/recurrent_gated_delta_rule/tests/
 
 #### impl/golden.py
 
-- Loads the CPU golden in `tests/pytest/recurrent_gated_delta_rule_golden.py` through `importlib` without implementing it again.
+- Loads the CPU golden in [tests/pytest/recurrent_gated_delta_rule_golden.py](../pytest/recurrent_gated_delta_rule_golden.py) through `importlib` without implementing it again.
 - **e2e adapter** `cpu_recurrent_gated_delta_rule`: Uses the `*args, **kwargs` signature, is compatible with positional and keyword arguments according to `_PARAM_ORDER`, and returns `(output, state)`.
 - **aclnn adapter** `aclnn_cpu_recurrent_gated_delta_rule`: Aligns the parameter order with the function signature of `aclnnRecurrentGatedDeltaRuleGetWorkspaceSize`, returns the `[output, state_out]` list, and is consistent with the order of `output_tensor_indexes`.
 
@@ -82,7 +82,7 @@ attention/recurrent_gated_delta_rule/tests/
 
 ### convert_rdv_to_csv.py
 
-- Converts all RDV cases (148 cases) in `tests/pytest/test_recurrent_gated_delta_rule_paramset_rdv.py` to TTK CSV.
+- Converts all RDV cases (148 cases) in [tests/pytest/test_recurrent_gated_delta_rule_paramset_rdv.py](../pytest/test_recurrent_gated_delta_rule_paramset_rdv.py) to TTK CSV.
 - Covers combinations of contiguous/non-contiguous state and bf16/fp32 state dtypes. A non-contiguous state is described by `tensor_storage_shapes`/`tensor_view_strides`/`tensor_view_offsets`.
 - Generates two CSV files: E2E mode (`recurrent_gated_delta_rule_rdv.csv`) and ACLNN mode (`aclnn_recurrent_gated_delta_rule_rdv.csv`).
 

@@ -687,7 +687,7 @@ REG_OP(FlashAttentionScoreGrad)
   - When sparse_mode is set to 1, 2, 3, or 5, the user-configured pre_tockens and next_tockens do not take effect.
   - When sparse_mode is set to 0 or 4, ensure that atten_mask is consistent with the ranges specified by pre_tockens and next_tockens.
   - If you do not specify a value, it is recommended to pass 0.
-  - For details about different sparse modes, see [Sparse Mode Description](../../../docs/zh/context/sparse_mode_introduction_en.md).
+  - For details about different sparse modes, see [Sparse Mode Description](../../../docs/en/context/sparse_mode_introduction.md).
 - In some scenarios, an excessive amount of computation may cause the operator to time out (an aicore error is reported, with errorStr set to timeout or trap error). In this case, axis splitting is recommended. Note: The amount of computation is affected by parameters such as B, S, N, and D. The larger the values, the greater the amount of computation.
 - <term>Ascend 950PR&950DT products</term>:
     - When query_rope and key_rope are not empty, the per-head D of query and key must be 128, the per-head D of value and dy must be 128, and the per-head D of query_rope and key_rope must be 64.

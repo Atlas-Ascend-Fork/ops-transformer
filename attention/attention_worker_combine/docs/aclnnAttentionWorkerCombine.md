@@ -162,7 +162,7 @@ aclnnStatus aclnnAttentionWorkerCombine(
     <tr>
       <td>needSchedule</td>
       <td>输入</td>
-      <td>指定是否等待token数据填充完成后再执行。0表示不等待；1表示等待。</td>
+      <td>指定微批次的选择和等待方式。0表示使用当前micro_batch_id，不等待；1表示选择 (micro_batch_id + 1) % micro_batch_num 对应的微批次，等待其token数据就绪后计算，并在计算后清除该批次的就绪标志、将选中的ID写回scheduleContext。启用调度时，micro_batch_num必须大于0；复用该批次前需重新准备数据和就绪标志。</td>
       <td>取值为0或1。</td>
       <td>INT64</td>
       <td>-</td>

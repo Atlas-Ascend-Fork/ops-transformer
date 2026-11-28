@@ -31,6 +31,8 @@
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
   $$
 
+  其中，`scale`为由参数`scaleValue`控制的缩放系数；`atten_mask`为注意力掩码，对应参数`attenMaskOptional`，当前仅支持传入`nullptr`。
+
   BlockSparseAttention输入query、key、value的数据排布格式支持从多种维度排布解读，可通过qInputLayout和kvInputLayout传入。
 
   - B：表示输入样本批量大小（Batch）

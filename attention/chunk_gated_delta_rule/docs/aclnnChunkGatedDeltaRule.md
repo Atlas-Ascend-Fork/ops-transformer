@@ -192,7 +192,7 @@ aclnnStatus aclnnChunkGatedDeltaRule(
     <tr>
       <td>finalState</td>
       <td>输出</td>
-      <td>最终状态矩阵S_t。</td>
+      <td>最终状态矩阵S_L。</td>
       <td>-</td>
       <td>BFLOAT16、FLOAT32</td>
       <td>ND</td>
@@ -447,7 +447,7 @@ int main()
     std::vector<int16_t> betaHostData(GetShapeSize(gammaShape));
     std::vector<int32_t> actSeqLenHostData(batchSize, seqLength);
     int16_t bfloatHalf = 16128;   // int16_t的16128的二进制对应bfloat16的0.5
-    int16_t bfloatQuarter = 15936; // int16_t的15936的二进制对应bfloat16的0.25
+    int16_t bfloatQuarter = 16000; // int16_t的16000的二进制对应bfloat16的0.25
     for (int i = 0; i < initStateHostData.size(); i++) {
         initStateHostData[i] = bfloatQuarter;
     }

@@ -82,7 +82,7 @@ English | [简体中文](./README.md)
     <tr>
     <td class="tg-0pky">need_schedule</td>
     <td class="tg-0pky">Attribute</td>
-    <td class="tg-0pky">Specifies whether to wait until the token data is filled before execution. 0 indicates not waiting, and 1 indicates waiting.</td>
+    <td class="tg-0pky">Specifies how the micro-batch is selected and whether to wait for it. 0 uses the current micro_batch_id without waiting. 1 selects the micro-batch at (micro_batch_id + 1) % micro_batch_num, waits for its token data to be ready, and after computation clears its ready flags and writes the selected ID back to schedule_context. When scheduling is enabled, micro_batch_num must be greater than 0; data and ready flags must be prepared again before the micro-batch is reused.</td>
     <td class="tg-0pky">Int</td>
     <td class="tg-0pky">-</td>
   </tr>

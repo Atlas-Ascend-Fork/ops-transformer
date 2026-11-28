@@ -639,7 +639,7 @@ aclnnStatus CreateArgs(const ArgScenario &scenario, ArgContext &context)
     context.numHeadsQ = 1;
     context.numHeadsK = 1;
     context.headDim = 128;
-    context.topk = 0;
+    context.topk = 128;
     context.quantMode = 2; // 2: per-token-head / 3: group-scaling
     ret = CreateTensor(aclDataType::ACL_INT32, { QLI_V2_METADATA_TOTAL_SIZE }, context.metadata);     // 1024: Fix size
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create meta failed. Error: %d", ret);
@@ -690,8 +690,6 @@ int main() {
 
     // 2. 构造输入与输出，需要根据API的接口定义构造
     ArgScenario scenario {};
-    scenario.hasCuSeq = true;
-    scenario.hasSeqused = true;
     ArgContext context {};
     ret = CreateArgs(scenario, context);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create input arguments failed. ERROR: %d", ret);
@@ -702,12 +700,13 @@ int main() {
     uint64_t workspaceSize = 0;
     aclOpExecutor *executor = nullptr;
     void *workspaceAddr = nullptr;
+    constexpr int64_t candidateBlockSize = 8;
     ret = aclnnQuantSparseLightningIndexerMetadataGetWorkspaceSize(
         context.cuSeqlensQOptional.data, context.cuSeqlensKOptional.data, context.sequsedQOptional.data,
-        context.sequsedKOptional.data, context.cmpResidualKOptional.data,
+        context.sequsedKOptional.data, context.cmpResidualKOptional.data, nullptr,
         context.numHeadsQ, context.numHeadsK, context.headDim, context.topk, context.quantMode,
         context.batchSize, context.maxSeqlenQ, context.maxSeqlenK, context.layoutQOptional,
-        context.layoutKOptional, context.maskMode, context.cmpRatio,
+        context.layoutKOptional, context.maskMode, context.cmpRatio, candidateBlockSize,
         context.metadata.data, &workspaceSize, &executor);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret,
         "aclnnQuantSparseLightningIndexerMetadataGetWorkspaceSize failed. ERROR: %d\n", ret);

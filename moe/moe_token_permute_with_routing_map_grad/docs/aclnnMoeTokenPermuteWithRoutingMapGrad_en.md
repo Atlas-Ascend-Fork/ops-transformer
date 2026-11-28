@@ -28,40 +28,44 @@
 - **Description**: Backward propagation of aclnnMoeTokenPermuteWithRoutingMap.
 - **Formula**:
 
-    $$
-    permuteTokenId, outIndex= sortedIndices.sort(dim=-1)
-    $$
+    The following formulas describe nonempty inputs. `tokensGradOut` is computed independently of whether the probability gradient is provided. First, initialize `tokensGradOut` to zero:
 
     $$
-    capacity = permutedTokensOutputGrad.size(0) / numExperts
+    tokensGradOut= zeros((tokensNum, hidden_size), dtype=permutedTokenOutputGrad.dtype, device=permutedTokenOutputGrad.device)
     $$
 
-    - When probs is not None:
+    - When `dropAndPad` is false, `topK_num = permutedTokenOutputGrad.size(0) / tokensNum`. For each element of `sortedIndices` with `sortedIndices[i] >= 0`:
 
     $$
-    probsGradOutOptional = zeros(tokens_num, numExperts)
+    tokensGradOut[i / topK\_num] += permutedTokenOutputGrad[sortedIndices[i]]
     $$
 
-    - When dropPaddedMode is true:
+    Here, `i / topK_num` uses integer division.
+
+    - When `dropAndPad` is true, the values of `sortedIndices` are token indices. For each element:
+
+    $$
+    tokensGradOut[sortedIndices[i]] += permutedTokenOutputGrad[i]
+    $$
+
+    - When both `permutedProbsOutputGradOptional` and `probsGradOutOptional` are non-null, compute the probability gradient:
+
+    $$
+    probsGradOutOptional = zeros(tokensNum, numExperts)
+    $$
+
+    - When dropAndPad is true, `capacity = permutedTokenOutputGrad.size(0) / numExperts`:
 
     $$
     probsGradOutOptional [sortedIndices[i], i/capacity] = permutedProbsOutputGradOptional[i]
     $$
 
-    - When dropPaddedMode is false:
+    - When dropAndPad is false:
 
     $$
-    probsGradOutOptional = maskedscatter(probsGradOutOptional,routingMapOptional, permutedProbsOutputGradOptional)
+    probsGradOutOptional = transpose(maskedscatter(transpose(probsGradOutOptional), transpose(routingMapOptional), permutedProbsOutputGradOptional))
     $$
-    - probs is None:
-
-    $$
-    tokenGradOut= zeros(restoreShapeOptional, dtype=permutedTokens.dtype, device=permutedTokens.device)
-    $$
-
-    $$
-    tokenGradOut[permuteTokenId[i]] += permutedTokens[outIndex[i]]
-    $$
+    Here, transpose exchanges the token and expert dimensions, and maskedscatter fills values in expert-major order.
 
 ## Function Prototype
 
@@ -69,14 +73,14 @@ Each operator uses a [two-phase API](../../../docs/en/context/two_phase_api.md).
 
 ```c++
 aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGradGetWorkspaceSize(
-    const aclTensor *permutedTokensOutputGrad,
+    const aclTensor *permutedTokenOutputGrad,
     const aclTensor *permutedProbsOutputGradOptional,
     const aclTensor *sortedIndices,
     const aclTensor *routingMapOptional,
-    int64_t          experts_num,
-    int64_t          tokens_num,
+    int64_t          numExperts,
+    int64_t          tokensNum,
     bool             dropAndPad,
-    aclTensor       *tokenGradOut,
+    aclTensor       *tokensGradOut,
     aclTensor       *probsGradOutOptional,
     uint64_t        *workspaceSize,
     aclOpExecutor   **executor)
@@ -116,14 +120,14 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
   </tr></thead>
   <tbody>
   <tr>
-      <td>permutedTokensOutputGrad</td>
+      <td>permutedTokenOutputGrad</td>
       <td>Input</td>
       <td>Gradient of the forward output permutedTokens.</td>
       <td>shape supports 2D dimensions; empty tensor is not supported. topK_num indicates the maximum quantity of experts that can be selected for each token, and capacity indicates the quantity of tokens selected by each expert.</td>
       <td>BFLOAT16, FLOAT16, FLOAT32</td>
       <td>ND</td>
-      <td>      • Non-dropAndPad mode: (tokens_num * topK_num, hidden_size)<br>
-      • dropAndPad mode: (experts_num * capacity, hidden_size)</td>
+      <td>      • Non-dropAndPad mode: (tokensNum * topK_num, hidden_size)<br>
+      • dropAndPad mode: (numExperts * capacity, hidden_size)</td>
       <td>√</td>
   </tr>
   <tr>
@@ -132,22 +136,22 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>Gradient of the forward output permutedProbs.</td>
       <td>      •  If not passed, probsGradOutOptional does not need to be computed;<br>
       •  The shape is a 1D dimension, where topK_num indicates the upper limit of the quantity of experts that can be selected by each token, and capacity indicates the quantity of tokens selected by each expert.<br>
-      •  The data type must be the same as that of permutedTokensOutputGrad, or FLOAT is supported when permutedTokensOutputGrad is BFLOAT16.</td>
+      •  The data type must be the same as that of permutedTokenOutputGrad, or FLOAT is supported when permutedTokenOutputGrad is BFLOAT16.</td>
       <td>BFLOAT16, FLOAT16, FLOAT32</td>
       <td>ND</td>
-      <td>      •  Non-dropAndPad mode: (tokens_num * topK_num)<br>
-      •  dropAndPad mode: (experts_num * capacity)</td>
+      <td>      •  Non-dropAndPad mode: (tokensNum * topK_num)<br>
+      •  dropAndPad mode: (numExperts * capacity)</td>
       <td>√</td>
   </tr>
   <tr>
       <td>sortedIndices</td>
       <td>Input</td>
       <td>Sorted index values.</td>
-      <td>Non-dropAndPad mode: the index value range is [0, tokens_num * topK_num - 1] or -1, where -1 indicates an invalid slot that does not participate in the computation, and topK_num indicates the upper limit of the quantity of experts selected by each token; dropAndPad mode: the index value range is [0, experts_num * capacity - 1], and capacity indicates the quantity of tokens selected by each expert.</td>
+      <td>Non-dropAndPad mode: the index value range is [0, tokensNum * topK_num - 1] or -1, where -1 indicates an invalid slot that does not participate in the computation, and topK_num indicates the upper limit of the quantity of experts selected by each token; dropAndPad mode: indices identify tokens and range from 0 to tokensNum - 1, and capacity indicates the quantity of tokens selected by each expert.</td>
       <td>INT32</td>
       <td>ND</td>
-      <td>      • non-dropAndPad mode: (tokens_num * topK_num,)<br>
-      • dropAndPad mode: (experts_num * capacity)</td>
+      <td>      • non-dropAndPad mode: (tokensNum * topK_num,)<br>
+      • dropAndPad mode: (numExperts * capacity)</td>
       <td>√</td>
   </tr>
   <tr>
@@ -157,11 +161,11 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>The shape must be a 2D tensor. In non-dropAndPad mode, each row must contain no more than topK true or 1 values.</td>
       <td>INT8, bool (0 and 1 for INT8, true and false for bool)</td>
       <td>ND</td>
-      <td>(tokens_num, experts_num)</td>
+      <td>(tokensNum, numExperts)</td>
       <td>√</td>
   </tr>
   <tr>
-      <td>experts_num</td>
+      <td>numExperts</td>
       <td>Input</td>
       <td>Indicates the number of experts participating in the computation.</td>
       <td>-</td>
@@ -171,7 +175,7 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>-</td>
   </tr>
       <tr>
-      <td>tokens_num</td>
+      <td>tokensNum</td>
       <td>Input</td>
       <td>Indicates the number of tokens participating in the computation.</td>
       <td>-</td>
@@ -184,20 +188,20 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>dropAndPad</td>
       <td>Input</td>
       <td>-</td>
-      <td>true indicates that dropPaddedMode is enabled, and false indicates that dropPaddedMode is disabled.</td>
+      <td>true indicates that dropAndPad is enabled, and false indicates that dropAndPad is disabled.</td>
       <td>bool</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
   </tr>
   <tr>
-      <td>tokenGradOut</td>
+      <td>tokensGradOut</td>
       <td>Output</td>
       <td>Gradient of input permutedTokens.</td>
       <td>Must be a tensor with 2 dimensions.</td>
       <td>BFLOAT16, FLOAT16, FLOAT32</td>
       <td>ND</td>
-      <td>(tokens_num, hidden_size)</td>
+      <td>(tokensNum, hidden_size)</td>
       <td>×</td>
   </tr>
   <tr>
@@ -207,7 +211,7 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>The shape supports 2D dimensions.</td>
       <td>Same as permutedProbsOutputGradOptional</td>
       <td>ND</td>
-      <td>(tokens_num, experts_num)</td>
+      <td>(tokensNum, numExperts)</td>
       <td>×</td>
   </tr>
   <tr>
@@ -314,7 +318,7 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
 - Deterministic computation:
   - aclnnMoeTokenPermuteWithRoutingMapGrad defaults to a non-deterministic implementation. Deterministic computation can be enabled through aclrtSetSysParamOpt.
 
-- For non-dropPaddedMode use cases, topK_num <= 512
+- For non-dropAndPad use cases, topK_num <= 512
 
 ## Example
 

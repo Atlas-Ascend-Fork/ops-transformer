@@ -70,7 +70,7 @@
    dK\mathop{{}}\nolimits_{{:t,:}}= \left( dS\mathop{{}}\nolimits_{{t,:}} \left) \mathop{{}}\nolimits^{{T}}@q\mathop{{}}\nolimits_{{:t,:}}\right. \right.
    $$
 
-   Where S is the result of softmax on the QK matrix.
+   Where S is the matrix product $q_{t,:}@(K_{:t,:})^T$ before softmax.
 
 <!-- - **NOTE**:
    <blockquote>The data layout formats of query, key, and value can be interpreted in multiple dimensions: B (Batch) indicates the batch size of input samples, S (Seq-Length) indicates the sequence length of input samples, H (Head-Size) indicates the size of the hidden layer, N (Head-Num) indicates the number of heads, D (Head-Dim) indicates the size of the smallest unit of the hidden layer, and D=H/N holds. T indicates the cumulative sum of sequence lengths of input samples across all batches.
@@ -565,7 +565,7 @@ aclnnStatus aclnnSparseLightningIndexerGradKLLoss(
         </tr>
         <tr>
             <td>3</td>
-            <td>Mask in rightDownCausal mode, corresponding to the lower-triangular use case divided by the right vertex. The optimized attenmask matrix must be passed in.</td>
+            <td>The rightDownCausal mode corresponds to a bottom-right-aligned lower-triangular use case. This API does not require an attenmask matrix.</td>
             <td>Supported</td>
   </tr>
         <tr>

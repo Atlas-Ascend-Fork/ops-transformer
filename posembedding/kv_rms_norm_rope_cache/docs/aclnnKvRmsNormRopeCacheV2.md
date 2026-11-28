@@ -215,7 +215,7 @@ aclnnStatus aclnnKvRmsNormRopeCacheV2(
       <td>gamma</td>
       <td>输入</td>
       <td>公式中用于rms_norm计算的输入数据。</td>
-      <td><ul><li>与kv数据类型一致，shape为1维[Dv,]。</li><li>不支持空Tensor。</li></ul></td>
+      <td><ul><li>与kv数据类型一致，shape为1维：V1场景为[Dv,]，V2场景为[Dk,]（192）。</li><li>不支持空Tensor。</li></ul></td>
       <td>BFLOAT16、FLOAT16</td>
       <td>ND</td>
       <td>1</td>
@@ -345,7 +345,7 @@ aclnnStatus aclnnKvRmsNormRopeCacheV2(
       <td>isOutputKv</td>
       <td>属性</td>
       <td>kRopeOut和cKvOut输出控制标记。</td>
-      <td>当isOutputKv为true时，表示需输出kRopeOut和cKvOut。建议设为false。</td>
+      <td>当isOutputKv为true时，表示需输出kRopeOut和cKvOut。建议设为false；在Atlas A3系列产品上，即使设为false，kRopeOut和cKvOut仍需传入非空Tensor描述符。</td>
       <td>bool</td>
       <td>-</td>
       <td>-</td>

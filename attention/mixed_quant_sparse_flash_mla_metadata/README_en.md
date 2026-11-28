@@ -269,7 +269,7 @@ English | [简体中文](./README.md)
 - The values of cu_seqlens_q, cu_seqlens_ori_kv, and cu_seqlens_cmp_kv must be the cumulative number of valid tokens in the current batch and previous batches. The first element is fixed to 0, and the value of each subsequent element must be greater than or equal to the value of the previous element.
 - The values of seqused_q, seqused_ori_kv, and seqused_cmp_kv must indicate the number of valid tokens in each batch.
 - cmp_residual_kv must satisfy cmp_residual_kv[i] < cmp_ratio.
-- For details about the mask modes represented by ori_mask_mode and cmp_mask_mode, see [sparse_mode parameter description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- For details about the mask modes represented by ori_mask_mode and cmp_mask_mode, see [sparse_mode parameter description](../../docs/en/context/sparse_mode_introduction.md).
 - In non-PA scenarios, layout_q and layout_kv must be the same.
 - When has_ori_kv is true, ori_topk greater than 0 indicates that the ori_kv part is sparse, and ori_topk equal to 0 indicates that the ori_kv part is non-sparse.
 - When has_cmp_kv is true, cmp_topk greater than 0 indicates that the cmp_kv part is sparse, and cmp_topk equal to 0 indicates that the cmp_kv part is non-sparse.

@@ -37,25 +37,7 @@
 
   **Step1: Mean Pooling Compression**
 
-  When actualBlockLenQuery / actualBlockLenKey is null (full compression):
-
-  $$
-  q\_compressed[b, n, x, d] = \frac{1}{blockShapeX} \sum_{i=0}^{blockShapeX-1} query[b, n, x \cdot blockShapeX + i, d]
-  $$
-
-  $$
-  k\_compressed[b, n, y, d] = \frac{1}{blockShapeY} \sum_{j=0}^{blockShapeY-1} key[b, n, y \cdot blockShapeY + j, d]
-  $$
-
-  When actualBlockLenQuery / actualBlockLenKey is not null (partial compression), only the first actualBlockLen tokens in each block are used to compute the mean value:
-
-  $$
-  q\_compressed[b, n, x, d] = \frac{1}{actualBlockLenQ[b,x]} \sum_{i=0}^{actualBlockLenQ[b,x]-1} query[b, n, x \cdot blockShapeX + i, d]
-  $$
-
-  $$
-  k\_compressed[b, n, y, d] = \frac{1}{actualBlockLenK[b,y]} \sum_{j=0}^{actualBlockLenK[b,y]-1} key[b, n, y \cdot blockShapeY + j, d]
-  $$
+  For each block, let L be the minimum of its block size, the remaining sequence length of the current batch from the start of the block, and its supplied actualBlockLen (use the block size when this input is null). When L > 0, the compressed vector is the mean of the first L tokens. When L = 0, the compressed vector is zero. A trailing block may therefore contain fewer tokens than the block size even when actualBlockLen is null.
 
   **Step2a: QK Matmul**
 
@@ -83,19 +65,14 @@
 
   When postBlockShape is null, skip this step, and pooled_score = attn_score.
 
-  **Step3: TopK Selection to Generate Indices**
+  **Step3: Block Selection**
 
-  $$
-  topk\_value = \text{round}(sparsity \times postXBlocks \times postYBlocks)
-  $$
+  For each batch and head, let M be the number of blocks in the valid two-dimensional grid, after post pooling if enabled. For M > 1:
 
-  $$
-  \mathcal{indices}= \text{TopK}\left(pooled\_score[b, n, px, py],\; topK\_value\right)
-  $$
+  - When sparsity <= 0.5, retain the max(1, round(sparsity * M)) blocks with the largest scores.
+  - When sparsity > 0.5, discard the max(1, round((1 - sparsity) * M)) blocks with the smallest scores and retain the others.
 
-  When postBlockShape is null, postXBlocks=Xblocks, postYBlocks=Yblocks, and pooled_score=attn_score, which is equivalent to performing TopK directly on attn_score.
-
-  where indices is the set of indices corresponding to the topk\_value largest values in attn\_score[b, n, x, y].
+  The rounding of positive values follows the kernel calculation of adding 0.5 and truncating. When M = 1, retain the block. The BNSD maximum grid must have more than one block. Use attn_score without post pooling and pooled_score otherwise. The set of retained positions is denoted by \(\mathcal{indices}\).
 
   **Step4: Generate BlockSparseMask**
 
@@ -258,8 +235,8 @@ aclnnStatus aclnnBSASelectBlockMask(
     <td>actualBlockLenQuery (aclIntArray*)</td>
     <td>Input</td>
     <td>Actual valid seq length compressed within each query block, that is, actualBlockLenQuery in the formula.<br>Used in partial compression scenarios (for example, incomplete blocks at the end or compressing only valid tokens).</td>
-    <td><ul><li>Optional input: <ul><li>BNSD scenario: the shape is [B, Xblocks].</li><li>TND scenario: the shape is [TotalBlockNum_Q] (the actual valid Xblocks of each batch are stacked; validXblocks = ceil(actualSeqQ / blockShapeX)).</li><li>The value range of each element is [0, blockShapeX].</li><li>When actualBlockLen = 0: q_compressed of the corresponding block is filled with a zero vector and will not be selected by topK.</li><li>When actualBlockLen > 0: only the first actualBlockLen tokens are used to compute the mean value.</li></ul></li>
-    <li>If not configured (nullptr is passed): query is fully compressed (using the full blockShapeX length).</li></ul></td>
+    <td><ul><li>Optional input: <ul><li>BNSD scenario: the shape is [B, Xblocks].</li><li>TND scenario: the shape is [TotalBlockNum_Q] (the actual valid Xblocks of each batch are stacked; validXblocks = ceil(actualSeqQ / blockShapeX)).</li><li>The value range of each element is [0, blockShapeX].</li><li>When actualBlockLen = 0: q_compressed of the corresponding block is filled with a zero vector and the block is not guaranteed to be excluded from selection.</li><li>When actualBlockLen > 0: the first actualBlockLen tokens are averaged, clipped to the remaining sequence length of the current batch.</li></ul></li>
+    <li>If not configured (nullptr is passed): the valid tokens in each query block are averaged, clipped to the remaining sequence length.</li></ul></td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -269,8 +246,8 @@ aclnnStatus aclnnBSASelectBlockMask(
     <td>actualBlockLenKey (aclIntArray*)</td>
     <td>Input</td>
     <td>Actual valid seq length compressed in each key block, that is, actualBlockLenKey in the formula.<br>Used for partial compression scenarios (for example, incomplete trailing blocks or compressing only valid tokens).</td>
-    <td><ul><li>Optional input: <ul><li>BNSD scenario: the shape is [B, Yblocks].</li><li>TND scenario: the shape is [TotalBlockNum_K] (the actual valid Yblocks of each batch are stacked; validYblocks = ceil(actualSeqK / blockShapeY)).</li><li>The value range of each element is [0, blockShapeY].</li><li>When actualBlockLen = 0: k_compressed of the corresponding block is filled with a zero vector and will not be selected by topK.</li><li>When actualBlockLen > 0: only the first actualBlockLen tokens are used to compute the mean value.</li></ul></li>
-    <li>If not configured (nullptr is passed): key is fully compressed (using the full blockShapeY length).</li></ul></td>
+    <td><ul><li>Optional input: <ul><li>BNSD scenario: the shape is [B, Yblocks].</li><li>TND scenario: the shape is [TotalBlockNum_K] (the actual valid Yblocks of each batch are stacked; validYblocks = ceil(actualSeqK / blockShapeY)).</li><li>The value range of each element is [0, blockShapeY].</li><li>When actualBlockLen = 0: k_compressed of the corresponding block is filled with a zero vector and the block is not guaranteed to be excluded from selection.</li><li>When actualBlockLen > 0: the first actualBlockLen tokens are averaged, clipped to the remaining sequence length of the current batch.</li></ul></li>
+    <li>If not configured (nullptr is passed): the valid tokens in each key block are averaged, clipped to the remaining sequence length.</li></ul></td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -449,7 +426,7 @@ aclnnStatus aclnnBSASelectBlockMask(
 - Based on the input layouts supported by the operator, the size of the head dimension in the query tensor shape is denoted as N1, and the size of the head dimension in the key tensor shape is denoted as N2. N1 = N2 must be satisfied (only MHA is supported).
 - headDim = 128.
 - blockShapeX and blockShapeY must be a multiple of 8.
-- After query and key compression, the Xblocks and Yblocks corresponding to query and key must satisfy Xblocks * Yblocks > 1; when postBlockShape is not null, the BNSD scenario further requires postXBlocks * postYBlocks > 1 (when the coarse-grained grid collapses to 1×1, no TopK selection semantics exists and the host side rejects it; the TND variable-length scenario is allowed).
+- The maximum number of blocks in the selection grid must be greater than 1 for BNSD and greater than 0 for TND. It is Xblocks * Yblocks when postBlockShape is null, and postXBlocks * postYBlocks otherwise.
 - The data types of query and key must be the same; only FLOAT16 and BFLOAT16 are supported.
 - The data type of blockSparseMaskOut is INT8 (binary: 0 or 1).
 - postBlockShape is an optional input. Passing nullptr disables secondary pooling (backward compatible). Passing `[postBlockShapeX, postBlockShapeY]` enables secondary pooling; postBlockShapeX/postBlockShapeY must be a multiple of 8, indicating the number of block groups.

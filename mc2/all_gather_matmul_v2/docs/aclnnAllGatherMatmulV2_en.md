@@ -457,6 +457,7 @@ aclnnStatus aclnnAllGatherMatmulV2(
     - When groupSize is set to 549764202624, bias must be empty.
     - Supports 2, 4, 8, 16, 32, or 64 cards.
     - Both the CCU communication engine and the AICPU communication engine are supported. The CCU communication engine supports interconnection only within a UB domain on a single device, and the AICPU communication engine supports interconnection across UB domains on multiple devices.
+    - When using the CCU communication engine, you can set `HCCL_OP_EXPANSION_MODE=CCU_SCHED` before initialization, as shown in the example.
     - When the CCU communication engine is used, the total amount of allgather(x1) collective communication data in a single communicator cannot exceed 63 \* 256MB. The total amount of collective communication data is calculated as follows: m \* k \* sizeof(x1_dtype) \* number of devices. Due to different shapes, the internal implementation of the operator may vary, and the total communication volume actually supported may be slightly less than this value.
 
 <!-- end id11 -->

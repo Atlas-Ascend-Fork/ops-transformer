@@ -242,7 +242,7 @@ cann_ops_transformer.block_sparse_attention(
         kv_input_layout="TND",
         num_key_value_heads=Nkv,
         scale_value=1.0 / (D ** 0.5),
-        The value of inner_precise=4, # 950PR/950DT can only be 4. If the value is not transferred (the default value is 1), the system crashes.
+        inner_precise=4, # 950PR/950DT can only be 4. If the value is not transferred (the default value is 1), the system crashes.
         actual_seq_lengths=actual_seq_lengths,
         actual_seq_lengths_kv=actual_seq_lengths_kv,
         return_softmax_lse=True,

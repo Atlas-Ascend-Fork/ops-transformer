@@ -541,7 +541,7 @@ REG_OP(FlashAttentionScore)
   - When this parameter is set to 1, 2, 3, or 5, the user-configured pre_tockens and next_tockens do not take effect.
   - When this parameter is set to 0 or 4, ensure that atten_mask is consistent with the ranges specified by pre_tockens and next_tockens.
   - If you have no special requirement, pass 0.
-  - For details about the different sparse modes, see [Sparse Mode Description](../../../docs/zh/context/sparse_mode_introduction_en.md).
+  - For details about the different sparse modes, see [Sparse Mode Description](../../../docs/en/context/sparse_mode_introduction.md).
 - In some scenarios, an excessive amount of computation may cause operator execution to time out (with an aicore error, where errorStr is: timeout or trap error). In this case, axis splitting is recommended. Note: The amount of computation is affected by parameters such as B, S, N, and D; the larger the values, the greater the amount of computation.
 - In the band scenario, pre_tockens and next_tockens must have an intersection.
 - prefix sparse computation scenarios include sparse_mode=5 and sparse_mode=6 when sequence lengths are equal, and sparse_mode=6 when sequence lengths are not equal. In both scenarios, when Sq > Skv, the N value of prefix ranges from \[0, Skv\]; when Sq <= Skv, the N value of prefix ranges from \[Skv-Sq, Skv\]. When sparse_mode=5 and the N value of prefix is greater than Skv or prefix is not passed, full computation is performed. sparse_mode=6 requires prefix to be passed.

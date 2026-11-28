@@ -158,7 +158,7 @@ English | [简体中文](./README.md)
 - The values of parameters cu_seqlens_q and cu_seqlens_k must be the accumulated number of valid tokens in the current batch and all preceding batches. The value of each element must be greater than or equal to that of the preceding element.
 - The values of parameters seqused_q and seqused_k indicate the number of valid tokens in each batch.
 - Parameter cmp_residual_k must satisfy cmp_residual_k[i] < cmp_ratio.
-- For details about the mask modes indicated by mask_mode, see [sparse_mode parameter description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- For details about the mask modes indicated by mask_mode, see [sparse_mode parameter description](../../docs/en/context/sparse_mode_introduction.md).
 
 ## Problem Locating Instructions
 

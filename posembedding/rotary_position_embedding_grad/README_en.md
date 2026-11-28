@@ -225,7 +225,7 @@ English | [简体中文](./README.md)
     The input tensor dy supports the BNSD, BSND, SBND, and TND layouts. The shape constraints of each parameter are described as follows:
     - The last dimension of the input tensors dy, cos, and sin and the output tensor dx must have the same size, which must be less than or equal to 1024. For the half, interleave, and interleave-half modes, the last dimension must be divisible by 2. For the quarter mode, the last dimension must be divisible by 4.
     - The shapes of the input tensor dy and the output tensor dx must be exactly the same.
-    - The shapes of the input tensors cos and sin must be exactly the same. The shapes of cos and sin must satisfy the [broadcast relationship](../../docs/zh/context/broadcast_relationship_en.md) with dy, and the shape after broadcasting must be equal to the shape of dy.
+    - The shapes of the input tensors cos and sin must be exactly the same. The shapes of cos and sin must satisfy the [broadcast relationship](../../docs/en/context/broadcast_relationship.md) with dy, and the shape after broadcasting must be equal to the shape of dy.
     - When dy is TND, cos and sin support T1D and TND.
 
   - <term>Atlas A3 products</term> and <term>Atlas A2 products</term>:

@@ -192,9 +192,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
     </tr>
     <tr>
       <td>numAcceptedTokens</td>
-      <td>Input</td>
-      <td>Number of tokens accepted by each sequence.</td>
-      <td>Does not support null tensors.</td>
+      <td>Optional input</td>
+      <td>Number of tokens accepted by each sequence. When provided, the initial state for sequence i is selected by ssmStateIndices[seqStart + numAcceptedTokens[i] - 1], where seqStart is the sum of the lengths of preceding sequences. This parameter does not change the number of tokens processed in the sequence.</td>
+      <td><ul><li>Optional input; pass nullptr to omit it.</li><li>When provided, an empty tensor is not supported.</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
       <td>(B,)</td>
@@ -256,7 +256,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
     <tr>
       <td>ACLNN_ERR_PARAM_NULLPTR</td>
       <td>161001</td>
-      <td>query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, numAcceptedTokens, or out is a null pointer.</td>
+      <td>query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, or out is a null pointer.</td>
     </tr>
     <tr>
       <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
@@ -324,7 +324,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 - The following constraints must be ensured by the user because the operator cannot obtain specific values in the tensor and does not validate them:
   - $ssmStateIndices[i] < BlockNum$
   - $0 < actualSeqLengths[i] \le 8$, and the cumulative sum of $actualSeqLengths[i]$ equals $T$
-  - $1 \le numAcceptedTokens[i] \le actualSeqLengths[i]$
+  - When numAcceptedTokens is provided, $1 \le numAcceptedTokens[i] \le actualSeqLengths[i]$.
   - $-1 \le query[i][j][k] \le 1$
   - $-1 \le key[i][j][k] \le 1$
   - $g[i][j] < 0$
@@ -431,6 +431,7 @@ int main()
     void *keyDeviceAddr = nullptr;
     void *valueDeviceAddr = nullptr;
     void *gDeviceAddr = nullptr;
+    void *gkDeviceAddr = nullptr;
     void *betaDeviceAddr = nullptr;
     void *stateRefDeviceAddr = nullptr;
     void *actSeqLenDeviceAddr = nullptr;

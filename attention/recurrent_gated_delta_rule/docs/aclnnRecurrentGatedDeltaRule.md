@@ -191,7 +191,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
     <tr>
       <td>numAcceptedTokens</td>
       <td>可选输入</td>
-      <td>每个序列接受的token数量。</td>
+      <td>每个序列接受的token数量。传入时，第i个序列通过ssmStateIndices[seqStart + numAcceptedTokens[i] - 1]选择初始状态，其中seqStart为前i个序列长度之和。该参数不改变本序列处理的token数量。</td>
       <td><ul><li>可选输入，传入nullptr时不使用该参数。</li><li>传入时不支持空Tensor。</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
@@ -429,6 +429,7 @@ int main()
     void *keyDeviceAddr = nullptr;
     void *valueDeviceAddr = nullptr;
     void *gDeviceAddr = nullptr;
+    void *gkDeviceAddr = nullptr;
     void *betaDeviceAddr = nullptr;
     void *stateRefDeviceAddr = nullptr;
     void *actSeqLenDeviceAddr = nullptr;

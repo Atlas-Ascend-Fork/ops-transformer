@@ -243,6 +243,8 @@ __aicore__ inline void AddExample<T>::Compute(int32_t progress)
 
 本阶段通过修改AddExample算子example样例中的输入数据，验证该算子在多种场景下的功能正确性。
 
+> **说明**：顺序完成第二节后，已安装的算子包执行Mul，验证时应按乘法判断结果。例如，第二输入全为1时，输出与第一个输入相同。如需验证加法，请将Kernel改回Add，并按[第二节](#2-编译与验证)重新编译和安装算子包。
+
 ### 1. 修改测试输入
 
 找到并编辑`AddExample`的`ops-transformer/examples/add_example/examples/test_aclnn_add_example.cpp`，修改输入张量的形状和数值。

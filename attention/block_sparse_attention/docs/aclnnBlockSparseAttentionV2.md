@@ -25,13 +25,15 @@
 
 - **接口功能**：BlockSparseAttentionV2稀疏注意力计算，支持灵活的块级稀疏模式，通过blockSparseMaskOptional指定每个Q块选择的KV块，实现高效的稀疏注意力计算。
 
-  相比于BlockSparseAttention,本接口新增qDequantScaleOptional、kDequantScaleOptional、vDequantScaleOptional参数。
+  相比于BlockSparseAttention，本接口新增qDequantScaleOptional、kDequantScaleOptional、vDequantScaleOptional参数。
 
 - **计算公式**：稀疏块大小：$blockShapeX \times blockShapeY$，blockSparseMaskOptional指定稀疏模式
 
   $$
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
   $$
+
+  其中，`scale`为由参数`scaleValue`控制的缩放系数；`atten_mask`为注意力掩码，对应参数`attenMaskOptional`，当前仅支持传入`nullptr`。
 
   BlockSparseAttentionV2输入query、key、value的数据排布格式支持从多种维度排布解读，可通过qInputLayout和kvInputLayout传入。
 
@@ -74,7 +76,7 @@
 
 ## 函数原型
 
-每个算子分为[两段式接口](../../../docs/zh/context/two_phase_api.md)，必须先调用"aclnnBlockSparseAttentionV2GetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnBlockSparseAttentionV2"接口执行计算。
+每个算子分为[两段式接口](../../../docs/zh/context/two_phase_api.md)，必须先调用“aclnnBlockSparseAttentionV2GetWorkspaceSize”接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用“aclnnBlockSparseAttentionV2”接口执行计算。
 
 ```c++
 aclnnStatus aclnnBlockSparseAttentionV2GetWorkspaceSize(

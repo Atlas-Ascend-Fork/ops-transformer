@@ -243,7 +243,7 @@ English | [简体中文](./README.md)
 - The values of cu_seqlens_q, cu_seqlens_ori_kv, and cu_seqlens_cmp_kv must be the cumulative number of valid tokens in the current batch and all preceding batches. The first element is fixed to 0, and each subsequent element must be greater than or equal to the previous element.
 - The values of seqused_q, seqused_ori_kv, and seqused_cmp_kv must indicate the number of valid tokens in each batch.
 - cmp_residual_kv must satisfy cmp_residual_kv[i] < cmp_ratio.
-- For details about the mask modes represented by ori_mask_mode and cmp_mask_mode, see [sparse_mode Parameter Description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- For details about the mask modes represented by ori_mask_mode and cmp_mask_mode, see [sparse_mode Parameter Description](../../docs/en/context/sparse_mode_introduction.md).
 - When has_ori_kv is true, ori_topk greater than 0 indicates that the ori_kv part is sparse, and ori_topk of 0 indicates that the ori_kv part is non-sparse.
 - When has_cmp_kv is true, cmp_topk greater than 0 indicates that the cmp_kv part is sparse, and cmp_topk of 0 indicates that the cmp_kv part is non-sparse.
 - When has_ori_kv is true, ori_topk is not 0, and ori_mask_mode is 0, ori_topk_length must be passed in. In this case, the minimum of the ori_mask_mode rule and the ori_topk_length element is used as the valid seqlen of ori_kv corresponding to the current q token. In other ori_kv sparse scenarios, the minimum of the ori_mask_mode rule and ori_topk is used as the valid seqlen of ori_kv corresponding to the current q token.

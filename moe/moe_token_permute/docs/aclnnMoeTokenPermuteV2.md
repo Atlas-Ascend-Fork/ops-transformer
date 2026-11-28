@@ -112,8 +112,8 @@ aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/co
 | 返回值 | 错误码 | 描述 |
 | --- | --- | --- |
 | ACLNN_ERR_PARAM_NULLPTR | 161001 | 输入或输出Tensor为空指针。 |
-| ACLNN_ERR_PARAM_INVALID | 161002 | 输入、输出的数据类型或shape不在支持范围内，或`quantMode`不在支持范围内。 |
-| ACLNN_ERR_INNER_TILING_ERROR | 561002 | shape不满足算子约束，或`paddedMode=true`。 |
+| ACLNN_ERR_PARAM_INVALID | 161002 | 输入、输出的数据类型不在支持范围内，或输入、输出shape未通过接口校验；Ascend 950平台下`quantMode`不在`-1/2/3/9`范围内，或`paddedMode=true`。 |
+| ACLNN_ERR_INNER_TILING_ERROR | 561002 | 算子内部tiling失败，例如非Ascend 950平台下`paddedMode=true`时兼容路径的tiling校验失败。 |
 
 ## aclnnMoeTokenPermuteV2
 
@@ -130,8 +130,8 @@ aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/co
 - 在Ascend 950上调用`aclnnMoeTokenPermuteV2`时，`indices`表示expert ID，取值范围为`[0, 10240)`，最大值为`10239`，不支持`10240`。
 - 不支持`paddedMode=true`。
 - Ascend 950量化模式下，`tokens`当前支持FLOAT16、BFLOAT16。
-- `quantMode=9`时，`tokens`隐藏维`H`需要为偶数，输出`permuteTokensOut`隐藏维为`H / 2`。
-- 非Ascend 950平台下，`quantMode=2/3/9`采用静默忽略策略，实际按非量化兼容路径处理。
+- `quantMode=9`时，`tokens`隐藏维`H`需要为偶数，输出`permuteTokensOut`的逻辑隐藏维为`H`。两个FLOAT4元素打包存储，打包不改变逻辑shape。
+- 非Ascend 950平台下，`quantMode`不参与校验与计算，`2/3/9`按非量化兼容路径处理。
 
 ## 调用示例
 

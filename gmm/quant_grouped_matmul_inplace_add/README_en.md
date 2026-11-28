@@ -20,7 +20,7 @@ English | [简体中文](./README.md)
     Compared with the [GroupedMatmulV4](../grouped_matmul/docs/aclnnGroupedMatmulV4_en.md) API, **the changes of this API are:**
     - The input and output parameters are all of the aclTensor type.
     - The InplaceAdd computation is added after the GroupedMatMul computation.
-    - Only quantization scenarios are supported (1. mx quantization; 2. T-C quantization; 3. T-T quantization). For quantization methods, refer to [Quantization Introduction](../../docs/zh/context/quant_mode_introduction_en.md).
+    - Only quantization scenarios are supported (1. mx quantization; 2. T-C quantization; 3. T-T quantization). For quantization methods, refer to [Quantization Introduction](../../docs/en/context/quant_mode_introduction.md).
     - Only inputs where x1 and x2 are FLOAT8_E5M2, FLOAT8_E4M3FN, HIFLOAT8 or FLOAT4_E2M1 are supported.
 
 - Computation formula:

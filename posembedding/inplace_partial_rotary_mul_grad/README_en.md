@@ -174,7 +174,7 @@ English | [简体中文](./README.md)
 - The input dy currently supports only the BSND layout, and the shapes of the input cos/sin must satisfy the broadcast relationship with dy on the B/S/N dimensions (such as BSND, 111D, 1SND, B1ND, BS1D, 11ND, B11D, 1S1D, and so on). The shape constraints on each parameter are described as follows:
   - The last dimension D of the input tensor dy must be less than or equal to 1024.
   - When the slice length (end - start) is greater than 0, the last dimension of the input tensors cos and sin must equal the slice length.
-  - The shapes of the input tensors cos and sin must be exactly the same. The B, S, and N dimensions of cos and sin must satisfy the [broadcast relationship](../../docs/zh/context/broadcast_relationship_en.md) with dy, and the broadcast B, S, and N must equal the B, S, and N of dy.
+  - The shapes of the input tensors cos and sin must be exactly the same. The B, S, and N dimensions of cos and sin must satisfy the [broadcast relationship](../../docs/en/context/broadcast_relationship.md) with dy, and the broadcast B, S, and N must equal the B, S, and N of dy.
   - In half, interleave, and interleave-half modes, when the slice length (end - start) is greater than 0, the slice length must be divisible by 2.
   - In quarter mode, when the slice length (end - start) is greater than 0, the slice length must be divisible by 4.
   - The input tensors cos and sin must have the same data type.

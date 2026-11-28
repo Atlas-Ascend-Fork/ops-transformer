@@ -173,7 +173,7 @@ English | [简体中文](./README.md)
 - The values of seqused_q and seqused_k must indicate the number of valid tokens in each batch.
 - When seqused_q, seqused_k, and cmp_residual_k are passed, each must be a one-dimensional INT32 tensor with shape (B,), and the length must equal the actual number of batches B.
 - cmp_residual_k must satisfy cmp_residual_k[i] < cmp_ratio.
-- For details about the mask modes indicated by mask_mode, see [sparse_mode Parameter Description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- For details about the mask modes indicated by mask_mode, see [sparse_mode Parameter Description](../../docs/en/context/sparse_mode_introduction.md).
 - Constraints for Ascend 950PR&950DT products:
   - layout_q=BSND scenario
     - max_seqlen_q must be passed the value of S1.

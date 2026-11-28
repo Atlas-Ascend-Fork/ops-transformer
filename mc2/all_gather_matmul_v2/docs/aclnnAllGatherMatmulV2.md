@@ -456,6 +456,7 @@ aclnnStatus aclnnAllGatherMatmulV2(
     - 当groupSize取值为549764202624，bias必须为空。
     - 支持2、4、8、16、32、64卡。
     - 支持CCU通信引擎和AI CPU通信引擎，CCU仅支持单机UB域内互联，AICPU可支持跨机UB域内互联。
+    - 使用CCU通信引擎时，可参考调用示例在初始化前设置环境变量`HCCL_OP_EXPANSION_MODE=CCU_SCHED`。
     - 使用CCU通信引擎时，单个通信域内AllGather(x1)集合通信数据总量不能超过63 \* 256MB，集合通信数据总量计算方式为：m \* k \* sizeof(x1_dtype) \* 卡数。由于shape不同，算子内部实现可能存在差异，实际支持的总通信量可能略小于该值。
 
 <!-- end id11 -->

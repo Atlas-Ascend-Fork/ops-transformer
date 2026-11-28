@@ -217,6 +217,8 @@ cann_ops_transformer.msa_index_score(
 
 ## 约束说明
 
+- 对FLOAT16或BFLOAT16输入，query和key的D须相同，且D为16到128之间的16的倍数；N2须为1。
+
 - `actual_seq_qlen` 和 `actual_seq_klen` 可在 CPU 或 query 所在 NPU；CPU 长度会复制到设备，并在调用返回前等待当前 NPU 流完成；该路径不支持外部流或 NPU 图捕获。其他已传入的 Tensor 必须位于 query 所在 NPU。
 
 - query固定TND，逻辑块长128。BSND / BNSD的$S2$是定长槽，`actual_seq_klen[b+1] - actual_seq_klen[b]`不超过$S2$，且不传`block_table`。

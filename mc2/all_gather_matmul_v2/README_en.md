@@ -20,11 +20,11 @@ English | [简体中文](./README.md)
 
   - <term>Ascend 950PR&950DT products</term>:
 
-    Adds support for the low-precision data types FLOAT8_E4M3FN/FLOAT8_E5M2/HIFLOAT8/FLOAT4_E2M1. The pertensor, perblock, and mx [quantization methods](../../docs/zh/context/quant_mode_introduction_en.md) are supported.
+    Adds support for the low-precision data types FLOAT8_E4M3FN/FLOAT8_E5M2/HIFLOAT8/FLOAT4_E2M1. The pertensor, perblock, and mx [quantization methods](../../docs/en/context/quant_mode_introduction.md) are supported.
 
   - <term>Atlas A3 products</term> and <term>Atlas A2 products</term>:
 
-    Adds support for the low-precision data types INT8/INT4. The pertoken/perchannel [quantization methods](../../docs/zh/context/quant_mode_introduction_en.md) are supported.
+    Adds support for the low-precision data types INT8/INT4. The pertoken/perchannel [quantization methods](../../docs/en/context/quant_mode_introduction.md) are supported.
 
 - **Computation formula**:
     - Case 1: When the data types of x1 and x2 are FLOAT16/BFLOAT16, after the input x1 undergoes AllGather, MatMul is performed on x1 and x2.

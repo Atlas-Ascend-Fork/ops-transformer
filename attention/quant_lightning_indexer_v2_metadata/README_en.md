@@ -193,7 +193,7 @@ English | [简体中文](./README.md)
 - The values of cu_seqlens_q and cu_seqlens_k must be the cumulative number of valid tokens in the current batch and all preceding batches. The first element is fixed to 0, and the value of each subsequent element must be greater than or equal to that of the previous element.
 - The values of seqused_q and seqused_k indicate the number of valid tokens in each batch.
 - cmp_residual_k must satisfy cmp_residual_k[i] < cmp_ratio.
-- For details about the mask mode indicated by mask_mode, see [sparse_mode parameter description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- For details about the mask mode indicated by mask_mode, see [sparse_mode parameter description](../../docs/en/context/sparse_mode_introduction.md).
 - In non-PA scenarios, layout_q and layout_k must be the same.
 - layout_q=BSND scenario
   - max_seqlen_q must be set to S1.

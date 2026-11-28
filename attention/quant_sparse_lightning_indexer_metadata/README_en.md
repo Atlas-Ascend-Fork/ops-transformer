@@ -194,7 +194,7 @@
 - `cu_seqlens_q` and `cu_seqlens_k` must contain cumulative values of the valid token counts of the current batch and all preceding batches; the first element is fixed to 0 and each following element must be greater than or equal to the previous one.
 - `seqused_q` and `seqused_k` must represent the number of valid tokens in each batch.
 - `cmp_residual_k` must satisfy cmp_residual_k[i] < cmp_ratio.
-- For details about the mask modes represented by mask_mode, see [sparse_mode parameter description](../../docs/zh/context/sparse_mode_introduction.md).
+- For details about the mask modes represented by mask_mode, see [sparse_mode parameter description](../../docs/en/context/sparse_mode_introduction.md).
 
 <!-- npu="950" id7 -->
 - <term>Ascend 950PR&950DT products</term>:

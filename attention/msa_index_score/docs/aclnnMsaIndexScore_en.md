@@ -430,6 +430,8 @@ aclnnStatus aclnnMsaIndexScore(
 
 ## Constraints
 
+- For FLOAT16 or BFLOAT16 inputs, query and key must have the same D, which must be a multiple of 16 in [16, 128]. N2 must be greater than 0 and N1 must be divisible by N2.
+
 - MXFP4 requires matching FLOAT4_E2M1 Q/K on Ascend 950, logical D=64 or 128, and N2=1. Apply each independent E8M0 group32 scale before the dot product; the original scalar post-matmul scale formula does not describe MXFP4 group scaling.
 
 - When calling ACLNN directly, all tensor data addresses, including sequence lengths, must be on the current device. Ordinary host memory is not copied automatically.

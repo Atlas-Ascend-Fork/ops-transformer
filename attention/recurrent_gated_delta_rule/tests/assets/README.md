@@ -59,7 +59,7 @@ attention/recurrent_gated_delta_rule/tests/
 
 #### impl/golden.py
 
-- 通过`importlib`加载`tests/pytest/recurrent_gated_delta_rule_golden.py`中的CPU golden，不重复实现。
+- 通过`importlib`加载[tests/pytest/recurrent_gated_delta_rule_golden.py](../pytest/recurrent_gated_delta_rule_golden.py)中的CPU golden，不重复实现。
 - **e2e适配器**`cpu_recurrent_gated_delta_rule`：使用`*args, **kwargs`签名，按`_PARAM_ORDER`兼容位置参数与关键字参数，返回`(output, state)`。
 - **aclnn适配器**`aclnn_cpu_recurrent_gated_delta_rule`：参数顺序对齐`aclnnRecurrentGatedDeltaRuleGetWorkspaceSize`函数签名，返回`[output, state_out]`列表，与`output_tensor_indexes`顺序一致。
 
@@ -80,7 +80,7 @@ attention/recurrent_gated_delta_rule/tests/
 
 ### convert_rdv_to_csv.py
 
-- 将`tests/pytest/test_recurrent_gated_delta_rule_paramset_rdv.py`中的全量RDV用例（148条）转换为TTK CSV。
+- 将[tests/pytest/test_recurrent_gated_delta_rule_paramset_rdv.py](../pytest/test_recurrent_gated_delta_rule_paramset_rdv.py)中的全量RDV用例（148条）转换为TTK CSV。
 - 覆盖连续/非连续state、bf16/fp32 state dtype组合，非连续state通过`tensor_storage_shapes`/`tensor_view_strides`/`tensor_view_offsets`描述。
 - 生成两份CSV：E2E模式（`recurrent_gated_delta_rule_rdv.csv`）与ACLNN模式（`aclnn_recurrent_gated_delta_rule_rdv.csv`）。
 

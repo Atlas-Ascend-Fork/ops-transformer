@@ -117,7 +117,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td>k (aclTensor*)</td>
     <td>Input</td>
     <td>Input K in the formula.</td>
-    <td><ul><li>Empty tensors are not supported.</li><li>block_num is the total number of blocks in PageAttention, and block_size is the number of tokens in a block.</li></ul></td>
+    <td><ul><li>Empty tensors are not supported; in TND format, T2 of the entire k tensor must be greater than 0.</li><li>block_num is the total number of blocks in PageAttention, and block_size is the number of tokens in a block.</li></ul></td>
     <td>BFLOAT16, FLOAT16</td>
     <td>ND</td>
     <td><ul><li>If layoutKOptional is PA_BBND, the shape is (block_num, block_size, N2, D).</li><li>If layoutKOptional is BSND, the shape is (B, S2, N2, D).</li><li>If layoutKOptional is TND, the shape is (T2, N2, D).</li></ul>

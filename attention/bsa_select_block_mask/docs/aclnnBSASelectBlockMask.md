@@ -35,25 +35,7 @@
 
   **Step1：均值池化压缩 (Mean Pooling Compression)**
 
-  当actualBlockLenQuery / actualBlockLenKey为null时（完整压缩）：
-
-  $$
-  q\_compressed[b, n, x, d] = \frac{1}{blockShapeX} \sum_{i=0}^{blockShapeX-1} query[b, n, x \cdot blockShapeX + i, d]
-  $$
-
-  $$
-  k\_compressed[b, n, y, d] = \frac{1}{blockShapeY} \sum_{j=0}^{blockShapeY-1} key[b, n, y \cdot blockShapeY + j, d]
-  $$
-
-  当actualBlockLenQuery / actualBlockLenKey非null时（部分压缩），仅对每个block内前actualBlockLen个token取均值：
-
-  $$
-  q\_compressed[b, n, x, d] = \frac{1}{actualBlockLenQ[b,x]} \sum_{i=0}^{actualBlockLenQ[b,x]-1} query[b, n, x \cdot blockShapeX + i, d]
-  $$
-
-  $$
-  k\_compressed[b, n, y, d] = \frac{1}{actualBlockLenK[b,y]} \sum_{j=0}^{actualBlockLenK[b,y]-1} key[b, n, y \cdot blockShapeY + j, d]
-  $$
+  对每个block，设L为block大小、当前batch从该block起始位置起的剩余序列长度和对应actualBlockLen三者的最小值（未传入actualBlockLen时该项取block大小）。L > 0时，对该block的前L个token取均值；L = 0时，压缩向量填0。即使actualBlockLen为null，尾块的有效token数也可能小于block大小。
 
   **Step2a：QK Matmul**
 
@@ -81,19 +63,14 @@
 
   当postBlockShape为null时，跳过此步骤，pooled_score = attn_score。
 
-  **Step3：TopK选择生成索引**
+  **Step3：块选择**
 
-  $$
-  topk\_value = \text{round}(sparsity \times postXBlocks \times postYBlocks)
-  $$
+  对每个batch和head，设M为其有效二维块网格的块数（启用二次池化时使用池化后的网格）。当M > 1时：
 
-  $$
-  \mathcal{indices}= \text{TopK}\left(pooled\_score[b, n, px, py],\; topK\_value\right)
-  $$
+  - sparsity <= 0.5：保留分数最大的max(1, round(sparsity * M))个块。
+  - sparsity > 0.5：剔除分数最小的max(1, round((1 - sparsity) * M))个块，保留其余块。
 
-  当postBlockShape为null时，postXBlocks = Xblocks、postYBlocks = Yblocks、pooled_score = attn_score，等价于直接在attn_score上做TopK。
-
-  其中indices为attn\_score[b, n, x, y]中topk\_value个最大值对应的索引集合。
+  这里正数的round按kernel计算方式加0.5后截断。M = 1时保留该块。BNSD场景的最大网格块数须大于1。未启用二次池化时使用attn_score，否则使用pooled_score。保留块的位置集合记为\(\mathcal{indices}\)。
 
   **Step4：生成BlockSparseMask**
 
@@ -256,8 +233,8 @@ aclnnStatus aclnnBSASelectBlockMask(
     <td>actualBlockLenQuery（aclIntArray*）</td>
     <td>输入</td>
     <td>每个query block内实际压缩的有效seq长度，即公式中的actualBlockLenQuery。<br>该参数用于部分压缩场景（如末尾不完整块或仅压缩有效token）。</td>
-    <td><ul><li>可选输入：<ul><li>BNSD场景：shape为 [B, Xblocks]。</li><li>TND场景：shape为 [TotalBlockNum_Q]（各batch的实际有效Xblocks堆叠，validXblocks = ceil（actualSeqQ / blockShapeX））。</li><li>每个元素取值范围 [0, blockShapeX]。</li><li>当actualBlockLen = 0时：对应block的q_compressed填0向量，不会被TopK选中。</li><li>当actualBlockLen > 0时：仅对前actualBlockLen个token取均值。</li></ul></li>
-    <li>如不配置（传nullptr）：对query进行完整压缩（使用完整blockShapeX长度）。</li></ul></td>
+    <td><ul><li>可选输入：<ul><li>BNSD场景：shape为 [B, Xblocks]。</li><li>TND场景：shape为 [TotalBlockNum_Q]（各batch的实际有效Xblocks堆叠，validXblocks = ceil（actualSeqQ / blockShapeX））。</li><li>每个元素取值范围 [0, blockShapeX]。</li><li>当actualBlockLen = 0时：对应block的q_compressed填0向量，后续选择不保证排除该block。</li><li>当actualBlockLen > 0时：对前actualBlockLen个token取均值，并按当前batch剩余序列长度截断。</li></ul></li>
+    <li>如不配置（传nullptr）：对每块有效token取均值，尾块按当前batch剩余序列长度截断。</li></ul></td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -267,8 +244,8 @@ aclnnStatus aclnnBSASelectBlockMask(
     <td>actualBlockLenKey（aclIntArray*）</td>
     <td>输入</td>
     <td>每个key block内实际压缩的有效seq长度，即公式中的actualBlockLenKey。<br>该参数用于部分压缩场景（如末尾不完整块或仅压缩有效token）。</td>
-    <td><ul><li>可选输入：<ul><li>BNSD场景：shape为 [B, Yblocks]。</li><li>TND场景：shape为 [TotalBlockNum_K]（各batch的实际有效Yblocks堆叠，validYblocks = ceil（actualSeqK / blockShapeY））。</li><li>每个元素取值范围 [0, blockShapeY]。</li><li>当actualBlockLen = 0时：对应block的k_compressed填0向量，不会被TopK选中。</li><li>当actualBlockLen > 0时：仅对前actualBlockLen个token取均值。</li></ul></li>
-    <li>如不配置（传nullptr）：对key进行完整压缩（使用完整blockShapeY长度）。</li></ul></td>
+    <td><ul><li>可选输入：<ul><li>BNSD场景：shape为 [B, Yblocks]。</li><li>TND场景：shape为 [TotalBlockNum_K]（各batch的实际有效Yblocks堆叠，validYblocks = ceil（actualSeqK / blockShapeY））。</li><li>每个元素取值范围 [0, blockShapeY]。</li><li>当actualBlockLen = 0时：对应block的k_compressed填0向量，后续选择不保证排除该block。</li><li>当actualBlockLen > 0时：对前actualBlockLen个token取均值，并按当前batch剩余序列长度截断。</li></ul></li>
+    <li>如不配置（传nullptr）：对每块有效token取均值，尾块按当前batch剩余序列长度截断。</li></ul></td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -446,11 +423,11 @@ aclnnStatus aclnnBSASelectBlockMask(
 - 根据算子支持的输入Layout，query张量Shape中对应的head维度大小记为N1，key张量Shape中对应的head维度大小记为N2。必须满足N1 = N2（仅支持MHA）。
 - headDim = 128。
 - blockShapeX和blockShapeY必须为8的倍数。
-- query和key压缩后，query和key对应的Xblocks和Yblocks需满足Xblocks \* Yblocks > 1；postBlockShape非null时，BNSD场景进一步要求postXBlocks \* postYBlocks > 1（粗粒度网格坍缩为1×1时无TopK选择语义，host侧拒绝；TND变长场景允许）。
+- 选择网格的最大块数在BNSD场景须大于1，在TND场景须大于0。postBlockShape为null时网格块数为Xblocks \* Yblocks，否则为postXBlocks \* postYBlocks。
 - query和key的数据类型必须一致，仅支持FLOAT16和BFLOAT16。
 - blockSparseMaskOut数据类型为INT8（二值：0或1）。
 - postBlockShape为可选输入，传入nullptr时禁用二次pooling（向后兼容）；传入`[postBlockShapeX, postBlockShapeY]`时启用，postBlockShapeX/postBlockShapeY为8的倍数，表示block分组数。
-- actualBlockLenQuery / actualBlockLenKey若非null，每个元素取值范围 [0, blockShapeX] / [0, blockShapeY]；为null时完整压缩。
+- actualBlockLenQuery / actualBlockLenKey若非null，每个元素取值范围 [0, blockShapeX] / [0, blockShapeY]；为null时对每块有效token取均值。
 - 不涉及确定性计算。
 
 ## 调用示例

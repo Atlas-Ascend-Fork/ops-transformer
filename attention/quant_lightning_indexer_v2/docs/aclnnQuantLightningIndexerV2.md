@@ -511,6 +511,11 @@ aclnnStatus aclnnQuantLightningIndexerV2(
                 <td>161002</td>
                 <td>q、k、w、qDescale、kDescale、cuSeqlensQOptional、cuSeqlensKOptional、sequsedQOptional、sequsedKOptional、cmpResidualKOptional、blockTableOptional、metadataOptional、layoutQOptional、layoutKOptional、topk、quantMode、maskMode、cmpRatio、returnValue、sparseIndicesOut、sparseValuesOut的数据类型和数据格式不在支持的范围内。</td>
             </tr>
+            <tr>
+                <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+                <td>561002</td>
+                <td>tiling校验失败，例如metadataOptional为空，或属性、输入shape不满足约束。</td>
+            </tr>
         </tbody>
     </table>
 

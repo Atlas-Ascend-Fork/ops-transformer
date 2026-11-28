@@ -491,6 +491,11 @@ aclnnStatus aclnnQuantLightningIndexerV2(
                 <td>161002</td>
                 <td>The data types and data formats of q, k, w, qDescale, kDescale, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional, blockTableOptional, metadataOptional, layoutQOptional, layoutKOptional, topk, quantMode, maskMode, cmpRatio, returnValue, sparseIndicesOut, and sparseValuesOut are not within the supported range.</td>
             </tr>
+            <tr>
+                <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+                <td>561002</td>
+                <td>Tiling validation failed, for example because metadataOptional is null or attributes or input shapes do not meet the constraints.</td>
+            </tr>
         </tbody>
     </table>
 

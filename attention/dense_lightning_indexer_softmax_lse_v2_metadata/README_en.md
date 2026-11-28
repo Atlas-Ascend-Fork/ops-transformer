@@ -160,7 +160,7 @@ English | [简体中文](./README.md)
 - The values of cu_seqlens_q and cu_seqlens_k must be the cumulative numbers of valid tokens in the current batch and all preceding batches. Each element must be greater than or equal to the previous element.
 - The values of seqused_q and seqused_k must indicate the numbers of valid tokens in each batch.
 - cmp_residual_k must satisfy cmp_residual_k[i] < cmp_ratio.
-- Currently, mask_mode supports only 0 and 3. For details about the mask modes, see [sparse_mode Parameter Description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- Currently, mask_mode supports only 0 and 3. For details about the mask modes, see [sparse_mode Parameter Description](../../docs/en/context/sparse_mode_introduction.md).
 - layout_q must be BSND or TND, and layout_k must be consistent with layout_q.
 - The value range of num_heads_q is [1, 128], and it must be divisible by num_heads_k. Currently, num_heads_k supports only 1, and head_dim supports only 128.
 

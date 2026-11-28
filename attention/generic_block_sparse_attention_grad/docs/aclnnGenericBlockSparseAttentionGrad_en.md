@@ -25,7 +25,7 @@
 
 ## Function
 
-- Description: aclnnGenericBlockSparseAttentionGrad is the backward computation operator for generic block sparse attention. Based on the indexes defined by `sparseBlockIdx`/`sparseBlockCount` (the sparse block index table), it computes and propagates gradients only on the selected KV blocks and supports dynamic, variable-length block sparse patterns. Before calling this API, call `aclnnGenericBlockSparseAttentionGradMetadata` to generate the kernel-splitting `metadataOptional`.
+- Description: aclnnGenericBlockSparseAttentionGrad is the backward computation operator for generic block sparse attention. Based on the indexes defined by `sparseBlockIdx`/`sparseBlockCount` (the sparse block index table), it computes and propagates gradients using the sparse block pattern and supports dynamic, variable-length block sparse patterns. For layoutSparsePattern=0, an incomplete visible KV tail block is also included automatically. For layoutSparsePattern=1, call `aclnnGenericBlockSparseAttentionGradMetadata` first to generate `metadataOptional`. For layoutSparsePattern=0, pass nullptr for `metadataOptional`.
 - Formula:
 
 $$
@@ -73,14 +73,16 @@ aclnnStatus aclnnGenericBlockSparseAttentionGradGetWorkspaceSize(
     const aclTensor *sequsedQOptional,
     const aclTensor *sequsedKvOptional,
     const aclIntArray *blockShape,
-    int64_t isPackedGQA,
     char *layoutQ,
     char *layoutKv,
+    int64_t layoutSparsePattern,
     double scaleValue,
     int64_t maskType,
     int64_t softmaxPrecision,
     int64_t winLeft,
     int64_t winRight,
+    int64_t residualBlockMode,
+    bool isConsistentTopk,
     aclTensor *dQuery,
     aclTensor *dKey,
     aclTensor *dValue,
@@ -211,26 +213,26 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
               <tr>
                   <td>sparseBlockIdx</td>
                   <td>Input</td>
-                  <td>Array of sparse block indices, specifying the Q block/token index selected for each KV block.</td>
+                  <td>Array of sparse block indices. The selected Q or KV blocks depend on layoutSparsePattern.</td>
                   <td>                      <ul>
-                          <li>The Q sparse pattern corresponding to each KVHead in the same group is consistent (isPackedGQA=1).</li>
-                          <li>The maxS1 of the 4th dimension should be ≥ the maximum value of all elements in sparseBlockCount.</li>
+                          <li>The storage order depends on layoutSparsePattern.</li>
+                          <li>The fourth dimension must be at least the maximum value in sparseBlockCount.</li>
                           <li>Empty tensors are not supported.</li>
                       </ul>
                   </td>
                   <td>INT32</td>
                   <td>ND</td>
-                  <td>TND: (B,N2,ceilDiv(maxS2,blockShapeY),maxS1); BNSD/BSND: (B,N2,ceilDiv(S2,blockShapeY),S1)</td>
+                  <td>layoutSparsePattern=0: (B,N2,maxQBlockCount,maxKvBlockCount). layoutSparsePattern=1: (B,N2,maxKvBlockCount,maxQBlockCount).</td>
                   <td>√</td>
               </tr>
               <tr>
                   <td>sparseBlockCount</td>
                   <td>Input</td>
-                  <td>Specifies the number of Q actually selected for each KV block.</td>
+                  <td>Specifies the number of blocks selected for each Q or KV block, depending on layoutSparsePattern.</td>
                   <td>Empty tensors are not supported.</td>
                   <td>INT32</td>
                   <td>ND</td>
-                  <td>(B,N2,ceilDiv(maxS2,blockShapeY)) or (B,N2,ceilDiv(S2,blockShapeY))</td>
+                  <td>layoutSparsePattern=0: (B,N2,maxQBlockCount). layoutSparsePattern=1: (B,N2,maxKvBlockCount).</td>
                   <td>√</td>
               </tr>
               <tr>
@@ -305,19 +307,9 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
                   <td>                      <ul>
                           <li>Contains two elements [blockShapeX, blockShapeY].</li>
                           <li>blockShapeX currently only supports 1.</li>
-                          <li>blockShapeY must be ≥ 128 and aligned to 64. Cube/Softmax splits each sparse block along S2 by baseN=128 (LSE Softmax, numerically equivalent to the whole block).</li>
+                          <li>blockShapeY depends on layoutSparsePattern. See Constraints.</li>
                       </ul>
                   </td>
-                  <td>INT64</td>
-                  <td>-</td>
-                  <td>-</td>
-                  <td>-</td>
-              </tr>
-              <tr>
-                  <td>isPackedGQA</td>
-                  <td>Input</td>
-                  <td>Whether qHeads in the same group share the same sparse pattern.</td>
-                  <td>Currently Only Supports 1. Not shared across batches.</td>
                   <td>INT64</td>
                   <td>-</td>
                   <td>-</td>
@@ -339,6 +331,16 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
                   <td>Data layout format of the input key and value.</td>
                   <td>Currently Supports "TND", "BNSD", "BSND". Must be consistent with layoutQ.</td>
                   <td>STRING</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+              </tr>
+              <tr>
+                  <td>layoutSparsePattern</td>
+                  <td>Input</td>
+                  <td>Sparse index layout.</td>
+                  <td>0 selects KV blocks per query token; 1 selects query tokens per KV block.</td>
+                  <td>INT64</td>
                   <td>-</td>
                   <td>-</td>
                   <td>-</td>
@@ -393,6 +395,26 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
                   <td>Number of tokens that the sliding window needs to contain backward in sliding window attention use cases.</td>
                   <td>Must be -1 when disabled, used together with maskType and mask.</td>
                   <td>INT64</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+              </tr>
+              <tr>
+                  <td>residualBlockMode</td>
+                  <td>Input</td>
+                  <td>Residual block processing mode.</td>
+                  <td>Use 0 for layoutSparsePattern=1 and 1 for layoutSparsePattern=0.</td>
+                  <td>INT64</td>
+                  <td>-</td>
+                  <td>-</td>
+                  <td>-</td>
+              </tr>
+              <tr>
+                  <td>isConsistentTopk</td>
+                  <td>Input</td>
+                  <td>Whether query blocks in the same batch and head select a consistent maximum number of KV blocks.</td>
+                  <td>Both false and true use the actual sparse indices and counts. Use the same value in the metadata and gradient calls where both are required.</td>
+                  <td>BOOL</td>
                   <td>-</td>
                   <td>-</td>
                   <td>-</td>
@@ -491,7 +513,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
           <td>The data type, data format, or value of inputs, outputs, or attributes is out of the supported range; layoutQ is inconsistent with layoutKv.</td>
         </tr>
         <tr>
-          <td>isPackedGQA!=1; winLeft/Right!=-1; blockShape does not meet the constraints; cuSeqLengthsQ/KvOptional is not provided when layout is "TND"; scaleValue is not finite in float32.</td>
+          <td>layoutSparsePattern, residualBlockMode, isConsistentTopk, window bounds, or blockShape do not meet the constraints; cuSeqLengthsQ/KvOptional is not provided when layout is "TND"; scaleValue is not finite in float32.</td>
         </tr>
         <tr>
           <td>ACLNN_ERR_RUNTIME_ERROR</td>
@@ -544,7 +566,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
 
 - Deterministic computation:
   - aclnnGenericBlockSparseAttentionGrad defaults to a non-deterministic implementation. On Ascend 950 (A5 / arch35), deterministic mode can be enabled via the deterministic switch; when layoutSparsePattern=1, Q indices within one KV block must be unique. arch22 is not supported yet.
-- Call [aclnnGenericBlockSparseAttentionGradMetadata](../../generic_block_sparse_attention_grad_metadata/docs/aclnnGenericBlockSparseAttentionGradMetadata_en.md) to generate `metadataOptional` before calling this API.
+- For layoutSparsePattern=1, call [aclnnGenericBlockSparseAttentionGradMetadata](../../generic_block_sparse_attention_grad_metadata/docs/aclnnGenericBlockSparseAttentionGradMetadata_en.md) to generate `metadataOptional` before calling this API.
 - The data types of query, key, value, dout, out, dQuery, dKey, and dValue should be kept consistent; FLOAT16 and BFLOAT16 are supported.
 - The data type of lse should be FLOAT32.
 - The data types of sparseBlockIdx, sparseBlockCount, sequsedQOptional, and sequsedKvOptional should be INT32.
@@ -552,17 +574,22 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
 - layoutQ and layoutKv currently support TND, BNSD, and BSND, and must be kept consistent.
 - cuSeqLengthsQOptional is required when layoutQ is TND; cuSeqLengthsKvOptional is required when layoutKv is TND.
 - sequsedQOptional/sequsedKvOptional takes effect only when TND is used; for BNSD/BSND, nullptr must be passed, and the actual sequence length is obtained from the S dimension of Q/K.
-- HeadDim is fixed to 128; the value range of N1/N2 is [1, 128], with N1 > N2 and N1 % N2 == 0.
-- blockShape: blockShapeX supports only 1; blockShapeY must be ≥128 and a multiple of 64 (Cube splits S2 of each sparse block with baseN=128); isPackedGQA currently only supports 1; maskType currently only supports 1; softmaxPrecision currently only supports 0.
+- For layoutSparsePattern=1, headDim is 128 and N1 and N2 are in [1, 128], with N1 ≥ N2 and N1 divisible by N2. For layoutSparsePattern=0, headDim is in [1, 256] and N1 is divisible by N2 with N1/N2 ≤ 256.
+- blockShape: blockShapeX supports only 1; For layoutSparsePattern=1, blockShapeY must be at least 128 and a multiple of 64. For layoutSparsePattern=0, use a positive blockShapeY of at most 128 if N1/N2 ≤ 128, or at most 64 otherwise; softmaxPrecision currently only supports 0.
 - winLeft and winRight must be -1 when disabled; attenMaskOptional should currently be set to nullptr.
 - For layoutSparsePattern=1 (GBSAG), Softmax LSE: TND is `(T1,N1,1)`, BNSD is `(B,N1,S1,1)`; for BSND, Ascend 950 (A5) requires `(B,N1,S1,1)`, and A2/A3 use `(B,S1,N1,1)`.
 - For layoutSparsePattern=0 (QSAG), LSE follows the forward output: `(T1,N1)` or `(T1,N1,1)` for TND, and `(B,N1,S1)` or `(B,N1,S1,1)` for both BNSD and BSND.
 - scaleValue must be finite in float32 (not NaN/Inf, and still finite after cast to float); this applies to both layoutSparsePattern=0 and layoutSparsePattern=1.
-- The 4th dimension maxS1 of `sparseBlockIdx` should be ≥ the maximum value of all elements in `sparseBlockCount`.
+- For layoutSparsePattern=1, set residualBlockMode=0 and maskType=1. Use the same sparse-pattern parameters for the metadata and gradient calls. The fourth dimension of `sparseBlockIdx` must be at least the largest value in `sparseBlockCount`.
+  - `maxQBlockCount` is the capacity for Q indices per KV block and must be at least the largest value in `sparseBlockCount`. For BNSD/BSND it must also be at least S1. `maxKvBlockCount` is the number of KV-block slots per batch; for BNSD/BSND it equals ceilDiv(S2, blockShapeY). For TND, to represent all KV blocks, the caller must set it to at least ceilDiv(the maximum actual KV length across batches, blockShapeY), using sequsedKvOptional when provided. On Ascend 950, it must also be no greater than ceilDiv(T2, blockShapeY), where T2 is the total KV token count.
+- For layoutSparsePattern=0, set residualBlockMode=1 and maskType to 0 (NONE) or 1 (CAUSAL). isConsistentTopk accepts false and true. Pass nullptr for `metadataOptional` and `attenMaskOptional`.
+  - `maxQBlockCount` is the Q-index capacity. For BNSD/BSND, it equals S1. For TND, it must be at least ceil(T1/B) and no smaller than the actual Q length of each batch. `maxKvBlockCount` is the capacity for complete KV blocks selected by each Q token and must be in [1, INT32_MAX].
+  - `sparseBlockCount` counts only selected complete visible KV blocks and must not exceed `maxKvBlockCount`. For each Q token, let `limit` be the visible KV length: it is the actual KV length for NONE, or max(0, min(klen, klen - qlen + q_index + 1)) for CAUSAL, where `q_index` is zero-based. Valid block indices are in [0, floor(limit / blockShapeY)). Do not include an incomplete tail block in the indices; the operator adds it automatically.
+  - Actual values in cuSeqLengths, seqused, sparse indices, and counts are not checked during tiling; the caller must ensure that they satisfy these constraints.
 
 ## Example
 
-The following sample code is for reference only. For details about compilation and execution, see [Compile and Run Samples](../../../docs/en/context/compile_and_run_sample.md).
+The following example uses layoutSparsePattern=1 and calls both the metadata and gradient interfaces. For details about compilation and execution, see [Compile and Run Samples](../../../docs/en/context/compile_and_run_sample.md).
 
 ```c++
 #include <cmath>
@@ -721,8 +748,8 @@ int main()
     uint64_t metaWsSize = 0;
     aclOpExecutor *metaExecutor = nullptr;
     ret = aclnnGenericBlockSparseAttentionGradMetadataGetWorkspaceSize(
-        idx, cnt, nullptr, nullptr, nullptr, nullptr, S1, S2, N1, N2, D, blockShape, 1, qLayout, kvLayout, maskType, 0,
-        -1, -1, metadata, &metaWsSize, &metaExecutor);
+        idx, cnt, nullptr, nullptr, nullptr, nullptr, S1, S2, N1, N2, D, blockShape, qLayout, kvLayout, 1, maskType, 0,
+        -1, -1, 0, false, metadata, &metaWsSize, &metaExecutor);
     CHECK_RET(ret == ACL_SUCCESS,
               LOG_PRINT("aclnnGenericBlockSparseAttentionGradMetadataGetWorkspaceSize failed. ERROR: %d\n", ret);
               return ret);
@@ -738,8 +765,8 @@ int main()
     uint64_t workspaceSize = 0;
     aclOpExecutor *executor = nullptr;
     ret = aclnnGenericBlockSparseAttentionGradGetWorkspaceSize(
-        q, k, v, dout, out, lse, idx, cnt, metadata, nullptr, nullptr, nullptr, nullptr, nullptr, blockShape, 1,
-        qLayout, kvLayout, scaleValue, maskType, 0, -1, -1, dq, dk, dv, &workspaceSize, &executor);
+        q, k, v, dout, out, lse, idx, cnt, metadata, nullptr, nullptr, nullptr, nullptr, nullptr, blockShape,
+        qLayout, kvLayout, 1, scaleValue, maskType, 0, -1, -1, 0, false, dq, dk, dv, &workspaceSize, &executor);
     CHECK_RET(ret == ACL_SUCCESS,
               LOG_PRINT("aclnnGenericBlockSparseAttentionGradGetWorkspaceSize failed. ERROR: %d\n", ret);
               return ret);

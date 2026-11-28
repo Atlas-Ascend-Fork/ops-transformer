@@ -431,6 +431,8 @@ aclnnStatus aclnnMsaIndexScore(
 
 ## 约束说明
 
+- 对FLOAT16或BFLOAT16输入，query和key的D须相同，且D为16到128之间的16的倍数；N2须大于0，N1须能被N2整除。
+
 - MXFP4仅支持Ascend 950：Q/K均为FLOAT4_E2M1，逻辑D为64或128，N2=1；Q/K分别使用E8M0 group32系数，先逐组还原再点积。原公式中的点积后标量scale不适用于MXFP4分组缩放。
 
 - 直接调用 ACLNN 时，所有传入的 Tensor 数据地址（包括实际序列长度）必须位于当前设备，不会自动搬运普通 Host 内存。

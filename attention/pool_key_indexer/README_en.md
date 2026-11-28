@@ -79,7 +79,7 @@ English | [简体中文](./README.md)
 - When quant_mode=-1, passing in q_descale and k_descale is not supported.
 - The value check of pool_tail_k is performed on the host side only for CPU input. NPU input directly passes device data through the aclnn Tensor variant, and no value check is performed on the host side. The caller must ensure that the value is valid; otherwise, the kernel behavior is undefined.
 - Invalid parts of sparse_indices are filled with -1, and invalid parts of sparse_values are filled with -inf.
-- For details about the mask modes indicated by mask_mode, see [sparse_mode Parameter Description](../../docs/zh/context/sparse_mode_introduction_en.md).
+- For details about the mask modes indicated by mask_mode, see [sparse_mode Parameter Description](../../docs/en/context/sparse_mode_introduction.md).
 - <term>Ascend 950PR&950DT products</term>:
   - query and pool_key support the FLOAT8_E4M3FN data type.
   - quant_mode supports -1 (no quantization), 0 (FP8 per-token-head quantization), 1 (mxFP8 quantization), and 2 (int8 per-token-head quantization).

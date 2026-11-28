@@ -84,7 +84,7 @@ When `needBackward=true`, the forward operation also returns `invRmsOptional`, `
 
 ## Prototype
 
-The operator uses a [two-phase API](../../../docs/zh/context/two_phase_api.md). First call "aclnnTextGatedResidualGetWorkspaceSize" to obtain the workspace size and executor. Then call "aclnnTextGatedResidual" to execute the operator.
+The operator uses a [two-phase API](../../../docs/en/context/two_phase_api.md). First call "aclnnTextGatedResidualGetWorkspaceSize" to obtain the workspace size and executor. Then call "aclnnTextGatedResidual" to execute the operator.
 
 ```cpp
 aclnnStatus aclnnTextGatedResidualGetWorkspaceSize(
@@ -296,7 +296,7 @@ aclnnStatus aclnnTextGatedResidual(
 
 ### Return Value
 
-aclnnStatus: Returns a status code. For details, see [aclnn return codes](../../../docs/zh/context/aclnn_return_code.md).
+aclnnStatus: Returns a status code. For details, see [aclnn return codes](../../../docs/en/context/aclnn_return_code.md).
 
 The first-phase API validates arguments and reports errors in the following cases:
 
@@ -390,7 +390,7 @@ The first-phase API validates arguments and reports errors in the following case
 
 ### Return Value
 
-aclnnStatus: Returns a status code. For details, see [aclnn return codes](../../../docs/zh/context/aclnn_return_code.md).
+aclnnStatus: Returns a status code. For details, see [aclnn return codes](../../../docs/en/context/aclnn_return_code.md).
 
 ## Constraints
 

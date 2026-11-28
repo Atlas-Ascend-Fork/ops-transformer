@@ -49,13 +49,13 @@ English | [简体中文](./README.md)
           >
           > Note: The two different grouping methods actually produce the same grouping result.
           >
-          > The 0th right matrix `W[0,:,:]` corresponds to the tokens `x[0:3]` at index positions [0,3) (3-0=3 tokens in total), and corresponds to `x_scale[0:3]`, `w_scale[0]`, `bias[0]`, `offset[0]`, `Q[0:3]`, `Q_scale[0:3]`, and `Q_offset[0:3]`;
+          > The 0th right matrix `W[0,:,:]` corresponds to the tokens `x[0:3]` at index positions [0,3) (3-0=3 tokens in total), and corresponds to `x_scale[0:3]`, `w_scale[0]`, `Q[0:3]`, and `Q_scale[0:3]`;
           >
-          > The 1st right matrix `W[1,:,:]` corresponds to the tokens `x[3:4]` at index positions [3,4) (4-3=1 token in total), and corresponds to `x_scale[3:4]`, `w_scale[1]`, `bias[1]`, `offset[1]`, `Q[3:4]`, `Q_scale[3:4]`, and `Q_offset[3:4]`;
+          > The 1st right matrix `W[1,:,:]` corresponds to the tokens `x[3:4]` at index positions [3,4) (4-3=1 token in total), and corresponds to `x_scale[3:4]`, `w_scale[1]`, `Q[3:4]`, and `Q_scale[3:4]`;
           >
-          > The 2nd right matrix `W[2,:,:]` corresponds to the tokens `x[4:4]` at index positions [4,4) (4-4=0 tokens in total), and corresponds to `x_scale[4:4]`, `w_scale[2]`, `bias[2]`, `offset[2]`, `Q[4:4]`, `Q_scale[4:4]`, and `Q_offset[4:4]`;
+          > The 2nd right matrix `W[2,:,:]` corresponds to the tokens `x[4:4]` at index positions [4,4) (4-4=0 tokens in total), and corresponds to `x_scale[4:4]`, `w_scale[2]`, `Q[4:4]`, and `Q_scale[4:4]`;
           >
-          > The 3rd right matrix `W[3,:,:]` corresponds to the tokens `x[4:6]` at index positions [4,6) (6-4=2 tokens in total), and corresponds to `x_scale[4:6]`, `w_scale[3]`, `bias[3]`, `offset[3]`, `Q[4:6]`, `Q_scale[4:6]`, and `Q_offset[4:6]`;
+          > The 3rd right matrix `W[3,:,:]` corresponds to the tokens `x[4:6]` at index positions [4,6) (6-4=2 tokens in total), and corresponds to `x_scale[4:6]`, `w_scale[3]`, `Q[4:6]`, and `Q_scale[4:6]`;
           >
           > Note: Parts not specified in grouplist will not participate in the update.
           > For example, when groupList=[12,14,18] with GroupListType=cumsum and the shape of X is [30, :]:
@@ -298,7 +298,7 @@ English | [简体中文](./README.md)
   <tr>
     <td>bias</td>
     <td rowspan="1">Optional input</td>
-    <td>Represents the offset value for the matrix multiplication.</td>
+    <td>Reserved input; currently unsupported. A null pointer must be passed.</td>
     <td>-</td>
     <td>-</td>
   </tr>

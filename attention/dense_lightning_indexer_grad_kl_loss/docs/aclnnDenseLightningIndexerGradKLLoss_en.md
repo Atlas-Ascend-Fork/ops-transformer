@@ -35,7 +35,7 @@
      I_{t,:}=W_{t,:}@ReLU(\tilde{q}_{t,:}@\tilde{K}_{:t,:}^\top)
      $$
 
-     - $W_{t,:}$ is the $weights$ corresponding to the $t$-th token;
+     - $W_{t,:}$ is the $weight$ corresponding to the $t$-th token;
      - $\tilde{q}_{t,:}$ is the result of merging the $G$ query heads corresponding to the $t$-th token in the $\tilde{q}$ matrix;
      - $\tilde{K}_{:t,:}$ is the $\tilde{K}$ matrix with $t$ rows.
 
@@ -67,7 +67,7 @@
       dI\mathop{{}}\nolimits_{{t,:}}=Softmax \left( I\mathop{{}}\nolimits_{{t,:}} \left) -p\mathop{{}}\nolimits_{{t,:}}\right. \right.
       $$
 
-      The gradients of the weights, query, and key matrices can be computed using the chain rule:
+      The gradients of the weight, query, and key matrices can be computed using the chain rule:
 
       $$
       dW\mathop{{}}\nolimits_{{t,:}}=dI\mathop{{}}\nolimits_{{t,:}}\text{@} \left( ReLU \left( S\mathop{{}}\nolimits_{{t,:}} \left) \left) \mathop{{}}\nolimits^{\top}\right. \right. \right. \right.
@@ -98,24 +98,24 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLossGetWorkspaceSize(
     const aclTensor     *key,
     const aclTensor     *queryIndex,
     const aclTensor     *keyIndex,
-    const aclTensor     *weights,
+    const aclTensor     *weight,
     const aclTensor     *softmaxMax,
     const aclTensor     *softmaxSum,
     const aclTensor     *softmaxMaxIndex,
     const aclTensor     *softmaxSumIndex,
-    const aclTensor     *queryRope,
-    const aclTensor     *keyRope,
-    const aclIntArray   *actualSeqLengthsQuery,
-    const aclIntArray   *actualSeqLengthsKey,
+    const aclTensor     *queryRopeOptional,
+    const aclTensor     *keyRopeOptional,
+    const aclIntArray   *actualSeqLengthsQueryOptional,
+    const aclIntArray   *actualSeqLengthsKeyOptional,
     double               scaleValue,
-    char                *layout,
+    char                *layoutOptional,
     int64_t              sparseMode,
     int64_t              preTokens,
     int64_t              nextTokens,
-    const aclTensor     *dQueryIndex,
-    const aclTensor     *dKeyIndex,
-    const aclTensor     *dWeights,
-    const aclTensor     *loss,
+    const aclTensor     *dQueryIndexOut,
+    const aclTensor     *dKeyIndexOut,
+    const aclTensor     *dWeightOut,
+    const aclTensor     *lossOut,
     uint64_t            *workspaceSize,
     aclOpExecutor       **executor)
 ```
@@ -197,7 +197,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>×</td>
       </tr>
       <tr>
-       <td>weights (aclTensor*)</td>
+       <td>weight (aclTensor*)</td>
        <td>Input</td>
        <td>Weight</td>
        <td><ul><li>B: supports generalization and is the same as the B of query.</li><li>S1: supports generalization and is the same as the S1 of query.</li><li>Nidx1: 64, 32, 16, 8.</li><li>T1: sum of S1 across multiple batches.</li></ul></td>
@@ -247,7 +247,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>queryRope (aclTensor*)</td>
+       <td>queryRopeOptional (aclTensor*)</td>
        <td>Input</td>
        <td>MLA rope part: output of the Query positional encoding.</td>
        <td><ul><li>Dimensions consistent with the layout of query.</li><li>B: Supports generalization and is consistent with the B of query.</li><li>S1: Supports generalization and is consistent with the S1 of query.</li><li>N1: 128, 64, 32.</li><li>Dr: 64.</li><li>T1: Sum of S1 over multiple batches.</li></ul>
@@ -258,7 +258,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>keyRope (aclTensor*)</td>
+       <td>keyRopeOptional (aclTensor*)</td>
        <td>Input</td>
        <td>MLA rope part: output of Key position encoding.</td>
        <td><ul><li>Consistent with the layout dimensions of key.</li><li>B: Generalization supported, consistent with the B of query.</li><li>S2: Generalization supported, consistent with S1 of key.</li><li>N2: Equal to N1.</li><li>Dr: 64.</li><li>T2: Cumulative sum of S2 across multiple batches.</li></ul></td>
@@ -268,7 +268,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>actualSeqLengthsQuery (aclIntArray*)</td>
+       <td>actualSeqLengthsQueryOptional (aclIntArray*)</td>
        <td>Input</td>
        <td>Number of valid Query tokens in each batch.</td>
        <td><ul><li>Value dependency.</li><li>The length is the same as B.</li><li>The cumulative sum is the same as T1.</li></ul></td>
@@ -278,7 +278,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>actualSeqLengthsKey (aclIntArray*)</td>
+       <td>actualSeqLengthsKeyOptional (aclIntArray*)</td>
        <td>Input</td>
        <td>Number of valid Key tokens in each Batch.</td>
        <td><ul><li>Value dependency.</li><li>The length is the same as B.</li><li>The cumulative sum is the same as T2.</li></ul></td>
@@ -298,7 +298,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>layout (char*)</td>
+       <td>layoutOptional (char*)</td>
        <td>Input</td>
        <td>layout format.</td>
        <td>Only BSND and TND formats are supported.</td>
@@ -338,7 +338,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>dQueryIndex (aclTensor*)</td>
+       <td>dQueryIndexOut (aclTensor*)</td>
        <td>Output</td>
        <td>Gradient of QueryIndex.</td>
        <td><ul><li>B: Supports generalization and must be the same as the B of query.</li><li>S1: Supports generalization and must be the same as the S1 of query.</li><li>Nidx1: 64, 32, 16, 8.</li><li>D: 128.</li><li>T1: Cumulative sum of S1 across multiple batches.</li></ul></td>
@@ -348,7 +348,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>dKeyIndex (aclTensor*)</td>
+       <td>dKeyIndexOut (aclTensor*)</td>
        <td>Output</td>
        <td>Gradient of KeyIndex.</td>
        <td><ul><li>B: Supports generalization and must be the same as the B of query.</li><li>S2: Supports generalization and must be the same as the S2 of key.</li><li>Nidx2: 1.</li><li>D: 128.</li><li>T2: Sum of S2 across multiple batches.</li></ul></td>
@@ -358,7 +358,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>dWeights (aclTensor*)</td>
+       <td>dWeightOut (aclTensor*)</td>
        <td>Output</td>
        <td>Gradient of Weights.</td>
        <td><ul><li>B: supports generalization.</li><li>S1: supports generalization and cannot be the M dimension of Matmul.</li><li>Nidx1: 64, 32, 16, 8.</li><li>T1: accumulated S1 across multiple batches.</li></ul></td>
@@ -368,7 +368,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>loss (aclTensor*)</td>
+       <td>lossOut (aclTensor*)</td>
        <td>Output</td>
        <td>Loss function value.</td>
        <td>-</td>
@@ -425,7 +425,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
       <tr>
        <td>ACLNN_ERR_PARAM_INVALID</td>
        <td>161002</td>
-       <td>The data types or data formats of input variables such as query, key, queryIndex, keyIndex, weights, and softmaxMax are not in the supported range.</td>
+       <td>The data types or data formats of input variables such as query, key, queryIndex, keyIndex, weight, and softmaxMax are not in the supported range.</td>
       </tr>
       <tr>
        <td>ACLNN_ERR_INNER_TILING_ERROR</td>
@@ -481,14 +481,14 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
 ## Constraints
 
 - The data types of query, key, queryIndex, and keyIndex must be the same.
-- If weights is not float32, the data types of query, key, queryIndex, keyIndex, and weights must be the same.
+- If weight is not float32, the data types of query, key, queryIndex, keyIndex, and weight must be the same.
 
 - General Constraints
 
   - Deterministic computation:
     aclnnDenseLightningIndexerGradKLLoss defaults to a non-deterministic implementation, and supports enabling deterministic computation through alcrtCtxSetSysParamOpt.
   - Handling of empty input parameters:
-    - If query, key, queryIndex, keyIndex, or weights is an empty tensor: currently not supported, and an error is reported.
+    - If query, key, queryIndex, keyIndex, or weight is an empty tensor: currently not supported, and an error is reported.
 
   <table style="undefined;table-layout: fixed; width: 942px"><colgroup>
       <col style="width: 100px">
@@ -607,7 +607,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>layout</td>
+       <td>layoutOptional</td>
        <td>BSND/TND</td>
        <td>-</td>
       </tr>

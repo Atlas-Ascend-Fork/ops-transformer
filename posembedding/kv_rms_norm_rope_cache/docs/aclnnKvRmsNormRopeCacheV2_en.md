@@ -217,7 +217,7 @@ aclnnStatus aclnnKvRmsNormRopeCacheV2(
       <td>gamma</td>
       <td>Input</td>
       <td>Input data used for the rms_norm computation in the formula.</td>
-      <td><ul><li>Same as the data type of kv, shape is 1D [Dv,].</li><li>Empty tensor is not supported.</li></ul></td>
+      <td><ul><li>Same data type as kv; shape is 1D [Dv,] for V1 and [Dk,] (192) for V2.</li><li>Empty tensor is not supported.</li></ul></td>
       <td>BFLOAT16, FLOAT16</td>
       <td>ND</td>
       <td>1</td>
@@ -347,7 +347,7 @@ aclnnStatus aclnnKvRmsNormRopeCacheV2(
       <td>isOutputKv</td>
       <td>Attribute</td>
       <td>Output control flag for kRopeOut and cKvOut.</td>
-      <td>If isOutputKv is true, kRopeOut and cKvOut are output. It is recommended to set it to false.</td>
+      <td>If isOutputKv is true, kRopeOut and cKvOut are output. It is recommended to set it to false; on Atlas A3 products, non-null tensor descriptors for kRopeOut and cKvOut are still required when it is false.</td>
       <td>bool</td>
       <td>-</td>
       <td>-</td>

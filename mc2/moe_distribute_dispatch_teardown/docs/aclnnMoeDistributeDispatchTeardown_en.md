@@ -447,7 +447,7 @@ aclnnStatus aclnnMoeDistributeDispatchTeardown(
 5. Description of the shape format in Parameters:
     - A: Indicates the maximum token quantity that the current device can receive. The value range is as follows:
 
-      - For MoE experts, when globalBs is 0, A >= `BS` \* `epWorldSize` \* min(`localExpertNum`, `K`) must be met; when `globalBs` is not 0, A >= `globalBs` \* min(`localExpertNum`, `K`) must be met.
+      - For MoE experts, when globalBs is 0, A = `BS` \* `epWorldSize` \* min(`localExpertNum`, `K`) must be met; when `globalBs` is not 0, A = `globalBs` \* min(`localExpertNum`, `K`) must be met.
       - For shared experts, when `globalBs` is 0, A = `BS` \* `epWorldSize` \* `sharedExpertNum` / `sharedExpertRankNum` must be met; when globalBs is not 0, A = `globalBs` \* `sharedExpertNum` / `sharedExpertRankNum` must be met.
     - H: Indicates the hidden size. The value range is [1024, 8192]. Currently, only 4096 and 7168 are supported.
     - BS: Indicates the batch sequence size, that is, the quantity of tokens finally output by the current device. The value range is 0 < `BS` ≤ 512. Currently, only 8, 16, and 256 are supported.

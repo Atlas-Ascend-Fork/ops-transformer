@@ -35,6 +35,8 @@
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
   $$
 
+  Here, `scale` is the scaling factor controlled by `scaleValue`. `atten_mask` is the attention mask corresponding to `attenMaskOptional`, which currently must be `nullptr`.
+
   BlockSparseAttentionV2 supports interpreting the data layout of the query, key, and value inputs from multiple dimension arrangements, which can be passed in through qInputLayout and kvInputLayout.
 
   - B: Indicates the batch size of the input samples (Batch).

@@ -368,7 +368,7 @@ English | [简体中文](./README.md)
       </tbody>
   </table>
 
-  The relationship between the enumerated values of gmmXQuantMode, gmmWeightQuantMode, mmXQuantMode, mmWeightQuantMode, and commQuantMode and the [quantization modes](../../docs/zh/context/quant_mode_introduction_en.md) is as follows:
+  The relationship between the enumerated values of gmmXQuantMode, gmmWeightQuantMode, mmXQuantMode, mmWeightQuantMode, and commQuantMode and the [quantization modes](../../docs/en/context/quant_mode_introduction.md) is as follows:
 
   * 0: no quantization -- not supported currently
   * 1: pertensor

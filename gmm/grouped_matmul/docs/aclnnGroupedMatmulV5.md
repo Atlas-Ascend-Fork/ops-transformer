@@ -648,7 +648,7 @@ aclnnGroupedMatmulV5默认确定性实现。
 | 0 | 单 | 单 | 单 | 2/3 | 必须传；groupListType=0 末值 ≤ x 第一维；groupListType=1 总和 ≤ x 第一维；groupListType=2 第二列总和 ≤ x 第一维；非量化FLOAT16/BFLOAT16且groupListType=0/1时最大25600组，其他场景最大1024组 | x不转置；weight可转置（A8W4/A4W4 不可） | weight中tensor需为3维，x，y中tensor需为2维 |
 | 0 | 单 | 多 | 单 | 2/3 | 必须传；groupListType=0 末值 ≤ x 第一维；groupListType=1 总和 ≤ x 第一维；groupListType=2 第二列总和 ≤ x 第一维；splitItem=3时最大1024组；splitItem=2时最大128组 | x不转置；weight可转置（统一） | 1）x，weight，y中tensor需为2维；<br>2）weight中每个tensor的N轴必须相等 |
 | 0 | 多 | 多 | 单 | 2/3 | 可选；若传则 groupListType=0 差值 = x 第一维、groupListType=1 数值 = x 第一维、groupListType=2 第二列 = x 第一维；最大 128 组 | x不转置；weight可转置（统一） | 1）x，weight，y中tensor需为2维；<br>2）weight中每个tensor的N轴必须相等 |
-| 2 | 单 | 单 | 单 | 2/3 | 必须传；groupListType=0 末值 ≤ x 第二维；groupListType=1 总和 ≤ x 第二维；groupListType=2 第二列总和 ≤ x 第二维；最大 1024 组 | x必须转置；weight不转置 | 1）x，weight中tensor需为2维，y中tensor需为3维；<br>2）bias必须传空 |
+| 2 | 单 | 单 | 单 | 2/3 | 必须传；groupListType=0 末值 ≤ x 第一维；groupListType=1 总和 ≤ x 第一维；最大 1024 组 | x必须转置；weight不转置 | 1）x，weight中tensor需为2维，y中tensor需为3维；<br>2）bias必须传空 |
 | 2 | 单 | 多 | 多 | 0/1 | 必须传空 | x必须转置；weight不转置 | 1）x，weight，y中tensor需为2维；<br>2）weight长度最大支持128，即最多支持128个group；<br>3）原始shape中weight每个tensor的第一维之和不应超过x第一维；<br>4）bias必须传空 |
 
 #### 场景速查表
@@ -785,6 +785,7 @@ aclnnGroupedMatmulV5默认确定性实现。
   - offset不为空时
     - scale为pergroup与perchannel离线融合后的结果，shape要求为 $[E, quantGroupNum, N]$，其中 $quantGroupNum = k \div quantGroupSize$，当前支持quantGroupSize=64/128/256
     - 该场景下offsetOptional不为空。非对称量化offsetOptional为计算过程中离线计算的辅助结果，即 $antiquantOffset \times scale$，shape要求为 $[E, quantGroupNum, N]$，dtype为FLOAT32
+    - 非对称量化时，perTokenScaleOptional的shape要求为 $[M, 1]$
     - 该场景不支持使能tuningConfigOptional第二位
   - tuningConfigOptional数组第二个元素可置1，以使能A8W4场景（仅支持perchannel）中weight的特殊格式模板，以优化算子性能（性能优势的shape范围参考：K >= 2048 && N >= 2048）。需要说明的是，该模板要求weight的shape为（E，N，K），然后再对其进行ND2NZ转换后作为算子输入
 

@@ -166,7 +166,7 @@ Defaults to a deterministic implementation.
     cache = torch.zeros(block_num, block_size, 1, d, dtype=torch.float8_e4m3fn).npu()
     cache_scale = torch.zeros(block_num, block_size, 1, 1, dtype=torch.float32).npu()  # mode1 scaleCol=1
     x = torch.randn(bs, d, dtype=torch.float16).npu()
-    slot_mapping = torch.randint(0, block_num * block_size, (bs,), dtype=torch.int32).npu()
+    slot_mapping = torch.arange(bs, dtype=torch.int32).npu()
 
     indexer_quant_cache(
         cache, cache_scale, x, slot_mapping, quant_mode="fp8", round_scale=True, x_scale=1.0)

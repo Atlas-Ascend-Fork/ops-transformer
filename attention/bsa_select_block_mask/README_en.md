@@ -28,25 +28,7 @@ English | [简体中文](./README.md)
 
   **Step1: Mean Pooling Compression**
 
-  When actualBlockLenQuery / actualBlockLenKey is null (full compression):
-
-  $$
-  q\_compressed[b, n, x, d] = \frac{1}{blockShapeX} \sum_{i=0}^{blockShapeX-1} query[b, n, x \cdot blockShapeX + i, d]
-  $$
-
-  $$
-  k\_compressed[b, n, y, d] = \frac{1}{blockShapeY} \sum_{j=0}^{blockShapeY-1} key[b, n, y \cdot blockShapeY + j, d]
-  $$
-
-  When actualBlockLenQuery / actualBlockLenKey is not null (partial compression), the mean is computed only over the first actualBlockLen tokens in each block:
-
-  $$
-  q\_compressed[b, n, x, d] = \frac{1}{actualBlockLenQ[b,x]} \sum_{i=0}^{actualBlockLenQ[b,x]-1} query[b, n, x \cdot blockShapeX + i, d]
-  $$
-
-  $$
-  k\_compressed[b, n, y, d] = \frac{1}{actualBlockLenK[b,y]} \sum_{j=0}^{actualBlockLenK[b,y]-1} key[b, n, y \cdot blockShapeY + j, d]
-  $$
+  For each block, let L be the minimum of its block size, the remaining sequence length of the current batch from the start of the block, and its supplied actualBlockLen (use the block size when this input is null). When L > 0, the compressed vector is the mean of the first L tokens. When L = 0, the compressed vector is zero. A trailing block may therefore contain fewer tokens than the block size even when actualBlockLen is null.
 
   **Step2a: QK Matmul**
 
@@ -74,19 +56,14 @@ English | [简体中文](./README.md)
 
   When postBlockShape is null, this step is skipped, and pooled_score = attn_score.
 
-  **Step3: TopK Selection to Generate Indices**
+  **Step3: Block Selection**
 
-  $$
-  topk\_value = \text{round}(sparsity \times postXBlocks \times postYBlocks)
-  $$
+  For each batch and head, let M be the number of blocks in the valid two-dimensional grid, after post pooling if enabled. For M > 1:
 
-  $$
-  \mathcal{indices}= \text{TopK}\left(pooled\_score[b, n, px, py],\; topK\_value\right)
-  $$
+  - When sparsity <= 0.5, retain the max(1, round(sparsity * M)) blocks with the largest scores.
+  - When sparsity > 0.5, discard the max(1, round((1 - sparsity) * M)) blocks with the smallest scores and retain the others.
 
-  When postBlockShape is null, postXBlocks=Xblocks, postYBlocks=Yblocks, and pooled_score=attn_score, which is equivalent to directly performing TopK on attn_score.
-
-  Here indices is the set of indices corresponding to the topk\_value largest values in pooled\_score[b, n, px, py].
+  The rounding of positive values follows the kernel calculation of adding 0.5 and truncating. When M = 1, retain the block. The BNSD maximum grid must have more than one block. Use attn_score without post pooling and pooled_score otherwise. The set of retained positions is denoted by \(\mathcal{indices}\).
 
   **Step4: Generate BlockSparseMask**
 
@@ -136,8 +113,8 @@ English | [简体中文](./README.md)
 | post_block_shape | Input | Array of second-round pooling block shapes. It specifies the block grouping size of the second-round pooling after Softmax (in blocks), that is, `postBlockShape` in the formula. Optional input: when `[postBlockShapeX, postBlockShapeY]` is passed in, the second-round pooling is enabled, TopK selects on the coarse-grained pooled_score, and the output mask is the coarse-grained [B, N, postXBlocks, postYBlocks] (the second-round pooling splitting semantics apply; the selection result is output directly without expansion). When nullptr is passed in, the second-round pooling is disabled (backward compatibility), TopK selects directly on attn_score, and the output mask is the fine-grained [B, N, Xblocks, Yblocks]. postBlockShapeX/postBlockShapeY are multiples of 8, indicating the number of block groups. | INT64 | - |
 | actual_seq_lengths | Input | Actual sequence length of query for each batch, that is, the actual valid value of Sq in the formula for each batch. It describes the number of actually valid query tokens in each batch in variable-length sequence scenarios (that is, scenarios containing Padding data). | INT64 | - |
 | actual_seq_lengths_kv | Input | Actual sequence length of key, that is, the actual valid value of Skv in the formula for each batch. It describes the number of actually valid key tokens in each batch in variable-length sequence scenarios (that is, scenarios containing Padding data). | INT64 | - |
-| actual_block_len_query | Input | Actual valid sequence length compressed within each query block, that is, `actualBlockLenQuery` in the formula. It is used for partial compression scenarios (such as incomplete blocks at the end or compressing only valid tokens). The mean is computed only over the first actual_block_len_query tokens in each block. If this parameter is not configured (nullptr is passed in), query is fully compressed. | INT64 | - |
-| actual_block_len_key | Input | Actual valid sequence length compressed within each key block, that is, `actualBlockLenKey` in the formula. It is used for partial compression scenarios (such as incomplete blocks at the end or compressing only valid tokens). The mean is computed only over the first actual_block_len_key tokens in each block. If this parameter is not configured (nullptr is passed in), key is fully compressed. | INT64 | - |
+| actual_block_len_query | Input | Actual valid sequence length compressed within each query block, that is, `actualBlockLenQuery` in the formula. It is used for partial compression scenarios (such as incomplete blocks at the end or compressing only valid tokens). The first actual_block_len_query tokens are averaged, clipped to the remaining sequence length. If null, all valid tokens in each block are averaged. | INT64 | - |
+| actual_block_len_key | Input | Actual valid sequence length compressed within each key block, that is, `actualBlockLenKey` in the formula. It is used for partial compression scenarios (such as incomplete blocks at the end or compressing only valid tokens). The first actual_block_len_key tokens are averaged, clipped to the remaining sequence length. If null, all valid tokens in each block are averaged. | INT64 | - |
 | q_input_layout | Input | Data layout format of query. It indicates the specific arrangement of the input tensors in memory. Currently only "TND" and "BNSD" are supported, and it must be consistent with kv_input_layout. | String | - |
 | kv_input_layout | Input | Data layout format of key. It indicates the specific arrangement of the input tensors in memory. Currently only "TND" and "BNSD" are supported, and it must be consistent with q_input_layout. | String | - |
 | num_key_value_heads | Input | Number of attention heads of key, that is, the number of heads N of the key tensor in the formula. Currently only MHA is supported, and it must be consistent with the number of heads of query. | Int | - |
@@ -151,11 +128,11 @@ English | [简体中文](./README.md)
 - The size of the head dimension in the query tensor shape is denoted as N1, and the size of the head dimension in the key tensor shape is denoted as N2. N1 = N2 must be satisfied (only MHA is supported).
 - headDim = 128.
 - blockShapeX and blockShapeY in block_shape must be multiples of 8.
-- After query and key are compressed, the corresponding Xblocks and Yblocks of query and key must satisfy Xblocks * Yblocks > 1. When post_block_shape is not null, the BNSD scenario further requires postXBlocks * postYBlocks > 1 (when the coarse-grained grid collapses to 1×1, there is no TopK selection semantics, and the host side rejects the input; the TND variable-length scenario allows it).
+- The maximum number of blocks in the selection grid must be greater than 1 for BNSD and greater than 0 for TND. It is Xblocks * Yblocks when post_block_shape is null, and postXBlocks * postYBlocks otherwise.
 - The data types of query and key must be consistent, and only FLOAT16 and BFLOAT16 are supported.
 - The data type of block_sparse_mask_out is INT8 (binary: 0 or 1).
 - post_block_shape is an optional input. When nullptr is passed in, the second-round pooling is disabled (backward compatibility). When `[postBlockShapeX, postBlockShapeY]` is passed in, the second-round pooling is enabled, and postBlockShapeX/postBlockShapeY are multiples of 8, indicating the number of block groups.
-- If actual_block_len_query / actual_block_len_key is not null, the value range of each element is [0, blockShapeX] / [0, blockShapeY]. If it is null, full compression is performed.
+- If actual_block_len_query / actual_block_len_key is not null, the value range of each element is [0, blockShapeX] / [0, blockShapeY]. If null, all valid tokens in each block are averaged.
 
 ## Calling Instructions
 

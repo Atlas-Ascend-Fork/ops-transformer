@@ -212,7 +212,7 @@ aclnnStatus aclnnBandwidthTest(
 
 - **Return Values**
 
-    aclnnStatus: Returns a status code. For details, see [aclnn Return Codes](../../../../docs/zh/context/aclnn_return_code_en.md).
+    aclnnStatus: Returns a status code. For details, see [aclnn Return Codes](../../../../docs/en/context/aclnn_return_code.md).
 
     The first-phase API performs input parameter validation. An error is reported in the following scenarios:
 
@@ -292,7 +292,7 @@ aclnnStatus aclnnBandwidthTest(
 
 - **Return Values**
 
-    Returns an aclnnStatus status code. For details, see [aclnn Return Codes](../../../../docs/zh/context/aclnn_return_code_en.md).
+    Returns an aclnnStatus status code. For details, see [aclnn Return Codes](../../../../docs/en/context/aclnn_return_code.md).
 
 ## Constraints
 

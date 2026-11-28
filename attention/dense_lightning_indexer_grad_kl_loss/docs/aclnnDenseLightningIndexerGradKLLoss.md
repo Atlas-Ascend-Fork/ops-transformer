@@ -33,7 +33,7 @@
      I_{t,:}=W_{t,:}@ReLU(\tilde{q}_{t,:}@\tilde{K}_{:t,:}^\top)
      $$
 
-     - $W_{t,:}$是第$t$个token对应的$weights$。
+     - $W_{t,:}$是第$t$个token对应的$weight$。
      - $\tilde{q}_{t,:}$是$\tilde{q}$矩阵第$t$个token对应的$G$个query头合轴后的结果。
      - $\tilde{K}_{:t,:}$为$t$行$\tilde{K}$矩阵。
 
@@ -65,7 +65,7 @@
       dI\mathop{{}}\nolimits_{{t,:}}=Softmax \left( I\mathop{{}}\nolimits_{{t,:}} \left) -p\mathop{{}}\nolimits_{{t,:}}\right. \right.
       $$
 
-      利用链式法则可以进行weights、query和key矩阵的梯度计算：
+      利用链式法则可以进行weight、query和key矩阵的梯度计算：
 
       $$
       dW\mathop{{}}\nolimits_{{t,:}}=dI\mathop{{}}\nolimits_{{t,:}}\text{@} \left( ReLU \left( S\mathop{{}}\nolimits_{{t,:}} \left) \left) \mathop{{}}\nolimits^{\top}\right. \right. \right. \right.
@@ -96,24 +96,24 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLossGetWorkspaceSize(
     const aclTensor     *key,
     const aclTensor     *queryIndex,
     const aclTensor     *keyIndex,
-    const aclTensor     *weights,
+    const aclTensor     *weight,
     const aclTensor     *softmaxMax,
     const aclTensor     *softmaxSum,
     const aclTensor     *softmaxMaxIndex,
     const aclTensor     *softmaxSumIndex,
-    const aclTensor     *queryRope,
-    const aclTensor     *keyRope,
-    const aclIntArray   *actualSeqLengthsQuery,
-    const aclIntArray   *actualSeqLengthsKey,
+    const aclTensor     *queryRopeOptional,
+    const aclTensor     *keyRopeOptional,
+    const aclIntArray   *actualSeqLengthsQueryOptional,
+    const aclIntArray   *actualSeqLengthsKeyOptional,
     double               scaleValue,
-    char                *layout,
+    char                *layoutOptional,
     int64_t              sparseMode,
     int64_t              preTokens,
     int64_t              nextTokens,
-    const aclTensor     *dQueryIndex,
-    const aclTensor     *dKeyIndex,
-    const aclTensor     *dWeights,
-    const aclTensor     *loss,
+    const aclTensor     *dQueryIndexOut,
+    const aclTensor     *dKeyIndexOut,
+    const aclTensor     *dWeightOut,
+    const aclTensor     *lossOut,
     uint64_t            *workspaceSize,
     aclOpExecutor       **executor)
 ```
@@ -195,7 +195,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>×</td>
       </tr>
       <tr>
-       <td>weights（aclTensor*）</td>
+       <td>weight（aclTensor*）</td>
        <td>输入</td>
        <td>权重</td>
        <td><ul><li>B: 支持泛化且与query的B保持一致。</li><li>S1: 支持泛化且与query的S1保持一致。</li><li>Nidx1: 64、32、16、8。</li><li>T1: 多个Batch的S1累加。</li></ul></td>
@@ -245,7 +245,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>queryRope（aclTensor*）</td>
+       <td>queryRopeOptional（aclTensor*）</td>
        <td>输入</td>
        <td>MLA RoPE部分：Query位置编码的输出。</td>
        <td><ul><li>与query的layout维度保持一致。</li><li>B: 支持泛化且与query的B保持一致。</li><li>S1: 支持泛化且与query的S1保持一致。</li><li>N1: 8、16、32、64、128。</li><li>Dr: 64。</li><li>T1: 多个Batch的S1累加。</li></ul>
@@ -256,7 +256,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>keyRope（aclTensor*）</td>
+       <td>keyRopeOptional（aclTensor*）</td>
        <td>输入</td>
        <td>MLA RoPE部分：Key位置编码的输出</td>
        <td><ul><li>与key的layout维度保持一致。</li><li>B: 支持泛化且与query的B保持一致。</li><li>S2: 支持泛化且与key的S1保持一致。</li><li>N2: 等于N1。</li><li>Dr: 64。</li><li>T2: 多个Batch的S2累加。</li></ul></td>
@@ -266,7 +266,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>actualSeqLengthsQuery（aclIntArray*）</td>
+       <td>actualSeqLengthsQueryOptional（aclIntArray*）</td>
        <td>输入</td>
        <td>每个Batch中，Query的有效token数</td>
        <td><ul><li>值依赖。</li><li>长度与B保持一致。</li><li>累加和与T1保持一致。</li></ul></td>
@@ -276,7 +276,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>actualSeqLengthsKey（aclIntArray*）</td>
+       <td>actualSeqLengthsKeyOptional（aclIntArray*）</td>
        <td>输入</td>
        <td>每个Batch中，Key的有效token数</td>
        <td><ul><li>值依赖。</li><li>长度与B保持一致。</li><li>累加和与T2保持一致。</li></ul></td>
@@ -296,7 +296,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>layout（char*）</td>
+       <td>layoutOptional（char*）</td>
        <td>输入</td>
        <td>layout格式</td>
        <td>仅支持BSND和TND格式。</td>
@@ -336,7 +336,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>dQueryIndex（aclTensor*）</td>
+       <td>dQueryIndexOut（aclTensor*）</td>
        <td>输出</td>
        <td>QueryIndex的梯度</td>
        <td><ul><li>B: 支持泛化且与query的B保持一致。</li><li>S1:支持泛化，且与query的S1保持一致。</li><li>Nidx1: 64、32、16、8。</li><li>D: 128。</li><li>T1: 多个Batch的S1累加。</li></ul></td>
@@ -346,7 +346,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>dKeyIndex（aclTensor*）</td>
+       <td>dKeyIndexOut（aclTensor*）</td>
        <td>输出</td>
        <td>KeyIndex的梯度</td>
        <td><ul><li>B: 支持泛化且与query的B保持一致。</li><li>S2: 支持泛化，且与key的S2保持一致。</li><li>Nidx2: 1。</li><li>D: 128。</li><li>T2: 多个Batch的S2累加。</li></ul></td>
@@ -356,7 +356,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>dWeights（aclTensor*）</td>
+       <td>dWeightOut（aclTensor*）</td>
        <td>输出</td>
        <td>Weights的梯度</td>
        <td><ul><li>B: 支持泛化。</li><li>S1: 支持泛化，不能为Matmul的M轴。</li><li>Nidx1: 64、32、16、8。</li><li>T1: 多个Batch的S1累加。</li></ul></td>
@@ -366,7 +366,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>√</td>
       </tr>
       <tr>
-       <td>loss（aclTensor*）</td>
+       <td>lossOut（aclTensor*）</td>
        <td>输出</td>
        <td>损失函数值</td>
        <td>-</td>
@@ -425,7 +425,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
       <tr>
        <td>ACLNN_ERR_PARAM_INVALID</td>
        <td>161002</td>
-       <td>query、key、queryIndex、keyIndex、weights、softmaxMax等输入变量的数据类型和数据格式不在支持的范围内。</td>
+       <td>query、key、queryIndex、keyIndex、weight、softmaxMax等输入变量的数据类型和数据格式不在支持的范围内。</td>
       </tr>
       <tr>
        <td>ACLNN_ERR_INNER_TILING_ERROR</td>
@@ -481,14 +481,14 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
 ## 约束说明
 
 - 参数query、key、queryIndex、keyIndex的数据类型应保持一致。
-- 参数weights不为float32时，参数query、key、queryIndex、keyIndex、weights的数据类型应保持一致。
+- 参数weight不为float32时，参数query、key、queryIndex、keyIndex、weight的数据类型应保持一致。
 
 - 公共约束
 
   - 确定性计算：
     aclnnDenseLightningIndexerGradKLLoss默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
   - 入参为空的场景处理：
-    - query或key或queryIndex或keyIndex或weights为空Tensor：当前不支持，会报错。
+    - query或key或queryIndex或keyIndex或weight为空Tensor：当前不支持，会报错。
 
   <table style="undefined;table-layout: fixed; width: 942px"><colgroup>
       <col style="width: 100px">
@@ -607,7 +607,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>layout</td>
+       <td>layoutOptional</td>
        <td>BSND/TND</td>
        <td>-</td>
       </tr>

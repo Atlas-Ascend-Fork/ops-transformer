@@ -188,6 +188,10 @@ cann_ops_transformer.msa_index_score(
     - query and key: In addition to fp16/bf16, fp8_e4m3fn / fp8_e5m2 are supported.
 <!-- end id7 -->
 
+## Constraints
+
+- For FLOAT16 or BFLOAT16 inputs, query and key must have the same D, which must be a multiple of 16 in [16, 128]. N2 must be 1.
+
 ## Output
 
 - `return_choice=0`: `[N1, T1, RoundUp(MB,16)]` float32 score.

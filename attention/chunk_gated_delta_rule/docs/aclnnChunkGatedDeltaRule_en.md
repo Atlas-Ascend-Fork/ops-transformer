@@ -193,7 +193,7 @@ aclnnStatus aclnnChunkGatedDeltaRule(
     <tr>
       <td>finalState</td>
       <td>Output</td>
-      <td>Final state matrix S_t.</td>
+      <td>Final state matrix S_L.</td>
       <td>-</td>
       <td>BFLOAT16, FLOAT32</td>
       <td>ND</td>
@@ -448,7 +448,7 @@ int main()
     std::vector<int16_t> betaHostData(GetShapeSize(gamaShape));
     std::vector<int32_t> actSeqLenHostData(batchSize, seqLength);
     int16_t bfloatHalf = 16128;   // The binary form of 16128 in int16_t corresponds to 0.5 in bfloat16.
-    int16_t bfloatQuarter = 15936; // The binary form of 15936 in int16_t corresponds to 0.25 in bfloat16.
+    int16_t bfloatQuarter = 16000; // The binary form of 16000 in int16_t corresponds to 0.25 in bfloat16.
     for (int i = 0; i < initStateHostData.size(); i++) {
         initStateHostData[i] = bfloatQuarter;
     }

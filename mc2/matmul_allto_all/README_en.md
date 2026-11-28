@@ -15,7 +15,7 @@ English | [简体中文](./README.md)
 
 ## Functional Description
 
-- Operator function: Fuses the quantized MatMul computation, Permute (which ensures address continuity after communication), and AlltoAll communication. **Computation is performed before communication.** The non-quantized, K-C quantization, and mx [quantization modes](../../docs/zh/context/quant_mode_introduction_en.md) are supported.
+- Operator function: Fuses the quantized MatMul computation, Permute (which ensures address continuity after communication), and AlltoAll communication. **Computation is performed before communication.** The non-quantized, K-C quantization, and mx [quantization modes](../../docs/en/context/quant_mode_introduction.md) are supported.
 - Computation formula: Assume that the shape of x1 is (BS, H1), the shape of x2 is (H1, H2), and rankSize is the number of NPU cards.
 
     - <term>Atlas A2 products</term>:
@@ -222,7 +222,7 @@ English | [简体中文](./README.md)
     </tr>
     </tbody></table>
 
-The relationship between the enumeration values of x1QuantMode, x2QuantMode, and commQuantMode and the [quantization modes](../../docs/zh/context/quant_mode_introduction_en.md) is as follows:
+The relationship between the enumeration values of x1QuantMode, x2QuantMode, and commQuantMode and the [quantization modes](../../docs/en/context/quant_mode_introduction.md) is as follows:
 
 * 0: no quantization
 * 1: pertensor

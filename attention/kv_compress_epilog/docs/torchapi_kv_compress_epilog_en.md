@@ -167,7 +167,7 @@ Defaults to a deterministic implementation.
 
     cache = torch.zeros(block_num, block_size, 1, head_dim, dtype=torch.uint8).npu()
     x = torch.randn(bs, d, dtype=torch.bfloat16).npu()
-    slot_mapping = torch.randint(0, block_num * block_size, (bs,), dtype=torch.int32).npu()
+    slot_mapping = torch.arange(bs, dtype=torch.int32).npu()
 
     kv_compress_epilog(
         cache, x, slot_mapping, quant_group_size=64, quant_mode="fp8_e8m0", round_scale=True, x_scale=1.0)

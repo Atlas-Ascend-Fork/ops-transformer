@@ -71,6 +71,7 @@
         <!-- end id8 -->
 
     - dynamic quant:
+        - On Atlas A2 and Atlas A3 products, when `expandedXOut` is INT4, replace the divisor 127 with 7 in both `dynamicQuantScaleOutOptional` formulas below.
         - If scale is not provided:
 
             $$

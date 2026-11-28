@@ -69,6 +69,7 @@
         <!-- end id8 -->
 
     - 动态quant：
+        - 在Atlas A2系列产品和Atlas A3系列产品上，当`expandedXOut`为INT4时，以下两个`dynamicQuantScaleOutOptional`公式的分母均由127替换为7。
         - 若不输入scale：
 
             $$

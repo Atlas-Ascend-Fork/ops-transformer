@@ -106,7 +106,7 @@ aclnnStatus aclnnMatmulReduceScatter(
                 <li>Empty tensors are supported.</li>
                 <li>The data type is the same as that of x1.</li>
                 <li>The current version supports only 2D inputs, in both transposed and non-transposed scenarios.</li>
-                <li>Only the <a href="../../docs/zh/context/non_contiguous_tensor_en.md">non-contiguous tensor</a> in the two-axis transposition case is supported; non-contiguous tensors in other scenarios are not supported.</li>
+                <li>Only the <a href="../../docs/en/context/non_contiguous_tensor.md">non-contiguous tensor</a> in the two-axis transposition case is supported; non-contiguous tensors in other scenarios are not supported.</li>
             </ul>
         </td>
         <td>FLOAT16, BFLOAT16</td>
@@ -213,7 +213,7 @@ aclnnStatus aclnnMatmulReduceScatter(
 
 - **Return Value**
 
-    Returns an aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/zh/context/aclnn_return_code_en.md).
+    Returns an aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/en/context/aclnn_return_code.md).
 
     The first-phase API validates input parameters and reports an error in the following scenarios:
 
@@ -286,7 +286,7 @@ aclnnStatus aclnnMatmulReduceScatter(
 
 - **Return Value:**
 
-    Returns an aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/zh/context/aclnn_return_code_en.md).
+    Returns an aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/en/context/aclnn_return_code.md).
 
 ## Constraints
 

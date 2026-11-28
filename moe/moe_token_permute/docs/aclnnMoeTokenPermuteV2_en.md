@@ -94,7 +94,7 @@ The output shapes of each mode are as follows:
 | `-1` | `[M, H]` | `[flatten_size]` | `[0]` |
 | `2` | `[M, H]` | `[flatten_size]` | `[M, AlignUp(CeilDiv(H, 32), 2)]` |
 | `3` | `[M, H]` | `[flatten_size]` | `[M, AlignUp(CeilDiv(H, 32), 2)]` |
-| `9` | `[M, H / 2]` | `[flatten_size]` | `[M, CeilDiv(H, 64), 2]` |
+| `9` | `[M, H]` | `[flatten_size]` | `[M, CeilDiv(H, 64), 2]` |
 
 Where:
 
@@ -112,8 +112,8 @@ Common error cases:
 | Return Value | Error Code | Description |
 | --- | --- | --- |
 | ACLNN_ERR_PARAM_NULLPTR | 161001 | Input or output tensor is a null pointer. |
-| ACLNN_ERR_PARAM_INVALID | 161002 | Input or output data type or `quantMode` is out of the supported range. |
-| ACLNN_ERR_INNER_TILING_ERROR | 561002 | The shape does not meet operator constraints, or `paddedMode=true`. |
+| ACLNN_ERR_PARAM_INVALID | 161002 | Input or output data type is out of the supported range, or input or output shape fails API validation; on Ascend 950PR&950DT products, `quantMode` is not in `-1/2/3/9` or `paddedMode=true`. |
+| ACLNN_ERR_INNER_TILING_ERROR | 561002 | Operator tiling fails internally, for example, when tiling rejects `paddedMode=true` on the compatibility path for platforms other than Ascend 950PR&950DT products. |
 
 ## aclnnMoeTokenPermuteV2
 
@@ -130,8 +130,8 @@ Common error cases:
 - When `aclnnMoeTokenPermuteV2` is called on Ascend 950PR&950DT products, `indices` represents the expert ID. The value range is `[0, 10240)`. The maximum value is `10239`, and `10240` is not supported.
 - `paddedMode=true` is not supported.
 - In quantization mode on Ascend 950PR&950DT products, `tokens` currently supports FLOAT16 and BFLOAT16.
-- When `quantMode=9`, the hidden dimension `H` of `tokens` must be an even number, and the hidden dimension of the output `permuteTokensOut` is `H / 2`.
-- On platforms other than Ascend 950PR&950DT products, `quantMode=2/3/9` is silently ignored and processed through the non-quantization compatible path.
+- When `quantMode=9`, the hidden dimension `H` of `tokens` must be an even number, and the logical hidden dimension of `permuteTokensOut` is `H`. Two FLOAT4 elements are packed for storage; packing does not change the logical shape.
+- On platforms other than Ascend 950PR&950DT products, `quantMode` is not validated or used; `2/3/9` are processed through the non-quantization compatible path.
 
 ## Example
 

@@ -51,7 +51,7 @@ graph LR
 | Term | Description |
 |------|----------|
 | Non-quantization | Both the left and right matrices are of floating-point types and are directly computed |
-| Full quantization | Both the left and right matrices are computed in low precision and restored through scale. For details, see [Quantization Introduction](../../docs/zh/context/quant_mode_introduction_en.md) |
+| Full quantization | Both the left and right matrices are computed in low precision and restored through scale. For details, see [Quantization Introduction](../../docs/en/context/quant_mode_introduction.md) |
 | Pseudo-quantization | The weights of the right matrix are quantized, including the perchannel quantization mode |
 | pertensor | Also known as T quantization. All tensors share the same quantization parameter |
 | perchannel | Also known as C quantization. The quantization object is the right matrix, and each channel uses an independent quantization parameter |
@@ -65,7 +65,7 @@ graph LR
 | G-B | The left matrix is pergroup and the right matrix is perblock |
 | MX | A special case of the pergroup-pergroup (G-G) quantization mode, where the quantization parameter type is FLOAT8_E8M0 and the group size is 32 |
 | ND | Conventional contiguous arrangement |
-| NZ | [FRACTAL_NZ](../../docs/zh/context/data_format_en.md) format (hardware-affine arrangement) |
+| NZ | [FRACTAL_NZ](../../docs/en/context/data_format.md) format (hardware-affine arrangement) |
 
 ## Function Description
 
@@ -127,8 +127,8 @@ For the detailed computation formulas (classified by scenario: non-quantization,
 
 ### Common Constraints
 
-- When x/weight is transposed, the corresponding tensor must be [non-contiguous](../../docs/zh/context/non_contiguous_tensor_en.md).
-- When weight is in the [FRACTAL_NZ](../../docs/zh/context/data_format_en.md) format, the shape must meet the NZ format requirements.
+- When x/weight is transposed, the corresponding tensor must be [non-contiguous](../../docs/en/context/non_contiguous_tensor.md).
+- When weight is in the [FRACTAL_NZ](../../docs/en/context/data_format.md) format, the shape must meet the NZ format requirements.
 - perTokenScaleOptional: 1D in the per-token scenario, with the shape (M,); 3D in the MX quantization scenario, with the shape (M, ceil(K / 64), 2). In the MX quantization scenario of WeightNZ, x and out are supported as a single tensor and weight is supported as multiple tensors; for the specific supported combinations, see the corresponding API document.
 - groupListOptional: when the TensorList length in out is 1, groupList constrains the valid range of output data, and the unspecified parts do not participate in the update.
 - groupListType:

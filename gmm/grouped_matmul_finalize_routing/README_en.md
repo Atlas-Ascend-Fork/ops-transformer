@@ -220,7 +220,7 @@ The inputs and outputs support the following data type combinations:
 
 **ND format (aclnnGroupedMatmulFinalizeRoutingV3) supported data type combinations:**
 
-Only the MX full quantization scenario is supported. For related information, see [Quantization Introduction](../../docs/zh/context/quant_mode_introduction_en.md). offsetOptional, antiquantScaleOptional, and antiquantOffsetOptional must be set to empty.
+Only the MX full quantization scenario is supported. For related information, see [Quantization Introduction](../../docs/en/context/quant_mode_introduction.md). offsetOptional, antiquantScaleOptional, and antiquantOffsetOptional must be set to empty.
 
 | MX Quantization Scenario | x1                        | x2                         | scaleOptional | biasOptional     | pertokenScaleOptional | groupListOptional | sharedInputOptional | logitOptional | rowIndexOptional | out     |
 | ---------- | ------------------------- | -------------------------- | ------------- | ---------------- | --------------------- | ----------------- | ------------------- | ------------- | ---------------- | ------- |

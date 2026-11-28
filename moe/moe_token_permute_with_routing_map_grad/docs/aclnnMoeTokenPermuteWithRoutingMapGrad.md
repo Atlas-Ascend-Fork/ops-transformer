@@ -26,40 +26,44 @@
 - **接口功能**：aclnnMoeTokenPermuteWithRoutingMap的反向传播。
 - **计算公式**：
 
-    $$
-    permuteTokenId, outIndex= sortedIndices.sort(dim=-1)
-    $$
+    以下公式描述非空输入场景。`tokensGradOut`的计算不依赖是否传入概率梯度。首先将`tokensGradOut`初始化为零：
 
     $$
-    capacity = permutedTokenOutputGrad.size(0) / numExperts
+    tokensGradOut= zeros((tokensNum, hidden_size), dtype=permutedTokenOutputGrad.dtype, device=permutedTokenOutputGrad.device)
     $$
 
-    - probs不为None：
+    - `dropAndPad`为false时，`topK_num = permutedTokenOutputGrad.size(0) / tokensNum`。遍历`sortedIndices`，仅对`sortedIndices[i] >= 0`的项执行：
+
+    $$
+    tokensGradOut[i / topK\_num] += permutedTokenOutputGrad[sortedIndices[i]]
+    $$
+
+    其中`i / topK_num`为整数除法。
+
+    - `dropAndPad`为true时，`sortedIndices`中的值为token编号。遍历`sortedIndices`并执行：
+
+    $$
+    tokensGradOut[sortedIndices[i]] += permutedTokenOutputGrad[i]
+    $$
+
+    - `permutedProbsOutputGradOptional`和`probsGradOutOptional`均非空时，计算概率梯度：
 
     $$
     probsGradOutOptional = zeros(tokensNum, numExperts)
     $$
 
-    - dropPaddedMode为true时
+    - dropAndPad为true时，`capacity = permutedTokenOutputGrad.size(0) / numExperts`：
 
     $$
     probsGradOutOptional [sortedIndices[i], i/capacity] = permutedProbsOutputGradOptional[i]
     $$
 
-    - dropPaddedMode为false时
+    - dropAndPad为false时
 
     $$
-    probsGradOutOptional = maskedscatter(probsGradOutOptional,routingMapOptional, permutedProbsOutputGradOptional)
+    probsGradOutOptional = transpose(maskedscatter(transpose(probsGradOutOptional), transpose(routingMapOptional), permutedProbsOutputGradOptional))
     $$
-    - probs为None：
-
-    $$
-    tokensGradOut= zeros(restoreShapeOptional, dtype=permutedTokens.dtype, device=permutedTokens.device)
-    $$
-
-    $$
-    tokensGradOut[permuteTokenId[i]] += permutedTokens[outIndex[i]]
-    $$
+    其中transpose交换token和expert两个维度，maskedscatter按expert优先顺序填充。
 
 ## 函数原型
 
@@ -144,7 +148,7 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>sortedIndices</td>
       <td>输入</td>
       <td>排序的索引值。</td>
-      <td>非dropAndPad模式索引取值范围[0, tokensNum * topK_num - 1]或-1，-1表示无效槽位不参与计算，topK_num表示每个token选中的专家数量的上限；dropAndPad模式索引取值范围[0, numExperts * capacity - 1]，capacity表示每个专家选中的token数量。</td>
+      <td>非dropAndPad模式索引取值范围[0, tokensNum * topK_num - 1]或-1，-1表示无效槽位不参与计算，topK_num表示每个token选中的专家数量的上限；dropAndPad模式索引表示token编号，取值范围为[0, tokensNum - 1]，capacity表示每个专家选中的token数量。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>
@@ -186,7 +190,7 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
       <td>dropAndPad</td>
       <td>输入</td>
       <td>-</td>
-      <td>true表示开启dropPaddedMode，false表示关闭dropPaddedMode。</td>
+      <td>true表示开启dropAndPad，false表示关闭dropAndPad。</td>
       <td>bool</td>
       <td>-</td>
       <td>-</td>
@@ -317,7 +321,7 @@ aclnnStatus aclnnMoeTokenPermuteWithRoutingMapGrad(
 - 确定性计算：
   - aclnnMoeTokenPermuteWithRoutingMapGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 
-- 非dropPaddedMode场景topK_num <= 512
+- 非dropAndPad场景topK_num <= 512
 
 ## 调用示例
 

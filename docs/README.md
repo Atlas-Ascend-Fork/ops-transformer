@@ -28,8 +28,21 @@ Docs目录结构说明如下：
   │   ├── ...
   ├── menu_aclnn_api.md                  # 全量aclnn接口索引文件
   ├── menu_torch_api.md                  # 全量torch_extension接口索引文件
+  ├── ascend950_op_list.md               # Ascend 950算子列表
   ├── op_api_list.md                     # aclnn接口列表
   ├── op_list.md                         # 全量算子列表
+  └── torch_api_list.md                  # torch_extension接口列表
+├── en                                  # 英文文档
+  ├── context                            # 公共文档
+  ├── debug                              # 算子调试指导
+  ├── develop                            # 算子开发指导
+  ├── figures                            # 图片目录
+  ├── install                            # 环境安装和编译指导
+  ├── invocation                         # 算子调用指导
+  ├── menu_aclnn_api.md                  # aclnn接口索引文件
+  ├── menu_torch_api.md                  # torch_extension接口索引文件
+  ├── op_api_list.md                     # aclnn接口列表
+  ├── op_list.md                         # 算子列表
   └── torch_api_list.md                  # torch_extension接口列表
 ├── CONTRIBUTING_DOCS.md                 # 文档贡献说明
 ├── QUICKSTART.md                        # 快速入门

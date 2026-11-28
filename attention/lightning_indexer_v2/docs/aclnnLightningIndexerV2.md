@@ -117,7 +117,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td>输入</td>
     <td>公式中的输入K。支持的shape为：
         <ul><li>layoutKOptional为PA_BBND时，shape为(block_num, block_size, N2, D)。</li><li>layoutKOptional为BSND时，shape为(B, S2, N2, D)。</li><li>layoutKOptional为TND时，shape为(T2, N2, D)。</li></ul></td>
-    <td><ul><li>不支持空tensor。</li><li>block_num为PageAttention时block总数，block_size为一个block的token数。</li></ul></td>
+    <td><ul><li>不支持空tensor；TND格式下，整个k的T2必须大于0。</li><li>block_num为PageAttention时block总数，block_size为一个block的token数。</li></ul></td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
     <td>3-4</td>

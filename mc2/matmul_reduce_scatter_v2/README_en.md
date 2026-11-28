@@ -18,9 +18,9 @@ English | [简体中文](./README.md)
 - **Interface Function**:
     The aclnnMatmulReduceScatterV2 API is a functional extension of the aclnnMatmulReduceScatter API. On the basis of supporting the input types FLOAT16/BFLOAT16 for x1 and x2,
     - <term>Ascend 950PR&950DT products</term>:
-        - Adds support for the low-precision data types FLOAT8_E4M3FN/FLOAT8_E5M2/HIFLOAT8/FLOAT4_E2M1. The pertensor, perblock, and mx [quantization modes](../../docs/zh/context/quant_mode_introduction_en.md) are supported.
+        - Adds support for the low-precision data types FLOAT8_E4M3FN/FLOAT8_E5M2/HIFLOAT8/FLOAT4_E2M1. The pertensor, perblock, and mx [quantization modes](../../docs/en/context/quant_mode_introduction.md) are supported.
     - <term>Atlas A3 products</term> and <term>Atlas A2 products</term>:
-        - Adds support for the low-precision data type INT8. The pertoken/perchannel [quantization modes](../../docs/zh/context/quant_mode_introduction_en.md) are supported.
+        - Adds support for the low-precision data type INT8. The pertoken/perchannel [quantization modes](../../docs/en/context/quant_mode_introduction.md) are supported.
 
 - **Computation Formula**:
     - Case 1: If the data types of x1 and x2 are FLOAT16/BFLOAT16, the inputs x1, x2, and bias are first processed by the matmul computation and then by the ReduceScatter communication.
@@ -120,7 +120,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
         <td>Input</td>
         <td>Right matrix of the MM computation, that is, x2 in the computation formula.</td>
         <td><ul><li>The current version supports only two-dimensional input and supports the transpose and non-transpose scenarios. The shape is [n, k] in the transpose scenario and [k, n] in the non-transpose scenario.</li><li>Only
-        <a href="../../docs/zh/context/non_contiguous_tensor_en.md">[non-contiguous tensors]</a> in the two-axis transpose case are supported; non-contiguous tensors in other scenarios are not supported.</li></ul></td>
+        <a href="../../docs/en/context/non_contiguous_tensor.md">[non-contiguous tensors]</a> in the two-axis transpose case are supported; non-contiguous tensors in other scenarios are not supported.</li></ul></td>
         <td>FLOAT16, BFLOAT16, FLOAT8_E4M3FN, FLOAT8_E5M2, HIFLOAT8, FLOAT4_E2M1, INT8</td>
         <td>ND, FRACTAL_NZ</td>
         <td>2</td>
@@ -307,7 +307,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
 
 - **Return Values**
 
-    Returns the aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/zh/context/aclnn_return_code_en.md).
+    Returns the aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/en/context/aclnn_return_code.md).
 
     The first-stage API performs input parameter validation and reports an error in the following scenarios:
 
@@ -376,7 +376,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
 
 - **Return Values**
 
-    Returns the aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/zh/context/aclnn_return_code_en.md).
+    Returns the aclnnStatus status code. For details, see [aclnn Return Codes](../../docs/en/context/aclnn_return_code.md).
 
 ## Constraints
 

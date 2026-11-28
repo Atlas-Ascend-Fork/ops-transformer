@@ -68,7 +68,7 @@
    dK\mathop{{}}\nolimits_{{:t,:}}= \left( dS\mathop{{}}\nolimits_{{t,:}} \left) \mathop{{}}\nolimits^{{T}}@q\mathop{{}}\nolimits_{{:t,:}}\right. \right.
    $$
 
-   其中，S为QK矩阵softmax的结果。
+   其中，S为公式中的矩阵乘积$q_{t,:}@(K_{:t,:})^T$，未经softmax。
 
 <!-- - **说明**：
    <blockquote>query、key、value数据排布格式支持从多种维度解读，其中B（Batch）表示输入样本批量大小、S（Seq-Length）表示输入样本序列长度、H（Head-Size）表示隐藏层的大小、N（Head-Num）表示多头数、D（Head-Dim）表示隐藏层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
@@ -579,7 +579,7 @@ aclnnStatus aclnnSparseLightningIndexerGradKLLossV2(
         </tr>
         <tr>
             <td>3</td>
-            <td>rightDownCausal模式的mask，对应以右顶点为划分的下三角场景，需要传入优化后的attenmask矩阵</td>
+            <td>rightDownCausal模式，对应右下角对齐的下三角场景。本接口无需传入attenmask矩阵。</td>
             <td>支持</td>
   </tr>
         <tr>
