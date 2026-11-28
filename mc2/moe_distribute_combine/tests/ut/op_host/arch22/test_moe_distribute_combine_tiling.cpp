@@ -72,6 +72,8 @@ TEST_F(MoeDistributeCombineArch22TilingTest, Test0)
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
     uint64_t expectTilingKey = 16UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
+    Mc2Hcom::MockValues smallWindow{{"rankNum", 8}, {"cclBufferSize", 1024UL}};
+    Mc2ExecuteTestCase(tilingContextPara, smallWindow, ge::GRAPH_FAILED);
 }
 
 TEST_F(MoeDistributeCombineArch22TilingTest, Test1)

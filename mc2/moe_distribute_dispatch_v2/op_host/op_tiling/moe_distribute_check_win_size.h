@@ -18,12 +18,13 @@
 
 #include <algorithm>
 #include "op_host/op_tiling/mc2_tiling_utils.h"
-#include "mc2_log_compat.h"
+#include "mc2_common_log.h"
 #include "../../op_kernel/moe_distribute_v2_constant.h"
 
 namespace {
 constexpr uint32_t ATTR_GROUP_EP_INDEX = 0;
 constexpr uint64_t DOUBLE_DATA_BUFFER = 2UL;
+constexpr uint64_t A5_HCCL_BUFFER_RATIO = 2UL;
 constexpr uint64_t MB_SIZE = 1024UL * 1024UL;
 constexpr uint64_t MAX_OUT_DTYPE_SIZE = 2UL;
 constexpr uint64_t WIN_ADDR_ALIGN = 512UL;
@@ -226,39 +227,56 @@ inline ge::graphStatus CheckFullMeshActualWinSize(const char* nodeName, const Ch
                                                   uint64_t hcclBufferSizeEp, uint64_t maxBs, uint64_t h,
                                                   uint64_t epWorldSize, uint64_t sharedExpertNum,
                                                   uint64_t tokenNeedSizeDispatch, uint64_t tokenNeedSizeCombine,
-                                                  bool isArch35)
+                                                  NpuArch npuArch)
 {
-    if (isArch35) {
+    if (npuArch == Ops::Base::DAV_3510) {
         actualSize += epWorldSize * EP_RANK_OFFSET_STEP;
+        const bool windowTooSmall = actualSize > maxWindowSizeEp;
+        const auto hcclBufferText =
+            windowTooSmall && !winSizeData.isMc2Context ?
+                CreateErrorMsg(" HCCL_BUFFSIZE=%.2f MB.",
+                               static_cast<double>(hcclBufferSizeEp) / (A5_HCCL_BUFFER_RATIO * MB_SIZE)) :
+                std::vector<char>{};
         OP_TILING_CHECK(
-            (actualSize > maxWindowSizeEp),
+            windowTooSmall,
             OP_LOGE_WITHOUT_REPORT(
                 nodeName,
-                "HCCL_BUFFSIZE_EP is too SMALL, maxBs = %lu, h = %lu, epWorldSize = %lu,"
-                " localMoeExpertNum = %u, sharedExpertNum = %lu, tokenNeedSizeDispatch = %lu,"
-                " tokenNeedSizeCombine = %lu,"
-                " k = %lu, NEEDED_HCCL_BUFFSIZE(((maxBs * tokenNeedSizeDispatch * epWorldSize * "
-                "localMoeExpertNum) +"
-                " (maxBs * tokenNeedSizeCombine * (k + sharedExpertNum))) * 2) + epWorldSize * 1024 = %luMB,"
-                " HCCL_BUFFSIZE=%luMB, actual CCL_BUFFSIZE=%luMB.",
-                maxBs, h, epWorldSize, winSizeData.localMoeExpertNum, sharedExpertNum, tokenNeedSizeDispatch,
-                tokenNeedSizeCombine, winSizeData.k, (actualSize + 2UL * MB_SIZE - 1UL) / MB_SIZE,
-                hcclBufferSizeEp / (MB_SIZE * 2), hcclBufferSizeEp / MB_SIZE),
+                "%s is too small. Required at least %.2f MB, actual %.2f MB.%s\n"
+                "Detailed calculation (MB): ((maxBs * tokenNeedSizeDispatch * epWorldSize * localMoeExpertNum + "
+                "maxBs * tokenNeedSizeCombine * (k + sharedExpertNum)) * %lu + epWorldSize * %u) / 1024 / 1024 "
+                "+ %.2f (state_area). "
+                "maxBs=%lu, h=%lu, epWorldSize=%lu, localMoeExpertNum=%u, k=%lu, sharedExpertNum=%lu, "
+                "tokenNeedSizeDispatch=%lu B, tokenNeedSizeCombine=%lu B.",
+                winSizeData.isMc2Context ? "ccl_buffer_size" : "The EP HCCL buffer",
+                static_cast<double>(actualSize + (hcclBufferSizeEp - maxWindowSizeEp)) / MB_SIZE,
+                static_cast<double>(hcclBufferSizeEp) / MB_SIZE, hcclBufferText.empty() ? "" : hcclBufferText.data(),
+                DOUBLE_DATA_BUFFER, EP_RANK_OFFSET_STEP,
+                static_cast<double>(hcclBufferSizeEp - maxWindowSizeEp) / MB_SIZE, maxBs, h, epWorldSize,
+                winSizeData.localMoeExpertNum, winSizeData.k, sharedExpertNum, tokenNeedSizeDispatch,
+                tokenNeedSizeCombine),
             return ge::GRAPH_FAILED);
     } else {
+        const bool isA2A3 = npuArch == Ops::Base::DAV_2201;
+        const uint64_t stateAreaBytes = isA2A3 ? 0UL : hcclBufferSizeEp - maxWindowSizeEp;
+        const bool windowTooSmall = actualSize > maxWindowSizeEp;
+        const auto stateAreaText =
+            windowTooSmall && stateAreaBytes != 0UL ?
+                CreateErrorMsg(" + %.2f (state_area)", static_cast<double>(stateAreaBytes) / MB_SIZE) :
+                std::vector<char>{};
         OP_TILING_CHECK(
-            (actualSize > maxWindowSizeEp),
-            OP_LOGE_WITHOUT_REPORT(nodeName,
-                                   "HCCL_BUFFSIZE_EP is too SMALL, maxBs = %lu, h = %lu, epWorldSize = %lu,"
-                                   " localMoeExpertNum = %u, sharedExpertNum = %lu, tokenNeedSizeDispatch = %lu,"
-                                   " tokenNeedSizeCombine = %lu,"
-                                   " k = %lu, NEEDED_HCCL_BUFFSIZE(((maxBs * tokenNeedSizeDispatch * epWorldSize * "
-                                   "localMoeExpertNum) +"
-                                   " (maxBs * tokenNeedSizeCombine * (k + sharedExpertNum))) * 2) = %luMB,"
-                                   " HCCL_BUFFSIZE=%luMB, actual CCL_BUFFSIZE=%luMB.",
-                                   maxBs, h, epWorldSize, winSizeData.localMoeExpertNum, sharedExpertNum,
-                                   tokenNeedSizeDispatch, tokenNeedSizeCombine, winSizeData.k,
-                                   actualSize / MB_SIZE + 1UL, hcclBufferSizeEp / MB_SIZE, hcclBufferSizeEp / MB_SIZE),
+            windowTooSmall,
+            OP_LOGE_WITHOUT_REPORT(
+                nodeName,
+                "%s is too small. Required at least %.2f MB, actual %.2f MB.\n"
+                "Detailed calculation (MB): ((maxBs * tokenNeedSizeDispatch * epWorldSize * localMoeExpertNum + "
+                "maxBs * tokenNeedSizeCombine * (k + sharedExpertNum)) * %lu) / 1024 / 1024%s. "
+                "maxBs=%lu, h=%lu, epWorldSize=%lu, localMoeExpertNum=%u, k=%lu, sharedExpertNum=%lu, "
+                "tokenNeedSizeDispatch=%lu B, tokenNeedSizeCombine=%lu B.",
+                winSizeData.isMc2Context ? (isA2A3 ? "The EP data window" : "ccl_buffer_size") : "The EP HCCL buffer",
+                static_cast<double>(actualSize + stateAreaBytes) / MB_SIZE,
+                static_cast<double>(maxWindowSizeEp + stateAreaBytes) / MB_SIZE, DOUBLE_DATA_BUFFER,
+                stateAreaText.empty() ? "" : stateAreaText.data(), maxBs, h, epWorldSize, winSizeData.localMoeExpertNum,
+                winSizeData.k, sharedExpertNum, tokenNeedSizeDispatch, tokenNeedSizeCombine),
             return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;
@@ -288,7 +306,7 @@ inline ge::graphStatus CheckActualWinSize(const gert::TilingContext* context, co
     }
     return CheckFullMeshActualWinSize(nodeName, winSizeData, actualSize, maxWindowSizeEp, hcclBufferSizeEp, maxBs, h,
                                       epWorldSize, sharedExpertNum, tokenNeedSizeDispatch, tokenNeedSizeCombine,
-                                      npuArch == Ops::Base::DAV_3510);
+                                      npuArch);
 }
 
 inline uint32_t CalcSerialUbSizeForTokenCopy(const CheckWinSizeData& info, uint32_t aivNum, uint64_t ubRealSize)

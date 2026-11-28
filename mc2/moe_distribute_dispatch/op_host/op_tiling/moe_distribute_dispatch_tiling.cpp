@@ -691,13 +691,22 @@ static ge::graphStatus CheckWinSize(const gert::TilingContext* context, MoeDistr
     uint64_t h = static_cast<uint64_t>(tilingData->moeDistributeDispatchInfo.h);
     uint64_t epWorldSize = static_cast<uint64_t>(tilingData->moeDistributeDispatchInfo.epWorldSize);
     uint64_t maxBs = static_cast<uint64_t>(tilingData->moeDistributeDispatchInfo.globalBs) / epWorldSize;
-    uint64_t actualSize = epWorldSize * maxBs * h * 2UL * 2UL * static_cast<uint64_t>(localMoeExpertNum);
-    if (actualSize > maxWindowSizeEp) {
-        OP_LOGE_WITHOUT_REPORT(
-            nodeName,
-            "HCCL_BUFFSIZE is too SMALL, maxBs = %lu, h = %lu, epWorldSize = %lu, localMoeExpertNum = %u,"
-            "ep_worldsize * maxBs * h * 2 * 2 * localMoeExpertNum = %luMB, HCCL_BUFFSIZE=%luMB.",
-            maxBs, h, epWorldSize, localMoeExpertNum, actualSize / MB_SIZE + 1UL, hcclBufferSizeEp / MB_SIZE);
+    uint64_t requiredWindowBytes = epWorldSize * maxBs * h * 2UL * 2UL * static_cast<uint64_t>(localMoeExpertNum);
+    if (requiredWindowBytes > maxWindowSizeEp) {
+        const uint64_t stateAreaBytes = hcclBufferSizeEp - maxWindowSizeEp;
+        const auto stateAreaText =
+            stateAreaBytes == 0UL ?
+                std::vector<char>{} :
+                CreateErrorMsg(" + %.2f (state_area)", static_cast<double>(stateAreaBytes) / MB_SIZE);
+        OP_LOGE_WITHOUT_REPORT(nodeName,
+                               "The EP HCCL buffer is too small. Required at least %.2f MB, actual %.2f MB.\n"
+                               "Detailed calculation (MB): (epWorldSize * maxBs * h * 2 * 2 * localMoeExpertNum) "
+                               "/ 1024 / 1024%s. "
+                               "epWorldSize=%lu, maxBs=%lu, h=%lu, localMoeExpertNum=%u, data=%.2f MB.",
+                               static_cast<double>(requiredWindowBytes + stateAreaBytes) / MB_SIZE,
+                               static_cast<double>(hcclBufferSizeEp) / MB_SIZE,
+                               stateAreaText.empty() ? "" : stateAreaText.data(), epWorldSize, maxBs, h,
+                               localMoeExpertNum, static_cast<double>(requiredWindowBytes) / MB_SIZE);
         return ge::GRAPH_FAILED;
     }
     tilingData->moeDistributeDispatchInfo.totalWinSizeEp = maxWindowSizeEp;
@@ -764,10 +773,12 @@ ge::graphStatus MoeDistributeDispatchTilingBase::MoeDistributeDispatchA3A5Tiling
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "tensor shape", "invalid", "Tensor shape check failed"),
         return ge::GRAPH_FAILED);
     // 校验win区大小
-    OP_TILING_CHECK(
-        CheckWinSize(context, tilingData, nodeName, localMoeExpertNum) != ge::GRAPH_SUCCESS,
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "window size", "invalid", "Window size check failed"),
-        return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckWinSize(context, tilingData, nodeName, localMoeExpertNum) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        nodeName, "window size", "invalid",
+                        "Window size check failed. "
+                        "The buffer size may be unavailable or too small. See the plog for details"),
+                    return ge::GRAPH_FAILED);
     OP_TILING_CHECK(SetWorkSpace(context, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "workspace", "invalid", "Set workspace failed"),
                     return ge::GRAPH_FAILED);

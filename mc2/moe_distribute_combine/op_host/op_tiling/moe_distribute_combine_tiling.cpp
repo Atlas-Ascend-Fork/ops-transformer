@@ -575,7 +575,6 @@ ge::graphStatus MoeDistributeCombineTilingBase::CheckWinSize(const gert::TilingC
                                                              MoeDistributeCombineTilingData* tilingData,
                                                              const char* nodeName, uint32_t localMoeExpertNum)
 {
-    auto attrs = context->GetAttrs();
     uint64_t hcclBufferSizeEp = 0;
     uint64_t maxWindowSizeEp = 0;
     OP_TILING_CHECK(mc2tiling::GetEpWinSize(context, nodeName, hcclBufferSizeEp, maxWindowSizeEp, ATTR_GROUP_EP_INDEX,
@@ -584,13 +583,22 @@ ge::graphStatus MoeDistributeCombineTilingBase::CheckWinSize(const gert::TilingC
     uint64_t h = static_cast<uint64_t>(tilingData->moeDistributeCombineInfo.h);
     uint64_t epWorldSize = static_cast<uint64_t>(tilingData->moeDistributeCombineInfo.epWorldSize);
     uint64_t maxBs = static_cast<uint64_t>(tilingData->moeDistributeCombineInfo.globalBs) / epWorldSize;
-    uint64_t actualSize = epWorldSize * maxBs * h * 2UL * 2UL * static_cast<uint64_t>(localMoeExpertNum);
-    if (actualSize > maxWindowSizeEp) {
-        OP_LOGE_WITHOUT_REPORT(
-            nodeName,
-            "HCCL_BUFFSIZE is too SMALL, maxBs = %lu, h = %lu, epWorldSize = %lu, localMoeExpertNum = %u,"
-            "ep_worldsize * maxBs * h * 2 * 2 * localMoeExpertNum = %luMB, HCCL_BUFFSIZE=%luMB.",
-            maxBs, h, epWorldSize, localMoeExpertNum, actualSize / MB_SIZE + 1UL, hcclBufferSizeEp / MB_SIZE);
+    uint64_t requiredWindowBytes = epWorldSize * maxBs * h * 2UL * 2UL * static_cast<uint64_t>(localMoeExpertNum);
+    if (requiredWindowBytes > maxWindowSizeEp) {
+        const uint64_t stateAreaBytes = hcclBufferSizeEp - maxWindowSizeEp;
+        const auto stateAreaText =
+            stateAreaBytes == 0UL ?
+                std::vector<char>{} :
+                CreateErrorMsg(" + %.2f (state_area)", static_cast<double>(stateAreaBytes) / MB_SIZE);
+        OP_LOGE_WITHOUT_REPORT(nodeName,
+                               "The EP HCCL buffer is too small. Required at least %.2f MB, actual %.2f MB.\n"
+                               "Detailed calculation (MB): (epWorldSize * maxBs * h * 2 * 2 * localMoeExpertNum) "
+                               "/ 1024 / 1024%s. "
+                               "epWorldSize=%lu, maxBs=%lu, h=%lu, localMoeExpertNum=%u, data=%.2f MB.",
+                               static_cast<double>(requiredWindowBytes + stateAreaBytes) / MB_SIZE,
+                               static_cast<double>(hcclBufferSizeEp) / MB_SIZE,
+                               stateAreaText.empty() ? "" : stateAreaText.data(), epWorldSize, maxBs, h,
+                               localMoeExpertNum, static_cast<double>(requiredWindowBytes) / MB_SIZE);
         return ge::GRAPH_FAILED;
     }
     tilingData->moeDistributeCombineInfo.totalWinSizeEp = maxWindowSizeEp;

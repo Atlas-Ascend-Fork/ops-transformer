@@ -2966,9 +2966,12 @@ ge::graphStatus MoeDistributeCombineV2TilingFuncBase::MoeDistributeCombineA3Tili
                     OP_LOGE_WITHOUT_REPORT(nodeName, "Tiling check input param failed."), return ge::GRAPH_FAILED);
     // 校验win区大小
     tilingData->moeDistributeCombineV2Info.rswBufferSize = 0UL;
-    OP_TILING_CHECK(!config.isRoce && CheckAndCalWinSize(context, *tilingData, nodeName, false, localMoeExpertNum,
-                                                         isLayered, config) != ge::GRAPH_SUCCESS,
-                    OP_LOGE_WITHOUT_REPORT(nodeName, "Tiling check window size failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(
+        !config.isRoce && CheckAndCalWinSize(context, *tilingData, nodeName, false, localMoeExpertNum, isLayered,
+                                             config) != ge::GRAPH_SUCCESS,
+        OP_LOGE_WITHOUT_REPORT(nodeName, "Tiling check window size failed. "
+                                         "The buffer size may be unavailable or too small. See the plog for details."),
+        return ge::GRAPH_FAILED);
 
     uint64_t tilingKey = CalTilingKey(commQuantMode, isLayered);
     if (config.isRoce) {
