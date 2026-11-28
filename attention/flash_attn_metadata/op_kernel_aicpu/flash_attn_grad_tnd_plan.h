@@ -12,17 +12,411 @@
 #ifndef FLASH_ATTN_GRAD_TND_PLAN_H
 #define FLASH_ATTN_GRAD_TND_PLAN_H
 #include "flash_attn_grad_tnd_normalized.h"
+#include "flash_attn_grad_tnd_normal_swizzle.h"
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <vector>
+#include <utility>
+// Shared pure TND geometry/prefix arithmetic. The two metadata protocols,
+// enum numberings and arithmetic conventions remain owned by their adapters.
+namespace aicpu::fag_tnd_math {
+enum class TNDRunShapeKind : uint8_t {
+    INVALID = 0,
+    CAUSAL_LEFT_UP,
+    CAUSAL_RIGHT_DOWN,
+    BAND,
+    BAND_DENSE,
+};
+
+struct TNDRunShape {
+    int64_t m = 1;
+    int64_t n = 1;
+    int64_t p = 0;
+    int64_t q = 0;
+    TNDRunShapeKind kind = TNDRunShapeKind::INVALID;
+};
+
+struct TNDLineDeterPack {
+    std::vector<int64_t> prefixSolo = {0};
+    std::vector<int64_t> prefixSingle = {0};
+    int64_t rLine = 0;
+};
+
+template <class Policy>
+struct Functions {
+    using Params = typename Policy::Params;
+    using SparseMode = typename Policy::SparseMode;
+    using DeterSparseType = typename Policy::DeterSparseType;
+    static constexpr int64_t NUM_TWO = 2;
+    static constexpr int64_t NUM_THREE = 3;
+    static constexpr int64_t TND_LINE_TINY_AREA = 8;
+
+    static void GetTNDOuterMN(const Params& p, int64_t bIdx, int64_t& m, int64_t& n)
+    {
+        const int64_t cubeM = p.s1Inner * p.s1CvRatio;
+        const int64_t cubeN = p.s2Inner * p.s2CvRatio;
+        if (p.actualSeqQlen[bIdx] <= 0 || p.actualSeqKvlen[bIdx] <= 0) {
+            m = 0;
+            n = 0;
+            return;
+        }
+        m = Policy::Ceil(p.actualSeqQlen[bIdx], cubeM);
+        n = Policy::Ceil(p.actualSeqKvlen[bIdx], cubeN);
+        if (m < 1) {
+            m = 1;
+        }
+        if (n < 1) {
+            n = 1;
+        }
+    }
+
+    static int64_t CalTNDCase0RecRounds(int64_t k, int64_t m, int64_t n)
+    {
+        if (n <= 0) {
+            return 0;
+        }
+        if (NUM_TWO * k < m + 1 && k < n) {
+            return std::max(static_cast<int64_t>(0), NUM_TWO * m - NUM_TWO * k + 1);
+        }
+        return m;
+    }
+
+    static int64_t CalTNDSingleCausalRounds(int64_t k, int64_t m, int64_t n)
+    {
+        const int64_t t = n / (NUM_TWO * k);
+        const int64_t ell = n % (NUM_TWO * k);
+        const int64_t rounds2k = (NUM_TWO * m + 1) * t - NUM_TWO * k * t * t;
+        if (ell == 0) {
+            return rounds2k;
+        }
+        if (t == 0) {
+            return CalTNDCase0RecRounds(k, m, n);
+        }
+        const int64_t l = m - NUM_TWO * k * t;
+        const int64_t phaseCount = Policy::Ceil(ell, k);
+        int64_t roundsTail = 0;
+        for (int64_t s = 0; s < phaseCount; ++s) {
+            roundsTail += std::max(static_cast<int64_t>(0), l - s * k);
+        }
+        return rounds2k + roundsTail;
+    }
+
+    static int64_t GetTNDRightDownRowShift(int64_t m, int64_t n)
+    {
+        return std::max(static_cast<int64_t>(0), m - n - 1);
+    }
+
+    static void GetTNDLeftUpVirt(int64_t m, int64_t n, int64_t& virtM, int64_t& virtN)
+    {
+        if (m < n) {
+            n = m;
+        }
+        virtM = NUM_TWO * m - n + 1;
+        virtN = n;
+    }
+
+    static void GetTNDRightDownVirt(int64_t m, int64_t n, int64_t& virtM, int64_t& virtN)
+    {
+        m -= GetTNDRightDownRowShift(m, n);
+        if (m < 1 || n < 1) {
+            virtM = 0;
+            virtN = 0;
+            return;
+        }
+        virtM = m;
+        virtN = NUM_TWO * n - m + NUM_THREE;
+    }
+
+    static bool TNDRunIsLineWorthy(int64_t k, int64_t virtM, int64_t virtN, int64_t pairCount)
+    {
+        if (virtM <= 0 || virtN <= 0 || virtM * virtN <= TND_LINE_TINY_AREA) {
+            return false;
+        }
+        return pairCount > 0 && virtN * pairCount >= k && virtM >= std::min(k, virtN);
+    }
+
+    static bool SameTNDRunShape(const TNDRunShape& a, const TNDRunShape& b)
+    {
+        return a.m == b.m && a.n == b.n && a.p == b.p && a.q == b.q && a.kind == b.kind;
+    }
+
+    static TNDRunShape MakeTNDCausalRunShape(const Params& p, int64_t bIdx, bool leftUp)
+    {
+        TNDRunShape s;
+        GetTNDOuterMN(p, bIdx, s.m, s.n);
+        if (leftUp) {
+            if (s.m < s.n) {
+                s.n = s.m;
+            }
+            s.kind = TNDRunShapeKind::CAUSAL_LEFT_UP;
+        } else {
+            s.m -= GetTNDRightDownRowShift(s.m, s.n);
+            s.kind = TNDRunShapeKind::CAUSAL_RIGHT_DOWN;
+        }
+        return s;
+    }
+
+    static void GetTNDBandMN(Params& p, int64_t bIdx, int64_t& m, int64_t& n, int64_t& bandP, int64_t& bandQ)
+    {
+        GetTNDOuterMN(p, bIdx, m, n);
+        if (m < 1 || n < 1) {
+            bandP = 0;
+            bandQ = 0;
+            return;
+        }
+        int64_t actualS1Token = 0;
+        int64_t actualS2Token = 0;
+        Policy::ActualTokens(p, bIdx, actualS1Token, actualS2Token);
+        const int64_t cubeM = p.s1Inner * p.s1CvRatio;
+        const int64_t cubeN = p.s2Inner * p.s2CvRatio;
+        bandP = Policy::Ceil(actualS1Token, cubeM) + 1;
+        bandQ = Policy::Ceil(actualS2Token, cubeN) + 1;
+        bandP = bandP > m ? m : bandP;
+        bandQ = bandQ > n ? n : bandQ;
+        if (bandP < 0) {
+            n = n + bandP;
+            bandQ = bandP + bandQ;
+            bandP = 1;
+        } else if (bandQ < 0) {
+            m = m + bandQ;
+            bandP = bandP + bandQ;
+            bandQ = 1;
+        }
+        int64_t actualM = m;
+        int64_t actualN = n;
+        if (bandP + bandQ <= m) {
+            const int64_t l1 = bandQ - 1;
+            const int64_t l2 = std::min(n - bandQ + 1, m + NUM_TWO - bandP - bandQ);
+            const int64_t l3 = std::max(static_cast<int64_t>(0), std::min(bandP + n - m - 1, bandP + bandQ - NUM_TWO));
+            actualM = (l3 == 0) ? (bandP + bandQ + l2 - NUM_TWO) : m;
+            actualN = l1 + l2 + l3;
+        } else {
+            actualM = m;
+            actualN = std::min(m - 1 + bandQ, n);
+        }
+        m = actualM;
+        n = actualN;
+    }
+
+    static TNDRunShape MakeTNDBandRunShape(Params& p, int64_t bIdx)
+    {
+        TNDRunShape s;
+        GetTNDBandMN(p, bIdx, s.m, s.n, s.p, s.q);
+        s.kind = (s.p >= s.m) ? TNDRunShapeKind::BAND_DENSE : TNDRunShapeKind::BAND;
+        return s;
+    }
+
+    static int64_t CountTNDSameShapeRun(Params& p, int64_t start, bool leftUp, bool isBand, TNDRunShape& shape)
+    {
+        shape = isBand ? MakeTNDBandRunShape(p, start) : MakeTNDCausalRunShape(p, start, leftUp);
+        int64_t end = start;
+        while (end + 1 < p.b) {
+            const TNDRunShape next =
+                isBand ? MakeTNDBandRunShape(p, end + 1) : MakeTNDCausalRunShape(p, end + 1, leftUp);
+            if (!SameTNDRunShape(next, shape)) {
+                break;
+            }
+            end += 1;
+        }
+        return end - start + 1;
+    }
+
+    static void CopyTNDPrefix(const std::vector<int64_t>& src, int64_t* dst, size_t dstLen)
+    {
+        std::fill(dst, dst + dstLen, static_cast<int64_t>(0));
+        const size_t n = std::min(src.size(), dstLen);
+        std::copy(src.begin(), src.begin() + static_cast<long>(n), dst);
+    }
+
+    static void StoreTNDPrefix(const std::vector<int64_t>& raw, int64_t step, int64_t tailValue, int64_t* dst)
+    {
+        std::vector<int64_t> sliced = Policy::Slice(raw, step);
+        sliced.push_back(tailValue);
+        CopyTNDPrefix(sliced, dst, Policy::PREFIX_CAPACITY);
+    }
+
+    static int64_t CalTNDBandWideCols(int64_t m, int64_t n, int64_t p, int64_t q)
+    {
+        const int64_t nNew = std::min(m - 1 + q, n);
+        const int64_t l1 = m - p;
+        const int64_t l2 = p + q - m;
+        const int64_t l3 = nNew - l1 - l2;
+        const int64_t foldCols = std::max(static_cast<int64_t>(0), l3 - p + 1);
+        return nNew - foldCols;
+    }
+
+    static int64_t CalTNDBandNarrowRounds(int64_t k, int64_t n1, int64_t m, int64_t n, int64_t p, int64_t q)
+    {
+        const int64_t l1 = q - 1;
+        const int64_t l2 = std::min(n - q + 1, m + NUM_TWO - p - q);
+        const int64_t l3 = std::max(static_cast<int64_t>(0), std::min(p + n - m - 1, p + q - NUM_TWO));
+        int64_t overlap = 0;
+        int64_t nNew = l1 + l2 + l3;
+        if (l3 != 0 && p <= l3) {
+            overlap = std::min(l3 - p + 1, l1);
+        }
+        const int64_t seg = p + q - 1;
+        return seg * Policy::Ceil((nNew - overlap) * n1 + overlap, k);
+    }
+
+    static bool TNDRunEmpty(const TNDRunShape& shape, bool isBand)
+    {
+        return shape.m < 1 || shape.n < 1 || (isBand && shape.p + shape.q < NUM_TWO);
+    }
+
+    static bool PreferTNDLineDeter(Params& p)
+    {
+        if (p.g != 1) {
+            return false;
+        }
+        if (p.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL) && !p.isS1S2Same) {
+            return false;
+        }
+        if (p.deterSparseType != static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL) &&
+            p.deterSparseType != static_cast<uint32_t>(DeterSparseType::DETER_BAND)) {
+            return false;
+        }
+        if (p.n2 < NUM_TWO) {
+            return false;
+        }
+
+        const int64_t k = static_cast<int64_t>(p.aicNum);
+        const int64_t n1 = p.n2;
+        const bool isBand = (p.sparseMode == static_cast<uint32_t>(SparseMode::BAND)) ||
+                            (p.sparseMode == static_cast<uint32_t>(SparseMode::NO_MASK) &&
+                             p.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND));
+        const bool leftUp = !isBand && (p.sparseMode != static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL));
+        bool hasWork = false;
+        int64_t i = 0;
+        while (i < p.b) {
+            TNDRunShape shape;
+            const int64_t groupSize = CountTNDSameShapeRun(p, i, leftUp, isBand, shape);
+            const int64_t total = n1 * groupSize;
+            const int64_t runPairs = total / NUM_TWO;
+            const bool runHasSingle = (total % NUM_TWO == 1);
+            if (TNDRunEmpty(shape, isBand)) {
+                i += groupSize;
+                continue;
+            }
+            hasWork = true;
+            if (!isBand) {
+                int64_t virtM = 0;
+                int64_t virtN = 0;
+                if (leftUp) {
+                    GetTNDLeftUpVirt(shape.m, shape.n, virtM, virtN);
+                } else {
+                    GetTNDRightDownVirt(shape.m, shape.n, virtM, virtN);
+                }
+                const bool foldedCausalPairsSafe =
+                    !leftUp && k > 0 && runPairs > 0 && p.isS1S2Same && shape.m == shape.n;
+                const bool genericLineWorthy = TNDRunIsLineWorthy(k, virtM, virtN, runPairs);
+                if (!foldedCausalPairsSafe && !genericLineWorthy) {
+                    return false;
+                }
+                if (!leftUp && runHasSingle && shape.m < std::min(k, shape.n)) {
+                    return false;
+                }
+            } else if (shape.kind == TNDRunShapeKind::BAND_DENSE) {
+                if (!TNDRunIsLineWorthy(k, shape.m, shape.n, total)) {
+                    return false;
+                }
+            } else if (shape.p + shape.q <= shape.m) {
+                if (shape.m * shape.n <= TND_LINE_TINY_AREA) {
+                    return false;
+                }
+            } else {
+                const int64_t denseN = CalTNDBandWideCols(shape.m, shape.n, shape.p, shape.q);
+                if (!TNDRunIsLineWorthy(k, shape.m, denseN, total)) {
+                    return false;
+                }
+            }
+            i += groupSize;
+        }
+        return hasWork;
+    }
+
+    static TNDLineDeterPack BuildTNDLineDeter(Params& p)
+    {
+        TNDLineDeterPack pack;
+        const int64_t k = static_cast<int64_t>(p.aicNum);
+        const int64_t n1 = p.n2;
+        const bool isBand = (p.sparseMode == static_cast<uint32_t>(SparseMode::BAND)) ||
+                            (p.sparseMode == static_cast<uint32_t>(SparseMode::NO_MASK) &&
+                             p.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND));
+        const bool leftUp = !isBand && (p.sparseMode != static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL));
+        for (int64_t batch = 0; batch < p.b; ++batch) {
+            int64_t m = 0;
+            int64_t n = 0;
+            GetTNDOuterMN(p, batch, m, n);
+            if (!isBand) {
+                const TNDRunShape shape = MakeTNDCausalRunShape(p, batch, leftUp);
+                m = shape.m;
+                n = shape.n;
+            }
+            const int64_t tasks = !isBand && m == 1 && n == 1 ? n1 : 0;
+            pack.prefixSingle.push_back(pack.prefixSingle.back() + tasks);
+        }
+        const int64_t singleRounds = Policy::Ceil(pack.prefixSingle.back(), k);
+        std::vector<int64_t> prefixSolo = {singleRounds};
+
+        int64_t i = 0;
+        while (i < p.b) {
+            TNDRunShape shape;
+            const int64_t groupSize = CountTNDSameShapeRun(p, i, leftUp, isBand, shape);
+            const int64_t total = n1 * groupSize;
+            const int64_t runPairs = total / NUM_TWO;
+            const bool runHasSingle = (total % NUM_TWO == 1);
+            int64_t runSolo = 0;
+            if (!TNDRunEmpty(shape, isBand)) {
+                if (!isBand && shape.m == 1 && shape.n == 1) {
+                    runSolo = 0;
+                } else if (!isBand) {
+                    int64_t virtM = 0;
+                    int64_t virtN = 0;
+                    if (leftUp) {
+                        GetTNDLeftUpVirt(shape.m, shape.n, virtM, virtN);
+                    } else {
+                        GetTNDRightDownVirt(shape.m, shape.n, virtM, virtN);
+                    }
+                    const int64_t pairRounds =
+                        (runPairs > 0 && virtN > 0) ? (Policy::Ceil(virtN * runPairs, k) * virtM) : 0;
+                    const int64_t singleTailRounds = runHasSingle ?
+                                                         (leftUp ? CalTNDSingleCausalRounds(k, shape.m, shape.n) :
+                                                                   (Policy::Ceil(shape.n, k) * shape.m)) :
+                                                         0;
+                    runSolo = pairRounds + singleTailRounds;
+                } else if (shape.kind == TNDRunShapeKind::BAND_DENSE) {
+                    runSolo = Policy::Ceil(shape.n * total, k) * shape.m;
+                } else if (shape.p + shape.q <= shape.m) {
+                    runSolo = CalTNDBandNarrowRounds(k, total, shape.m, shape.n, shape.p, shape.q);
+                } else {
+                    const int64_t denseN = CalTNDBandWideCols(shape.m, shape.n, shape.p, shape.q);
+                    runSolo = Policy::Ceil(denseN * total, k) * shape.m;
+                }
+            }
+            const int64_t soloEnd = prefixSolo.back() + runSolo;
+            for (int64_t runIdx = 0; runIdx < groupSize; ++runIdx) {
+                prefixSolo.push_back(soloEnd);
+            }
+            i += groupSize;
+        }
+
+        pack.prefixSolo = std::move(prefixSolo);
+        pack.rLine = pack.prefixSolo.back();
+        return pack;
+    }
+};
+} // namespace aicpu::fag_tnd_math
+
 namespace aicpu {
 namespace fag_pto_tnd {
 constexpr int32_t MAGIC = 0x46545031;
-constexpr int32_t VERSION = 2;
-constexpr int64_t LEGACY_WORDS = 412;
+constexpr int32_t VERSION = 3;
+constexpr int64_t LEGACY_WORDS = 416;
+constexpr uint32_t HEAD_OFFSET = 12, HEAD_SIZE = 13, HEAD_VERSION = 14, HEAD_MAGIC = 15;
 constexpr int64_t HEADER_WORDS = 16;
 constexpr int64_t SCALAR_COUNT = 16;
 constexpr int64_t CUT_COUNT = 37;
@@ -93,384 +487,27 @@ inline void CalcleActualToken(const FuzzyBaseInfoParamsRegbase& p, int64_t b, in
         z -= p.actualSeqQlen[b] - p.actualSeqKvlen[b];
     }
 }
-inline void GetTNDOuterMN(const FuzzyBaseInfoParamsRegbase& p, int64_t bIdx, int64_t& m, int64_t& n)
-{
-    const int64_t cubeM = p.s1Inner * p.s1CvRatio;
-    const int64_t cubeN = p.s2Inner * p.s2CvRatio;
-    if (p.actualSeqQlen[bIdx] <= 0 || p.actualSeqKvlen[bIdx] <= 0) {
-        m = 0;
-        n = 0;
-        return;
+// Preserve this planner's enum values, signed division and token convention.
+struct TndMathPolicy {
+    using Params = FuzzyBaseInfoParamsRegbase;
+    using SparseMode = aicpu::fag_pto_tnd::SparseMode;
+    using DeterSparseType = aicpu::fag_pto_tnd::DeterSparseType;
+    static constexpr size_t PREFIX_CAPACITY = DETER_PREFIX_ARRAY_SIZE;
+    static int64_t Ceil(int64_t value, int64_t divisor)
+    {
+        return CeilDivideBy(value, divisor);
     }
-    m = CeilDivideBy(p.actualSeqQlen[bIdx], cubeM);
-    n = CeilDivideBy(p.actualSeqKvlen[bIdx], cubeN);
-    if (m < 1) {
-        m = 1;
+    static void ActualTokens(Params& p, int64_t batch, int64_t& q, int64_t& kv)
+    {
+        CalcleActualToken(p, batch, q, kv);
     }
-    if (n < 1) {
-        n = 1;
+    static std::vector<int64_t> Slice(const std::vector<int64_t>& source, int64_t step)
+    {
+        return SliceVector(source, step);
     }
-}
-
-inline int64_t CalTNDCase0RecRounds(int64_t k, int64_t m, int64_t n)
-{
-    if (n <= 0) {
-        return 0;
-    }
-    if (NUM_TWO * k < m + 1 && k < n) {
-        return std::max(static_cast<int64_t>(0), NUM_TWO * m - NUM_TWO * k + 1);
-    }
-    return m;
-}
-
-inline int64_t CalTNDSingleCausalRounds(int64_t k, int64_t m, int64_t n)
-{
-    const int64_t t = n / (NUM_TWO * k);
-    const int64_t ell = n % (NUM_TWO * k);
-    const int64_t rounds2k = (NUM_TWO * m + 1) * t - NUM_TWO * k * t * t;
-    if (ell == 0) {
-        return rounds2k;
-    }
-    if (t == 0) {
-        return CalTNDCase0RecRounds(k, m, n);
-    }
-    const int64_t l = m - NUM_TWO * k * t;
-    const int64_t phaseCount = CeilDivideBy(ell, k);
-    int64_t roundsTail = 0;
-    for (int64_t s = 0; s < phaseCount; ++s) {
-        roundsTail += std::max(static_cast<int64_t>(0), l - s * k);
-    }
-    return rounds2k + roundsTail;
-}
-
-inline int64_t GetTNDRightDownRowShift(int64_t m, int64_t n)
-{
-    return std::max(static_cast<int64_t>(0), m - n - 1);
-}
-
-inline void GetTNDLeftUpVirt(int64_t m, int64_t n, int64_t& virtM, int64_t& virtN)
-{
-    if (m < n) {
-        n = m;
-    }
-    virtM = NUM_TWO * m - n + 1;
-    virtN = n;
-}
-
-inline void GetTNDRightDownVirt(int64_t m, int64_t n, int64_t& virtM, int64_t& virtN)
-{
-    m -= GetTNDRightDownRowShift(m, n);
-    if (m < 1 || n < 1) {
-        virtM = 0;
-        virtN = 0;
-        return;
-    }
-    virtM = m;
-    virtN = NUM_TWO * n - m + NUM_THREE;
-}
-
-constexpr int64_t TND_LINE_TINY_AREA = 8;
-
-inline bool TNDRunIsLineWorthy(int64_t k, int64_t virtM, int64_t virtN, int64_t pairCount)
-{
-    if (virtM <= 0 || virtN <= 0 || virtM * virtN <= TND_LINE_TINY_AREA) {
-        return false;
-    }
-    return pairCount > 0 && virtN * pairCount >= k && virtM >= std::min(k, virtN);
-}
-
-enum class TNDRunShapeKind : uint8_t {
-    INVALID = 0,
-    CAUSAL_LEFT_UP,
-    CAUSAL_RIGHT_DOWN,
-    BAND,
-    BAND_DENSE,
 };
-
-struct TNDRunShape {
-    int64_t m = 1;
-    int64_t n = 1;
-    int64_t p = 0;
-    int64_t q = 0;
-    TNDRunShapeKind kind = TNDRunShapeKind::INVALID;
-};
-
-inline bool SameTNDRunShape(const TNDRunShape& a, const TNDRunShape& b)
-{
-    return a.m == b.m && a.n == b.n && a.p == b.p && a.q == b.q && a.kind == b.kind;
-}
-
-inline TNDRunShape MakeTNDCausalRunShape(const FuzzyBaseInfoParamsRegbase& p, int64_t bIdx, bool leftUp)
-{
-    TNDRunShape s;
-    GetTNDOuterMN(p, bIdx, s.m, s.n);
-    if (leftUp) {
-        if (s.m < s.n) {
-            s.n = s.m;
-        }
-        s.kind = TNDRunShapeKind::CAUSAL_LEFT_UP;
-    } else {
-        s.m -= GetTNDRightDownRowShift(s.m, s.n);
-        s.kind = TNDRunShapeKind::CAUSAL_RIGHT_DOWN;
-    }
-    return s;
-}
-
-inline void GetTNDBandMN(FuzzyBaseInfoParamsRegbase& p, int64_t bIdx, int64_t& m, int64_t& n, int64_t& bandP,
-                         int64_t& bandQ)
-{
-    GetTNDOuterMN(p, bIdx, m, n);
-    if (m < 1 || n < 1) {
-        bandP = 0;
-        bandQ = 0;
-        return;
-    }
-    int64_t actualS1Token = 0;
-    int64_t actualS2Token = 0;
-    CalcleActualToken(p, bIdx, actualS1Token, actualS2Token);
-    const int64_t cubeM = p.s1Inner * p.s1CvRatio;
-    const int64_t cubeN = p.s2Inner * p.s2CvRatio;
-    bandP = CeilDivideBy(actualS1Token, cubeM) + 1;
-    bandQ = CeilDivideBy(actualS2Token, cubeN) + 1;
-    bandP = bandP > m ? m : bandP;
-    bandQ = bandQ > n ? n : bandQ;
-    if (bandP < 0) {
-        n = n + bandP;
-        bandQ = bandP + bandQ;
-        bandP = 1;
-    } else if (bandQ < 0) {
-        m = m + bandQ;
-        bandP = bandP + bandQ;
-        bandQ = 1;
-    }
-    int64_t actualM = m;
-    int64_t actualN = n;
-    if (bandP + bandQ <= m) {
-        const int64_t l1 = bandQ - 1;
-        const int64_t l2 = std::min(n - bandQ + 1, m + NUM_TWO - bandP - bandQ);
-        const int64_t l3 = std::max(static_cast<int64_t>(0), std::min(bandP + n - m - 1, bandP + bandQ - NUM_TWO));
-        actualM = (l3 == 0) ? (bandP + bandQ + l2 - NUM_TWO) : m;
-        actualN = l1 + l2 + l3;
-    } else {
-        actualM = m;
-        actualN = std::min(m - 1 + bandQ, n);
-    }
-    m = actualM;
-    n = actualN;
-}
-
-inline TNDRunShape MakeTNDBandRunShape(FuzzyBaseInfoParamsRegbase& p, int64_t bIdx)
-{
-    TNDRunShape s;
-    GetTNDBandMN(p, bIdx, s.m, s.n, s.p, s.q);
-    s.kind = (s.p >= s.m) ? TNDRunShapeKind::BAND_DENSE : TNDRunShapeKind::BAND;
-    return s;
-}
-
-inline int64_t CountTNDSameShapeRun(FuzzyBaseInfoParamsRegbase& p, int64_t start, bool leftUp, bool isBand,
-                                    TNDRunShape& shape)
-{
-    shape = isBand ? MakeTNDBandRunShape(p, start) : MakeTNDCausalRunShape(p, start, leftUp);
-    int64_t end = start;
-    while (end + 1 < p.b) {
-        const TNDRunShape next = isBand ? MakeTNDBandRunShape(p, end + 1) : MakeTNDCausalRunShape(p, end + 1, leftUp);
-        if (!SameTNDRunShape(next, shape)) {
-            break;
-        }
-        end += 1;
-    }
-    return end - start + 1;
-}
-
-inline void CopyTNDPrefix(const std::vector<int64_t>& src, int64_t* dst, size_t dstLen)
-{
-    std::fill(dst, dst + dstLen, static_cast<int64_t>(0));
-    const size_t n = std::min(src.size(), dstLen);
-    std::copy(src.begin(), src.begin() + static_cast<long>(n), dst);
-}
-
-inline void StoreTNDPrefix(const std::vector<int64_t>& raw, int64_t step, int64_t tailValue, int64_t* dst)
-{
-    std::vector<int64_t> sliced = SliceVector(raw, step);
-    sliced.push_back(tailValue);
-    CopyTNDPrefix(sliced, dst, DETER_PREFIX_ARRAY_SIZE);
-}
-
-inline int64_t CalTNDBandWideCols(int64_t m, int64_t n, int64_t p, int64_t q)
-{
-    const int64_t nNew = std::min(m - 1 + q, n);
-    const int64_t l1 = m - p;
-    const int64_t l2 = p + q - m;
-    const int64_t l3 = nNew - l1 - l2;
-    const int64_t foldCols = std::max(static_cast<int64_t>(0), l3 - p + 1);
-    return nNew - foldCols;
-}
-
-inline int64_t CalTNDBandNarrowRounds(int64_t k, int64_t n1, int64_t m, int64_t n, int64_t p, int64_t q)
-{
-    const int64_t l1 = q - 1;
-    const int64_t l2 = std::min(n - q + 1, m + NUM_TWO - p - q);
-    const int64_t l3 = std::max(static_cast<int64_t>(0), std::min(p + n - m - 1, p + q - NUM_TWO));
-    int64_t overlap = 0;
-    int64_t nNew = l1 + l2 + l3;
-    if (l3 != 0 && p <= l3) {
-        overlap = std::min(l3 - p + 1, l1);
-    }
-    const int64_t seg = p + q - 1;
-    return seg * CeilDivideBy((nNew - overlap) * n1 + overlap, k);
-}
-
-inline bool TNDRunEmpty(const TNDRunShape& shape, bool isBand)
-{
-    return shape.m < 1 || shape.n < 1 || (isBand && shape.p + shape.q < NUM_TWO);
-}
-
-inline bool PreferTNDLineDeter(FuzzyBaseInfoParamsRegbase& p)
-{
-    if (p.g != 1) {
-        return false;
-    }
-    if (p.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL) && !p.isS1S2Same) {
-        return false;
-    }
-    if (p.deterSparseType != static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL) &&
-        p.deterSparseType != static_cast<uint32_t>(DeterSparseType::DETER_BAND)) {
-        return false;
-    }
-    if (p.n2 < NUM_TWO) {
-        return false;
-    }
-
-    const int64_t k = static_cast<int64_t>(p.aicNum);
-    const int64_t n1 = p.n2;
-    const bool isBand = (p.sparseMode == static_cast<uint32_t>(SparseMode::BAND)) ||
-                        (p.sparseMode == static_cast<uint32_t>(SparseMode::NO_MASK) &&
-                         p.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND));
-    const bool leftUp = !isBand && (p.sparseMode != static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL));
-    bool hasWork = false;
-    int64_t i = 0;
-    while (i < p.b) {
-        TNDRunShape shape;
-        const int64_t groupSize = CountTNDSameShapeRun(p, i, leftUp, isBand, shape);
-        const int64_t total = n1 * groupSize;
-        const int64_t runPairs = total / NUM_TWO;
-        const bool runHasSingle = (total % NUM_TWO == 1);
-        if (TNDRunEmpty(shape, isBand)) {
-            i += groupSize;
-            continue;
-        }
-        hasWork = true;
-        if (!isBand) {
-            int64_t virtM = 0;
-            int64_t virtN = 0;
-            if (leftUp) {
-                GetTNDLeftUpVirt(shape.m, shape.n, virtM, virtN);
-            } else {
-                GetTNDRightDownVirt(shape.m, shape.n, virtM, virtN);
-            }
-            const bool foldedCausalPairsSafe = !leftUp && k > 0 && runPairs > 0 && p.isS1S2Same && shape.m == shape.n;
-            const bool genericLineWorthy = TNDRunIsLineWorthy(k, virtM, virtN, runPairs);
-            if (!foldedCausalPairsSafe && !genericLineWorthy) {
-                return false;
-            }
-            if (!leftUp && runHasSingle && shape.m < std::min(k, shape.n)) {
-                return false;
-            }
-        } else if (shape.kind == TNDRunShapeKind::BAND_DENSE) {
-            if (!TNDRunIsLineWorthy(k, shape.m, shape.n, total)) {
-                return false;
-            }
-        } else if (shape.p + shape.q <= shape.m) {
-            if (shape.m * shape.n <= TND_LINE_TINY_AREA) {
-                return false;
-            }
-        } else {
-            const int64_t denseN = CalTNDBandWideCols(shape.m, shape.n, shape.p, shape.q);
-            if (!TNDRunIsLineWorthy(k, shape.m, denseN, total)) {
-                return false;
-            }
-        }
-        i += groupSize;
-    }
-    return hasWork;
-}
-
-struct TNDLineDeterPack {
-    std::vector<int64_t> prefixSolo = {0};
-    std::vector<int64_t> prefixSingle = {0};
-    int64_t rLine = 0;
-};
-
-inline TNDLineDeterPack BuildTNDLineDeter(FuzzyBaseInfoParamsRegbase& p)
-{
-    TNDLineDeterPack pack;
-    const int64_t k = static_cast<int64_t>(p.aicNum);
-    const int64_t n1 = p.n2;
-    const bool isBand = (p.sparseMode == static_cast<uint32_t>(SparseMode::BAND)) ||
-                        (p.sparseMode == static_cast<uint32_t>(SparseMode::NO_MASK) &&
-                         p.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND));
-    const bool leftUp = !isBand && (p.sparseMode != static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL));
-    for (int64_t batch = 0; batch < p.b; ++batch) {
-        int64_t m = 0;
-        int64_t n = 0;
-        GetTNDOuterMN(p, batch, m, n);
-        if (!isBand) {
-            const TNDRunShape shape = MakeTNDCausalRunShape(p, batch, leftUp);
-            m = shape.m;
-            n = shape.n;
-        }
-        const int64_t tasks = !isBand && m == 1 && n == 1 ? n1 : 0;
-        pack.prefixSingle.push_back(pack.prefixSingle.back() + tasks);
-    }
-    const int64_t singleRounds = CeilDivideBy(pack.prefixSingle.back(), k);
-    std::vector<int64_t> prefixSolo = {singleRounds};
-
-    int64_t i = 0;
-    while (i < p.b) {
-        TNDRunShape shape;
-        const int64_t groupSize = CountTNDSameShapeRun(p, i, leftUp, isBand, shape);
-        const int64_t total = n1 * groupSize;
-        const int64_t runPairs = total / NUM_TWO;
-        const bool runHasSingle = (total % NUM_TWO == 1);
-        int64_t runSolo = 0;
-        if (!TNDRunEmpty(shape, isBand)) {
-            if (!isBand && shape.m == 1 && shape.n == 1) {
-                runSolo = 0;
-            } else if (!isBand) {
-                int64_t virtM = 0;
-                int64_t virtN = 0;
-                if (leftUp) {
-                    GetTNDLeftUpVirt(shape.m, shape.n, virtM, virtN);
-                } else {
-                    GetTNDRightDownVirt(shape.m, shape.n, virtM, virtN);
-                }
-                const int64_t pairRounds =
-                    (runPairs > 0 && virtN > 0) ? (CeilDivideBy(virtN * runPairs, k) * virtM) : 0;
-                const int64_t singleTailRounds = runHasSingle ?
-                                                     (leftUp ? CalTNDSingleCausalRounds(k, shape.m, shape.n) :
-                                                               (CeilDivideBy(shape.n, k) * shape.m)) :
-                                                     0;
-                runSolo = pairRounds + singleTailRounds;
-            } else if (shape.kind == TNDRunShapeKind::BAND_DENSE) {
-                runSolo = CeilDivideBy(shape.n * total, k) * shape.m;
-            } else if (shape.p + shape.q <= shape.m) {
-                runSolo = CalTNDBandNarrowRounds(k, total, shape.m, shape.n, shape.p, shape.q);
-            } else {
-                const int64_t denseN = CalTNDBandWideCols(shape.m, shape.n, shape.p, shape.q);
-                runSolo = CeilDivideBy(denseN * total, k) * shape.m;
-            }
-        }
-        const int64_t soloEnd = prefixSolo.back() + runSolo;
-        for (int64_t runIdx = 0; runIdx < groupSize; ++runIdx) {
-            prefixSolo.push_back(soloEnd);
-        }
-        i += groupSize;
-    }
-
-    pack.prefixSolo = std::move(prefixSolo);
-    pack.rLine = pack.prefixSolo.back();
-    return pack;
-}
+using TndMath = aicpu::fag_tnd_math::Functions<TndMathPolicy>;
+using TNDRunShape = aicpu::fag_tnd_math::TNDRunShape;
 
 struct Plan {
     int32_t family = 0, strategy = 0, status = 0;
@@ -478,6 +515,7 @@ struct Plan {
     std::array<int64_t, CUT_COUNT> cuts{};
     std::vector<std::array<int64_t, BATCH_FIELDS>> batch;
     fag_pto_normalized::Wire normalized{};
+    fag_pto_normal_swizzle::Wire normalSwizzle{};
 };
 class Planner {
 public:
@@ -847,7 +885,7 @@ public:
         }
         // All validation and allocation are complete. Rejection above leaves every fallback field untouched.
         CommitExclusiveCuts(candidate);
-        CopyTNDPrefix(serializedPrefix, fBaseParams.deterPrefix0, DETER_PREFIX_ARRAY_SIZE);
+        TndMath::CopyTNDPrefix(serializedPrefix, fBaseParams.deterPrefix0, DETER_PREFIX_ARRAY_SIZE);
         std::fill(std::begin(fBaseParams.deterPrefix1), std::end(fBaseParams.deterPrefix1), static_cast<int64_t>(0));
         std::fill(std::begin(fBaseParams.deterPrefix2), std::end(fBaseParams.deterPrefix2), static_cast<int64_t>(0));
         fBaseParams.tndGqaScheduleMode = DeterParamRegbase::SCHEDULE_TND_GQA_CAUSAL_MIRROR_COLUMN_EXCLUSIVE;
@@ -1149,15 +1187,15 @@ inline Plan Build(const std::vector<int64_t>& q, const std::vector<int64_t>& kv,
     } else if (isDense) {
         if (builder.TryApplyTndGqaBn2Exclusive(area))
             plan.strategy = 3;
-    } else if (g == 1 && PreferTNDLineDeter(p)) {
-        const auto line = BuildTNDLineDeter(p);
+    } else if (g == 1 && TndMath::PreferTNDLineDeter(p)) {
+        const auto line = TndMath::BuildTNDLineDeter(p);
         plan.strategy = 2;
         p.deterMaxRound = line.rLine;
         plan.scalar[1] = CeilDivideBy(line.prefixSingle.back(), cores);
         for (int64_t i = 0; i < p.b;) {
             TNDRunShape shape;
             const bool band = p.deterSparseType == 2;
-            const int64_t count = CountTNDSameShapeRun(p, i, false, band, shape);
+            const int64_t count = TndMath::CountTNDSameShapeRun(p, i, false, band, shape);
             for (int64_t j = i; j < i + count; ++j) {
                 auto& row = plan.batch[j];
                 row[4] = shape.p;
@@ -1206,7 +1244,8 @@ inline Plan Build(const std::vector<int64_t>& q, const std::vector<int64_t>& kv,
 
 inline int64_t WordCount(int64_t batches)
 {
-    return HEADER_WORDS + 2 * (SCALAR_COUNT + CUT_COUNT + BATCH_FIELDS * batches) + fag_pto_normalized::WORDS;
+    return HEADER_WORDS + 2 * (SCALAR_COUNT + CUT_COUNT + BATCH_FIELDS * batches) + fag_pto_normalized::WORDS +
+           fag_pto_normal_swizzle::WORDS;
 }
 inline void Write64(uint32_t* p, int64_t value)
 {
@@ -1232,6 +1271,10 @@ inline bool Serialize(const Plan& p, int64_t cores, uint32_t* tail, int64_t avai
     tail[9] = BATCH_FIELDS;
     tail[10] = SCALAR_COUNT;
     tail[11] = CUT_COUNT;
+    tail[12] = static_cast<uint32_t>(words - fag_pto_normal_swizzle::WORDS);
+    tail[13] = fag_pto_normal_swizzle::WORDS;
+    tail[14] = fag_pto_normal_swizzle::VERSION;
+    tail[15] = fag_pto_normal_swizzle::MAGIC;
     int64_t off = HEADER_WORDS;
     for (auto value : p.scalar) {
         Write64(tail + off, value);
@@ -1250,7 +1293,11 @@ inline bool Serialize(const Plan& p, int64_t cores, uint32_t* tail, int64_t avai
         Write64(tail + off, value);
         off += 2;
     }
-    return true;
+    for (auto value : p.normalSwizzle) {
+        Write64(tail + off, value);
+        off += 2;
+    }
+    return off == words;
 }
 } // namespace fag_pto_tnd
 } // namespace aicpu

@@ -25,6 +25,7 @@
 #include <cstdint>
 #include "../plan/deterministic/plan_types.h"
 #include <string>
+#include "../../../flash_attn_metadata/op_kernel_aicpu/flash_attn_metadata.h"
 
 namespace optiling {
 
@@ -68,15 +69,17 @@ constexpr int64_t MASK_MODE_CAUSAL = 3;
 constexpr int64_t MASK_MODE_WINDOW = 4;
 // mask_mode 3/4 映射到 kernel 使用的 SparseType，写入 TilingData。
 constexpr int64_t FAG_SPARSE_TYPE_DENSE = 0;
-constexpr int64_t FAG_SPARSE_TYPE_CASUAL = 1;
+constexpr int64_t FAG_SPARSE_TYPE_CAUSAL = 1;
 constexpr int64_t FAG_SPARSE_TYPE_BAND = 2;
 constexpr int64_t ATTN_MASK_DIM = 2048;
 
-// tilingkey bit[1:0] 的取值。2 与 3 是保留位，host 永不产生（见 route 的兜底断言）。
+// tilingkey bit[1:0] 的取值。2 是保留位，host 永不产生（见 route 的兜底断言）。
+// 3 是 BN2S2：“TND 场景”与“定长非 TND + 非确定”场景共用同一模板，
+// 靠 layout/deter 等位在 kernel 内区分路径。
 constexpr int64_t TMPL_BN2GS1S2 = 0;
 constexpr int64_t TMPL_BN2 = 1;
 constexpr int64_t TMPL_RESERVED_UNUSED = 2;
-constexpr int64_t TMPL_RESERVED_BN2S2 = 3;
+constexpr int64_t TMPL_BN2S2 = 3;
 
 // tilingkey bit2：BNSD 不占位，运行期靠视图参数区分，只有 TND 置 1。
 constexpr int64_t LAYOUT_NOT_TND = 0;
@@ -95,6 +98,11 @@ struct FagParsedInfo {
     // swizzle 判据的分母。各 ascend950 变体从 16MB(950PR_950z) 到 128MB(9599)
     // 不等，必须来自平台而非硬编码；取不到时为 0，此时 swizzle 一律不开。
     uint64_t l2CacheSize = 0;
+    uint64_t ubSize = 0;
+    bool useDeterPlan = false;
+    fag_deter::PlanInputs deterConfig;
+    int64_t deterWorkspaceBytes = 0; // User workspace; excludes libapi prefix.
+    int64_t deterMetadataBytes = 0;  // Complete existing int32 metadata tensor.
 
     // 布局
     std::string layoutQ = "BSND";
@@ -102,7 +110,8 @@ struct FagParsedInfo {
     bool isTnd = false;
     // 等长 TND（所有 batch 的 seq 长度相同，且与 maxSeqlen 一致）的 GM 排布
     // 与 BSND 四维视图逐元素重合，host 仅对 tndAllSame 选择 BN2（layout=1
-    // 二进制，lse 走 TND 2D 视图），变长 TND 由 route 挡回 GS1S2 兜底。
+    // 二进制，lse 走 TND 2D 视图），变长 TND 由 Feasible_Bn2S2 的 clause ①
+    // 接手选 BN2S2。
     // 由 ParseShapes 用 shape 算术判定（T1==b*s1 且 cu_seqlens 差分全等）。
     bool tndAllSame = false;
     bool isBnsd = false;

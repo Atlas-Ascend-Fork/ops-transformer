@@ -79,6 +79,7 @@ void FlashAttnMetadataCpuKernel::InitFagParams()
     fagUseTndSplit_ = false;
     fagIsInvalidCol_ = false;
     fagIsInvalidRow_ = false;
+    fagFallbackToGs_ = false;
     InitFagBaseDims();
     InitFagLayoutAndSparse();
     InitFagActualSeqlen();
@@ -266,8 +267,11 @@ void FlashAttnMetadataCpuKernel::SupportTransBSND()
     }
 }
 
-// ===== SetFagSplitAxis: determine BN2/BN2S2/BN2GS1S2 =====
-// Source: common_regbase.cpp:1581-1649 SetSplitAxis (simplified: no dtype/rope/dropout conditions)
+/*
+   ===== SetFagSplitAxis: determine BN2/BN2S2/BN2GS1S2 =====
+   Source: flash_attention_score_grad_tiling_common_regbase.cpp: SetSplitAxis (simplified: no dtype/rope/dropout
+   conditions)
+ */
 void FlashAttnMetadataCpuKernel::SetFagSplitAxis()
 {
     int64_t s1 = static_cast<int64_t>(maxSeqlenQ_);
@@ -275,8 +279,7 @@ void FlashAttnMetadataCpuKernel::SetFagSplitAxis()
     int64_t n1 = static_cast<int64_t>(numHeadsQ_);
     int64_t n2 = static_cast<int64_t>(numHeadsKv_);
     int64_t d = static_cast<int64_t>(headDim_);
-    // headDimV_ 未指定时已归一化成 headDim_，故 d1 恒有效；BN2 的 V/dO 固定按
-    // d 建视图，必须 d==d1（对应 host Bn2FamilyFeasible 的 p.d == p.dv）。
+    // headDimV_ defaults to headDim_; single-block BN2 also supports D192/Dv128.
     int64_t d1 = static_cast<int64_t>(headDimV_);
     int64_t b = static_cast<int64_t>(batchSize_);
 
@@ -285,7 +288,7 @@ void FlashAttnMetadataCpuKernel::SetFagSplitAxis()
 
     // Match pypto host: single-block BN2 (S<=128) or MultiBlk (S in (128, 640]
     // and BN gate). Mask 3/4 is allowed on BN2 (kernel skip_invalid / packed).
-    // GQA / D>MAX_HEAD_DIM / D!=Dv stay on GS1S2.
+    // GQA / D>MAX_HEAD_DIM / unsupported D/Dv stay on GS1S2.
     //
     // 变长 TND：host 用 max_seqlen 作每 batch 上界，两侧 ≤128 时每 batch 都
     // 只有一个基本块，可走 BN2 单块（与 host TndVarlenBn2SingleFeasible 一
@@ -298,8 +301,9 @@ void FlashAttnMetadataCpuKernel::SetFagSplitAxis()
     // 是真实窗口，变长下单块可能整块无效，与 host 一致地保持 GS1S2。
     const bool tndSingleBounded =
         tndVarlen && maskMode_ != 4 && maxSeqlenQ_ > 0 && maxSeqlenKv_ > 0 && maxSeqlenQ_ <= 128 && maxSeqlenKv_ <= 128;
-    fagIsBn2_ = (s1 <= 128 && s2 <= 128) && (n1 == n2) && (d <= BN2_MAX_D) && (d == d1) &&
-                (!fagUseTndSplit_ || tndSingleBounded);
+    const bool bn2SingleDims = (d == d1) || (layoutQ_ != "TND" && d == 192 && d1 == 128);
+    fagIsBn2_ = (s1 <= 128 && s2 <= 128) && (n1 == n2) && (d <= BN2_MAX_D) && bn2SingleDims &&
+                (!fagUseTndSplit_ || tndSingleBounded) && (!fagIsSeqExistZero_ || tndSingleBounded);
     constexpr int64_t BN2_MULTIBLK_SEQ = 640;
     constexpr int64_t BN2_MULTIBLK_BN_128 = 128;
     constexpr int64_t BN2_MULTIBLK_BN_256 = 256;
@@ -314,15 +318,106 @@ void FlashAttnMetadataCpuKernel::SetFagSplitAxis()
     }
     // asc 的 "TND 且 d>128 → 放弃 BN2" 是单块的历史限制；PyPTO BN2 已支持
     // D≤768（含 192/256/768 的 workspace 档），变长 TND 不再套用这条。
+    // ASC SetSparseParams 在 token 右对齐之后。fagIsSparse_ 比的是修正前的窗，这里不能拿来挡 BN2S2。
+    const bool bn2s2Sparse = (maskMode_ == 3) || (maskMode_ == 4 && (s1 > fagS1Token_ || s2 > fagS2Token_));
+
+    // This original FAG region supplies the ordinary runtime route. The
+    // deterministic candidate plan is built independently from the original
+    // cumulative inputs by GenFagDeterMetadata; do not replace that planner.
+    // Match the ordinary host D512 limit and necessary shape-saturation bound.
+    const bool tndShapeSaturated = b * n2 * fagG_ * fagS2Outer_ >= static_cast<int64_t>(aicCoreNum_);
+    bool bN2S2TndLimit =
+        (d <= 512 && n1 == n2 && tndShapeSaturated && (fagLayoutType_ == FAG_INPUT_FORMAT_TND || fagIsAllSame_));
+
+    // if-else顺序不可变
     if (fagIsBn2_) {
         fagSplitAxis_ = FAG_SPLIT_AXIS_BN2;
+    } else if (!fagUseTndSplit_ && !fagIsAllSame_ && !bn2s2Sparse && n1 == n2 && n2 > 0 && d <= 128 && s1 < s2 &&
+               s2 <= 1024 && (s2 - s1) >= 128) {
+        // 定长不等长，且 ASC 的 isSparse 为假。按 S2 列切，列里的 S1 块都保留。
+        // causal，以及修正后窗盖不住 S 的 band，走 GS，避免整列不写却没清 dK/dV。
+        // 等长 TND 已被 SupportTransBSND 改成定长网格；TND 的 BN2S2 由下方
+        // bN2S2TndLimit 分支接走，本分支只接定长。
+        fagSplitAxis_ = FAG_SPLIT_AXIS_BN2S2;
+    } else if (bN2S2TndLimit) {
+        fagLayoutType_ = fagIsAllSame_ ? FAG_INPUT_FORMAT_TND : fagLayoutType_;
+        fagSplitAxis_ = FAG_SPLIT_AXIS_BN2S2;
     } else {
         fagSplitAxis_ = FAG_SPLIT_AXIS_BN2GS1S2;
     }
 }
 
-// ===== DoFagSparse: dispatch to 5 scenarios =====
-// Source: normal_regbase.cpp:660-731 DoSparse
+/*
+   ===== DoFagSparse: dispatch to 5 scenarios =====
+   Source: normal_regbase.cpp:660-731 DoSparse
+ */
+// Uniform right-down causal grids are emitted in complete KV columns.
+// Count the physical 128-row matmuls that survive the mask in each column.
+static void BalanceUniformCausalColumns(int64_t sq, int64_t sk, int64_t batches, int64_t heads, int64_t cores,
+                                        int64_t* starts, int64_t* ends, int64_t* firstBatch, int64_t& maxLoad)
+{
+    constexpr int64_t tile = 128;
+    constexpr int64_t maxGrid = 2147483647;
+    if (sq <= sk || sk <= 0 || batches <= 0 || heads <= 0 || cores <= 0 || cores > FAG_CORE_LIST_NUM) {
+        return;
+    }
+    const int64_t rows = (sq + tile - 1) / tile;
+    const int64_t cols = (sk + tile - 1) / tile;
+    if (maxGrid / rows / cols / heads < batches) {
+        return;
+    }
+    const int64_t columns = batches * heads * cols;
+    if (columns < cores) {
+        return;
+    }
+    const int64_t first = rows - (sq - sk) / tile;
+    const auto cost = [first](int64_t n) { return n * (2 * first - n + 1) / 2; };
+    const int64_t perHead = cost(cols);
+    const auto prefix = [cols, perHead, &cost](int64_t col) { return col / cols * perHead + cost(col % cols); };
+    int64_t oldPeak = 0;
+    for (int64_t c = 0; c < cores; ++c) {
+        if (starts[c] < 0 || ends[c] < starts[c] || ends[c] > columns * rows || starts[c] % rows != 0 ||
+            ends[c] % rows != 0) {
+            return;
+        }
+        oldPeak = std::max(oldPeak, prefix(ends[c] / rows) - prefix(starts[c] / rows));
+    }
+    std::array<int64_t, FAG_CORE_LIST_NUM + 1> boundaries{};
+    const int64_t total = prefix(columns);
+    for (int64_t c = 1; c < cores; ++c) {
+        const int64_t target = (total * c + cores / 2) / cores;
+        const int64_t minimum = boundaries[c - 1] + 1;
+        int64_t lo = minimum;
+        int64_t hi = columns - (cores - c);
+        while (lo < hi) {
+            const int64_t mid = (lo + hi) / 2;
+            if (prefix(mid) < target) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        if (lo > minimum && target - prefix(lo - 1) <= prefix(lo) - target) {
+            --lo;
+        }
+        boundaries[c] = lo;
+    }
+    boundaries[cores] = columns;
+    int64_t peak = 0;
+    for (int64_t c = 0; c < cores; ++c) {
+        peak = std::max(peak, prefix(boundaries[c + 1]) - prefix(boundaries[c]));
+    }
+    if (peak >= oldPeak) {
+        return;
+    }
+    for (int64_t c = 0; c < cores; ++c) {
+        starts[c] = boundaries[c] * rows;
+        ends[c] = boundaries[c + 1] * rows;
+        firstBatch[c] = boundaries[c] / (heads * cols);
+    }
+    maxLoad = peak;
+}
+
 void FlashAttnMetadataCpuKernel::DoFagSparse()
 {
     SetFagSplitAxis();
@@ -331,20 +426,33 @@ void FlashAttnMetadataCpuKernel::DoFagSparse()
     if (fagSplitAxis_ == FAG_SPLIT_AXIS_BN2S2) {
         TryBn2s2Sparse();
         if (fagBlockOuter_ >= static_cast<uint32_t>(aicCoreNum_)) {
+            // 值铺满（TND 与定长同判，饱和只看 blockOuter；老仓 DoSparse 同款）：保持 BN2S2。
             return;
         }
-        // BN2S2 didn't produce enough cores, fall through to try BN2
-        // Match old FAG: if is_all_same degraded TND->BSND in SupportTransBSND,
-        // SetFagSplitAxis set fagUseTndSplit_=true for BN2S2 TND attempt.
-        // Now that BN2S2 failed, restore fagUseTndSplit_=false and clear stale
-        // tnd_start_bidx from the failed TND attempt, so Layer 3 uses the
-        // correct non-TND path (DoFagSparseBlockInfo / DoFagDenseSplit).
-        if (fagIsAllSame_ && fagLayoutType_ != FAG_INPUT_FORMAT_TND) {
-            fagUseTndSplit_ = false;
-            for (uint32_t c = 0; c < FAG_CORE_LIST_NUM; c++) {
-                fagTndStartBIdx_[c] = 0;
+        if (fagIsAllSame_ && fagLayoutType_ == FAG_INPUT_FORMAT_TND && fagSparseMode_ == FAG_SPARSE_RIGHT_DOWN_CAUSAL &&
+            maxSeqlenQ_ != maxSeqlenKv_) {
+            // A rectangular causal grid can fill the original BN2S2 route even
+            // when the uniform rectangular shortcut underfills. Test the real
+            // column loads before falling through to the fixed GS schedule.
+            DoFagBn2s2SparseTndSplit();
+            if (fagBlockOuter_ >= static_cast<uint32_t>(aicCoreNum_)) {
+                if (!fagHasSeqused_ && !fagIsSeqExistZero_ && fagG_ == 1 &&
+                    fagS1Inner_ * FAG_S1CV_RATIO_DEFAULT == 128 && fagS2Inner_ * FAG_S2CV_RATIO_DEFAULT == 128) {
+                    BalanceUniformCausalColumns(maxSeqlenQ_, maxSeqlenKv_, batchSize_, numHeadsKv_, aicCoreNum_,
+                                                fagBlockStarts_, fagBlockEnds_, fagTndStartBIdx_, fagBlockFactor_);
+                }
+                return;
             }
         }
+        if (fagLayoutType_ == FAG_INPUT_FORMAT_TND) {
+            // The host cannot observe the actual sequence-dependent packing.
+            // Ordinary BN2S2 consumes this flag and switches to GS workspace
+            // accumulation. Deterministic BN2S2 continues using its own plan.
+            fagFallbackToGs_ = true;
+            fagSplitAxis_ = FAG_SPLIT_AXIS_BN2GS1S2;
+        }
+        // 定长非 TND 不置标记：host step4 与本侧同式判饱和（FagUsedCubeCores 同
+        // identity），不饱和的 shape host 已路由 GS1S2，tilingkey 本就是 GS。
     }
 
     // Scenario 2: BN2 multi-block
@@ -828,7 +936,12 @@ void FlashAttnMetadataCpuKernel::FagFillBlockInfoLoadBalance(std::vector<std::ve
 void FlashAttnMetadataCpuKernel::TryBn2s2Sparse()
 {
     fagSplitAxis_ = FAG_SPLIT_AXIS_BN2S2;
-    if (fagUseTndSplit_) {
+    // Split uniform TND band inputs by complete KV columns and use the actual
+    // lengths in the load estimate. The kernel still tests the original mask.
+    const bool restoredTnd =
+        fagLayoutType_ == FAG_INPUT_FORMAT_TND && fagIsAllSame_ &&
+        (fagSparseMode_ == FAG_SPARSE_NO_MASK || fagSparseMode_ == FAG_SPARSE_BAND || maxSeqlenQ_ == maxSeqlenKv_);
+    if (fagUseTndSplit_ || restoredTnd) {
         DoFagBn2s2SparseTndSplit();
     } else {
         DoFagBn2s2DenseSplit();
@@ -887,6 +1000,14 @@ void FlashAttnMetadataCpuKernel::DoFagBn2s2SparseTndSplit()
     std::vector<std::vector<float>> acturalBlockInfo(b + 2, std::vector<float>(fagS2Outer_ + 2, 0.0f));
 
     FagFillBlockInfoLoadBalance(totalBlockInfo, acturalBlockInfo);
+
+    if (totalBlockInfo.back()[1] == 0) {
+        // KV-only batches can have a nonzero load estimate but no compute tiles.
+        // GenFagMetadata still assigns pre/post rows to clear physical outputs.
+        fagBlockOuter_ = 0;
+        fagBlockFactor_ = 0;
+        return;
+    }
 
     float maxBlockNumPerCore = Bn2s2BinarySearchMaxBlockNumPerCore(b, n2, g, aicNum, totalBlockInfo, acturalBlockInfo);
 
@@ -957,9 +1078,10 @@ bool FlashAttnMetadataCpuKernel::Bn2s2CaclePerCoreBlockInfo(int64_t b, int64_t n
             int64_t actualS1Outer = (actualSeqlenQ_[bb] + fagS1CvInner_ - 1) / fagS1CvInner_;
             for (int64_t j = 0; j < fagS2Outer_; j++) {
                 float num = acturalBlockInfo[bb][j];
-                if (coreIdx >= static_cast<int64_t>(FAG_CORE_LIST_NUM)) {
-                    return false;
-                } else if (currentSum + num > maxBlockNumPerCore) {
+                if (currentSum + num > maxBlockNumPerCore) {
+                    if (coreIdx + 1 >= aicNum || coreIdx + 1 >= static_cast<int64_t>(FAG_CORE_LIST_NUM)) {
+                        return false;
+                    }
                     int64_t preBatchBlockNum = (bb == 0) ? 0 : totalBlockInfo[bb - 1][1];
                     int64_t preNGBlockNum = n * totalBlockInfo[bb][0];
                     int64_t preS2BlockNum = j * actualS1Outer;
@@ -1130,6 +1252,80 @@ static inline void FagSplitRows(int64_t totalRows, uint32_t nAiv, FA_METADATA_T*
     }
 }
 
+// Private fields for a uniform physical TND input whose ordinary plan falls
+// back to GS. Bounds are per head. A zero mode keeps the published intervals.
+static std::array<int64_t, 3> FixedGsSwizzleGeometry(int64_t sq, int64_t sk, uint32_t mask, int64_t pre, int64_t next)
+{
+    constexpr int64_t tile = 128;
+    constexpr int64_t align = 64;
+    constexpr int64_t large = 32768;
+    const auto ceilDiv = [](int64_t x, int64_t y) { return x / y + (x % y > 0 ? 1 : 0); };
+    const auto m = ceilDiv(sq, tile);
+    const auto n = ceilDiv(sk, tile);
+    const bool dense = mask == 0 || (mask == 4 && pre >= sq && next >= sk);
+    if (dense) {
+        return {(sq >= large && sk >= large) ? 2 : 1, m, n};
+    }
+    if (mask != 3 && mask != 4) {
+        return {};
+    }
+    const bool causal = (mask == 3 && sq <= sk) || (mask == 4 && pre >= sq && next == 0);
+    // Compare each compressed ASC column with the original physical TND column
+    // before changing any owner. Include both tails even when just one row remains.
+    const auto ascCeil = [](int64_t x) { return (x + 127) / 128; };
+    const int64_t p = causal || mask == 3 ? m - 1 : std::min(m - 1, ascCeil(pre));
+    int64_t q = std::min(n - 1, ascCeil(next));
+    if (causal) {
+        q = mask == 3 && sq < sk ? n - m + 1 : 0;
+    }
+    bool hasPadding = false;
+    for (int64_t c = 0; c < n; ++c) {
+        int64_t ascLo = std::max<int64_t>(c - q, 0);
+        int64_t ascHi = std::min<int64_t>(c + p + 1, m);
+        if (causal) {
+            const int64_t diagonal = mask == 3 && sq < sk ? n - m + 1 : 0;
+            ascLo = std::max<int64_t>(c - diagonal, 0);
+            ascHi = m;
+        }
+        const int64_t start = c * tile;
+        const int64_t end = std::min(start + tile, sk);
+        const int64_t physicalLeft = std::max<int64_t>(start - next, 0);
+        const int64_t physLo = mask == 3 ? std::max<int64_t>(c - ceilDiv(sk - sq, tile), 0) :
+                                           (physicalLeft > sq ? m : physicalLeft / tile);
+        const int64_t physHi = mask == 3 ? m : ceilDiv(std::clamp<int64_t>(end + pre, 0, sq), tile);
+        const int64_t count = std::max<int64_t>(physHi - physLo, 0);
+        const int64_t scheduled = std::max<int64_t>(ascHi - ascLo, 0);
+        if (count > 0 && (physLo < ascLo || physHi > ascHi)) {
+            return {};
+        }
+        hasPadding = hasPadding || scheduled > count;
+    }
+    // The frozen ASC L2 gate counts distinct Q and KV offsets reached by its
+    // fixed IsValid predicate. These column intervals are monotone with row.
+    int64_t rows = 0;
+    int64_t cols = 0;
+    int64_t lastEnd = 0;
+    for (int64_t row = 0; row < m; ++row) {
+        int64_t left = 0;
+        int64_t right = 0;
+        if (mask == 3) {
+            right = std::clamp<int64_t>(sk - sq + (row + 1) * tile, 0, sk);
+        } else {
+            left = ceilDiv(std::max<int64_t>(row * tile - pre, 0), align) * align;
+            right = std::clamp<int64_t>(ceilDiv(std::min((row + 1) * tile, sq) + next, align) * align, 0, sk);
+        }
+        const int64_t begin = left / tile;
+        const int64_t end = ceilDiv(right, tile);
+        if (left < sk && begin < end) {
+            ++rows;
+            cols += std::max<int64_t>(end - std::max(lastEnd, begin), 0);
+            lastEnd = std::max(lastEnd, end);
+        }
+    }
+    const int64_t mode = (causal && sq == sk && sq >= large) ? 3 : 1;
+    return {mode + (hasPadding ? 4 : 0), rows, cols};
+}
+
 // ===== GenFagMetadata: serialize FAG split results to metadata tensor =====
 // FAG data is appended after FA/FD data, core counts are dynamic (read from attrs)
 void FlashAttnMetadataCpuKernel::GenFagMetadata(uint32_t sectionNum)
@@ -1155,6 +1351,30 @@ void FlashAttnMetadataCpuKernel::GenFagMetadata(uint32_t sectionNum)
     fag[FAG_LAYOUT_TYPE_INDEX] = fagLayoutType_;
     fag[FAG_IS_SPARSE_INDEX] = fagIsSparse_ ? 1 : 0;
     fag[FAG_SPARSE_MODE_INDEX] = fagSparseMode_;
+    // BN2S2 运行期回退 GS1S2 标记（FAG_FALLBACK_TO_GS_INDEX）：DoFagSparse 判
+    // TND 值不饱和/切核失败后置位，主算子 BN2S2 二进制读 1 切 GS 流程。
+    fag[FAG_FALLBACK_TO_GS_INDEX] = fagFallbackToGs_ ? 1U : 0U;
+    if (fagFallbackToGs_ && fagIsAllSame_ && !fagHasSeqused_ && !fagIsSeqExistZero_ && fagG_ == 1 &&
+        fagBlockOuter_ == static_cast<uint32_t>(aicCoreNum_) &&
+        fagS1Inner_ * FAG_S1CV_RATIO_DEFAULT == fagS2Inner_ * FAG_S2CV_RATIO_DEFAULT &&
+        fagS1Inner_ * FAG_S1CV_RATIO_DEFAULT == 128) {
+        const auto geom = FixedGsSwizzleGeometry(maxSeqlenQ_, maxSeqlenKv_, maskMode_, fagS1Token_, fagS2Token_);
+        // Sparse padded streams and high K/V reuse have different measured costs from a plain dense grid.
+        const bool bandGeometry = maskMode_ == FAG_SPARSE_BAND && (headDim_ <= 128 || headDim_ > 256);
+        const bool causalGeometry = maskMode_ == FAG_SPARSE_RIGHT_DOWN_CAUSAL && (headDim_ <= 192 || headDim_ > 256);
+        const bool padded = geom[0] >= 4 && (bandGeometry || causalGeometry);
+        const bool denseReuse = geom[0] == 1 && maskMode_ == 0 && headDim_ == 256 && geom[1] > 2 * geom[2];
+        if (padded || denseReuse) {
+            fag[FAG_FIXED_GS_MODE_INDEX] = static_cast<FA_METADATA_T>(geom[0]);
+            fag[FAG_FIXED_GS_Q_TILES_INDEX] = static_cast<FA_METADATA_T>(geom[1]);
+            fag[FAG_FIXED_GS_KV_TILES_INDEX] = static_cast<FA_METADATA_T>(geom[2]);
+        }
+    } else if (!fagFallbackToGs_ && fagSplitAxis_ == FAG_SPLIT_AXIS_BN2S2 && fagLayoutType_ == FAG_INPUT_FORMAT_TND &&
+               !fagHasSeqused_ && !fagIsSeqExistZero_ && fagG_ == 1 && headDim_ == 192 &&
+               (headDimV_ == 128 || headDimV_ == 192) &&
+               (maskMode_ == 0 || maskMode_ == FAG_SPARSE_RIGHT_DOWN_CAUSAL) && fagBlockOuter_ > 0) {
+        fag[FAG_FIXED_GS_MODE_INDEX] = static_cast<FA_METADATA_T>(FAG_COMPLETE_KV_OWNER);
+    }
 
     // Write block arrays
     for (uint32_t i = 0; i < FAG_CORE_LIST_NUM; i++) {
@@ -1198,18 +1418,6 @@ void FlashAttnMetadataCpuKernel::GenFagMetadata(uint32_t sectionNum)
     fag[FAG_DKV_ROWS_INDEX] = static_cast<FA_METADATA_T>(dkvRows);
     FagSplitRows(dqRows, nAiv, fag + FAG_DQ_ROW_STARTS_OFFSET, fag + FAG_DQ_ROW_ENDS_OFFSET);
     FagSplitRows(dkvRows, nAiv, fag + FAG_DKV_ROW_STARTS_OFFSET, fag + FAG_DKV_ROW_ENDS_OFFSET);
-    if (layoutQ_ == "TND" && layoutKv_ == "TND") {
-        const auto shape = metadata_->GetTensorShape();
-        const int64_t words = shape != nullptr && shape->GetDims() == 1 ? shape->GetDimSize(0) : 0;
-        const int64_t tailOffset = static_cast<int64_t>(fagOffset) + FAG_METADATA_SIZE;
-        const int64_t required = fag_pto_tnd::WordCount(batchSize_);
-        if (words >= tailOffset && words - tailOffset >= required) {
-            const auto plan =
-                fag_pto_tnd::Build(actualSeqlenQ_, actualSeqlenKv_, numHeadsKv_, fagG_, headDim_, headDimV_,
-                                   aicCoreNum_, maskMode_, winLeft_, winRight_, fagBlockOuter_);
-            (void)fag_pto_tnd::Serialize(plan, aicCoreNum_, basePtr + tailOffset, words - tailOffset);
-        }
-    }
 }
 
 // ===== FAG metadata end =====

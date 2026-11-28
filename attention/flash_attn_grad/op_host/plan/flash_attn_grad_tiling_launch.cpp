@@ -23,8 +23,8 @@ ge::graphStatus BuildSchedulePlan(gert::TilingContext* context, const FagParsedI
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
 
     // 启动的 cube 数 = dense 非 TND 下 metadata 的 blockOuter。tiling 读不到
-    // AICPU 的张量，所以这里的公式必须与 DoFagBn2DenseSplit / DoFagDenseSplit
-    // 保持一致（共用 flash_attn_grad_block_outer.h）。
+    // AICPU 的张量，所以这里的公式必须与 DoFagBn2DenseSplit / DoFagDenseSplit /
+    // DoFagBn2s2DenseSplit 保持一致（共用 flash_attn_grad_block_outer.h）。
     // sparse / TND / seqused 实际用的核可能比 dense 公式少，这些场景一律保持
     // 全片启动，确保永不少发。
     FagS1S2Outer(info.s1, info.s2, schedule.s1Outer, schedule.s2Outer);
@@ -43,14 +43,19 @@ ge::graphStatus BuildSchedulePlan(gert::TilingContext* context, const FagParsedI
     schedule.useActualCores =
         !info.hasSeqused && !bn2VarlenTnd && (bn2SelfScheduled || (!info.isTnd && info.maskMode == MASK_MODE_NO_MASK));
     schedule.usedCube = info.aicNum;
-    if (info.isDeterministic && kernel.tmpl == TMPL_BN2GS1S2) {
+    if (info.isDeterministic && (kernel.tmpl == TMPL_BN2GS1S2 || kernel.tmpl == TMPL_BN2S2)) {
         // 确定性按满片 aicNum 启动，核上闭式用 get_block_num() 当 k。
         schedule.useActualCores = false;
         schedule.usedCube = info.aicNum;
         schedule.deterMaxRound = 0;
     } else if (schedule.useActualCores) {
+        /*
+           BN2S2 无需专用分支：路由的饱和门（usedCube >= aicNum）保证
+           定长场景铺满整片，BN2S2 真值公式收敛为 aicNum；
+           sparse / TND / seqused等不饱和场景一律全片启动，保证永不少发。
+         */
         schedule.usedCube =
-            static_cast<uint32_t>(FagUsedCubeCores(kernel.tmpl == TMPL_BN2, info.b, info.n2, info.g, schedule.s1Outer,
+            static_cast<uint32_t>(FagUsedCubeCores(kernel.tmpl, info.b, info.n2, info.g, schedule.s1Outer,
                                                    schedule.s2Outer, static_cast<int64_t>(info.aicNum)));
     }
 

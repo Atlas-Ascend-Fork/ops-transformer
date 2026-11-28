@@ -31,14 +31,14 @@ ge::graphStatus FagInputExistenceChecker::Check(FagCheckCtx& ctx)
                 return ge::GRAPH_PARAM_INVALID);
     const auto metadataShape = context->GetOptionalInputShape(METADATA_INDEX);
     const auto metadataDesc = context->GetOptionalInputDesc(METADATA_INDEX);
-    // Every runner consumes the original 16-word header and 412-word FAG body.
-    // Only the versioned deterministic tail is optional.
+    // Every runner consumes the 16-word header and 416-word FAG body.
+    // TND requires independent schedule extensions, checked after shape parsing.
     OP_CHECK_IF(metadataShape == nullptr || metadataDesc == nullptr, OP_LOGE(ctx.opName, "metadata is required."),
                 return ge::GRAPH_PARAM_INVALID);
     OP_CHECK_IF(metadataShape->GetStorageShape().GetDimNum() != 1 ||
-                    metadataShape->GetStorageShape().GetShapeSize() < 428 ||
+                    metadataShape->GetStorageShape().GetShapeSize() < 432 ||
                     metadataDesc->GetDataType() != ge::DT_INT32,
-                OP_LOGE(ctx.opName, "metadata must be a one-dimensional int32 tensor with at least 428 words."),
+                OP_LOGE(ctx.opName, "metadata must be a one-dimensional int32 tensor with at least 432 words."),
                 return ge::GRAPH_PARAM_INVALID);
     return ge::GRAPH_SUCCESS;
 }

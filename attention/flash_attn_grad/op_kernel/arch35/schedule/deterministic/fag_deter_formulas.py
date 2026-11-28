@@ -165,7 +165,19 @@ def cal_gqa_dense(k, m, n, b, core_id, round_id, g, dense_round=0):
     return cal_gqa_dense_precomputed(k, m, n, b, core_id, round_id, g, rmax, t1, t2)
 
 
-def cal_gqa_dense_precomputed(k, m, n, b, core_id, round_id, g, dense_round, t1, t2):
+def cal_gqa_dense_uncached(k, m, n, b, core_id, round_id, g, dense_round=0):
+    k = pl.min(pl.min(k, b * g * m), b * n)
+    rmax_def = pl.max(pl.max(_ceil(b * n * g, k), _ceil(n, m)), g)
+    use_dr = pl.min(pl.max(dense_round, 0), 1)
+    rmax = dense_round * use_dr + rmax_def * (1 - use_dr)
+    return cal_gqa_dense_precomputed(
+        k, m, n, b, core_id, round_id, g, rmax, 0, 0, False
+    )
+
+
+def cal_gqa_dense_precomputed(
+    k, m, n, b, core_id, round_id, g, dense_round, t1, t2, period_cached=True
+):
     """Decode one coordinate using the selected round and cached GCD periods."""
     rmax = dense_round
     ok = _in_range(core_id, 1, k) * _in_range(round_id, 1, rmax * m)
@@ -177,6 +189,10 @@ def cal_gqa_dense_precomputed(k, m, n, b, core_id, round_id, g, dense_round, t1,
     b_id = _ceil(_nz(idx % nbg, nbg), gg)
     y = _ceil(idx, nbg)
     w = _nz(idx % gg, gg)
+    if not period_cached:
+        gcd = pl.max(_gcd(nbg, rmax), 1)
+        t1 = rmax // gcd
+        t2 = nbg // gcd
     t1_new = t1 * m
     t1s = pl.max(t1, 1)
     t1n = pl.max(t1_new, 1)
@@ -585,7 +601,7 @@ def _gqa_causal_tail_packed(k, m, n, b1, b2, j, a4, t, ell, delta, g):
     return out
 
 
-def cal_gqa_causal(k, m, n, b, j, r, g, boundary_mode=0):
+def cal_gqa_causal(k, m, n, b, j, r, g, boundary_mode=0, uncached_dense=False):
     invalid = _pack_wxy(-1, 0, 0, m, n)
     out = invalid
     b1 = b // k
@@ -620,9 +636,14 @@ def cal_gqa_causal(k, m, n, b, j, r, g, boundary_mode=0):
         half = b2 // 2
         rm2 = (2 * m - t * k + 1) * t * half * g
         if a2 >= 1 and a2 <= rm2:
-            wsub, xsub, ysub = cal_gqa_dense(
-                k, 2 * m - t * k + 1, t * k, half, j, a2, g
-            )
+            if uncached_dense:
+                wsub, xsub, ysub = cal_gqa_dense_uncached(
+                    k, 2 * m - t * k + 1, t * k, half, j, a2, g
+                )
+            else:
+                wsub, xsub, ysub = cal_gqa_dense(
+                    k, 2 * m - t * k + 1, t * k, half, j, a2, g
+                )
             max_x = 2 * m - t * k + 1
             if (
                 xsub >= 1
@@ -687,11 +708,6 @@ def cal_gqa_causal(k, m, n, b, j, r, g, boundary_mode=0):
             else:
                 out = _gqa_causal_tail_packed(k, m, n, b1, b2, j, a3, t, ell, delta, g)
     return out
-
-
-def cal_gqa_causal_source(k, m, n, b, j, r, g):
-    """Ordinary AscendC GQA causal boundary, isolated from legacy PTO callers."""
-    return cal_gqa_causal(k, m, n, b, j, r, g, CAUSAL_BOUNDARY_DEVICE_INTEGER_SQRT)
 
 
 def band_pq(s1_outer, s2_outer, s1_token, s2_token):
@@ -1076,12 +1092,82 @@ def _pack_gqa_band_symmetric_tail(
     return out
 
 
-def cal_gqa_band(k, m, n, p, q, b, g, j, r):
+def cal_gqa_band_dense(
+    k, m, n, b, j, r, g, dense_k, dense_round, t1, t2, cached, uncached_dense=False
+):
+    """Only fixed family24 supplies cached immutable dense periods."""
+    if uncached_dense:
+        return cal_gqa_dense_uncached(k, m, n, b, j, r, g)
+    if cached == 1:
+        return cal_gqa_dense_precomputed(dense_k, m, n, b, j, r, g, dense_round, t1, t2)
+    return cal_gqa_dense(k, m, n, b, j, r, g)
+
+
+def cal_gqa_band(k, m, n, p, q, b, g, j, r, uncached_dense=False):
     base_m = m
     base_n = n
     k, m, n, p, q, b, n1, b1, b2, l1, l2, l3, rm, rm1, r1, r2, _rm2 = _gen_gqa_band(
         k, m, n, p, q, b, g
     )
+    return cal_gqa_band_precomputed(
+        k,
+        m,
+        n,
+        p,
+        q,
+        b,
+        n1,
+        b1,
+        b2,
+        l1,
+        l2,
+        l3,
+        rm,
+        rm1,
+        r1,
+        r2,
+        base_m,
+        base_n,
+        j,
+        r,
+        0,
+        0,
+        0,
+        0,
+        0,
+        uncached_dense,
+    )
+
+
+def cal_gqa_band_precomputed(
+    k,
+    m,
+    n,
+    p,
+    q,
+    b,
+    n1,
+    b1,
+    b2,
+    l1,
+    l2,
+    l3,
+    rm,
+    rm1,
+    r1,
+    r2,
+    base_m,
+    base_n,
+    j,
+    r,
+    dense_k,
+    dense_round,
+    dense_t1,
+    dense_t2,
+    cached,
+    uncached_dense=False,
+):
+    """Same coordinates and empty rounds; only invariant setup is factored out."""
     invalid = _pack_wxy(-1, 0, 0, base_m, base_n)
     rm_g = rm * n1
     if r <= rm1:
@@ -1173,7 +1259,21 @@ def cal_gqa_band(k, m, n, p, q, b, g, j, r):
                             base_n,
                         )
                 elif p + q <= n:
-                    w, x, y = cal_gqa_dense(k, m, p + q - 1, b2, j, a, n1)
+                    w, x, y = cal_gqa_band_dense(
+                        k,
+                        m,
+                        p + q - 1,
+                        b2,
+                        j,
+                        a,
+                        n1,
+                        dense_k,
+                        dense_round,
+                        dense_t1,
+                        dense_t2,
+                        cached,
+                        uncached_dense,
+                    )
                     if w != -1:
                         if x - p + 1 <= y and y <= x + q - 1:
                             out = _pack_wxy(b1 * k * n1 + w, x, y, base_m, base_n)
@@ -1184,12 +1284,40 @@ def cal_gqa_band(k, m, n, p, q, b, g, j, r):
                                 b1 * k * n1 + w, x, y + p + q - 1, base_m, base_n
                             )
                 else:
-                    w, x, y = cal_gqa_dense(k, m, n, b2, j, a, n1)
+                    w, x, y = cal_gqa_band_dense(
+                        k,
+                        m,
+                        n,
+                        b2,
+                        j,
+                        a,
+                        n1,
+                        dense_k,
+                        dense_round,
+                        dense_t1,
+                        dense_t2,
+                        cached,
+                        uncached_dense,
+                    )
                     if w != -1 and x - p + 1 <= y and y <= x + q - 1:
                         out = _pack_wxy(b1 * k * n1 + w, x, y, base_m, base_n)
             elif n > m:
                 if r2 <= r1:
-                    w, x, y = cal_gqa_dense(k, m, p + q - 1, b2, j, a, n1)
+                    w, x, y = cal_gqa_band_dense(
+                        k,
+                        m,
+                        p + q - 1,
+                        b2,
+                        j,
+                        a,
+                        n1,
+                        dense_k,
+                        dense_round,
+                        dense_t1,
+                        dense_t2,
+                        cached,
+                        uncached_dense,
+                    )
                     if w != -1:
                         if y - q + 1 <= x and x <= p + y - 1:
                             out = _pack_wxy(b1 * k * n1 + w, x, y, base_m, base_n)
@@ -1204,7 +1332,21 @@ def cal_gqa_band(k, m, n, p, q, b, g, j, r):
                         if 1 <= x2 and x2 <= m:
                             out = _pack_wxy(b1 * k * n1 + w, x2, y, base_m, base_n)
             else:
-                w, x, y = cal_gqa_dense(k, p + q - 1, n, b2, j, a, n1)
+                w, x, y = cal_gqa_band_dense(
+                    k,
+                    p + q - 1,
+                    n,
+                    b2,
+                    j,
+                    a,
+                    n1,
+                    dense_k,
+                    dense_round,
+                    dense_t1,
+                    dense_t2,
+                    cached,
+                    uncached_dense,
+                )
                 if w != -1:
                     if x - p + 1 <= y and y <= x + q - 1:
                         out = _pack_wxy(b1 * k * n1 + w, x, y, base_m, base_n)
@@ -1215,21 +1357,23 @@ def cal_gqa_band(k, m, n, p, q, b, g, j, r):
     return out
 
 
-def fused_valid_for_mask(constInfo, s1o, s2o, mask_mode):
+def fused_valid_for_mask(
+    constInfo, s1o, s2o, mask_mode, cube_m=CUBE_BASEM, cube_n=CUBE_BASEN
+):
     out = 1
     if mask_mode == 0:
         out = 1
     else:
-        s2_left = s2o * CUBE_BASEN
+        s2_left = s2o * cube_n
         if mask_mode == 3:
-            s2_ignored = constInfo.s1Size - CUBE_BASEM * (s1o + 1)
+            s2_ignored = constInfo.s1Size - cube_m * (s1o + 1)
             s2_end = pl.min(pl.max(constInfo.s2Size - s2_ignored, 0), constInfo.s2Size)
             out = pl.min(pl.max(s2_end - s2_left, 0), 1)
         else:
-            s2_right = pl.min((s2o + 1) * CUBE_BASEN, constInfo.s2Size)
-            s2_sl = pl.max(CUBE_BASEM * s1o - constInfo.s1Token, 0)
+            s2_right = pl.min((s2o + 1) * cube_n, constInfo.s2Size)
+            s2_sl = pl.max(cube_m * s1o - constInfo.s1Token, 0)
             s2_sl = (s2_sl // 64) * 64
-            row_end = pl.min(CUBE_BASEM * (s1o + 1), constInfo.s1Size)
+            row_end = pl.min(cube_m * (s1o + 1), constInfo.s1Size)
             s2_sr = ((row_end + constInfo.s2Token + 63) // 64) * 64
             s2_sr = pl.min(s2_sr, constInfo.s2Size)
             a = pl.min(pl.max(s2_sr - s2_left, 0), 1)

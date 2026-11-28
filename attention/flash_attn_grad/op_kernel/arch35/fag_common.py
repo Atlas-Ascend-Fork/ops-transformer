@@ -57,8 +57,8 @@ BLOCK_ELEMS_F16 = 16
 # 在 pre 使用最多 32×768、inline 使用 8×768，输出仍写同一扁平窗口。
 # sp 的 mutex 号复用主图 tile 的号（见 fag_mem），让“pre 最后一次 store →
 # 主循环首次 load”有显式依赖；主图 tile 在 pre 阶段全部不活跃，故地址可复用。
-SP_ROWS = {128: 216, 192: 144, 256: 104, 768: 104}
-SP_WORK_W = {128: 128, 192: 192, 256: 256, 768: 256}
+SP_ROWS = {128: 216, 192: 144, 256: 104, 768: 104, 512: 104}
+SP_WORK_W = {128: 128, 192: 192, 256: 256, 768: 256, 512: 256}
 
 # ---- 每档的 D 轴分块表 ----
 # D<=128 只有一块，展开后就是一次完整的 matmul，不产生分块开销。
@@ -76,25 +76,19 @@ SP_WORK_W = {128: 128, 192: 192, 256: 256, 768: 256}
 # 表拆成几个**平铺的标量表**而不是一个嵌套元组表：把 tuple-of-tuples 赋给
 # 局部变量(哪怕只是 `chunks = TABLE[d_align]` 之后再下标取)会让 codegen 报
 # "Array tuple assignment ... has elements without a C++ name"。
-D_NCHUNKS = {64: 1, 128: 1, 192: 2, 256: 2, 768: 6}  # 768=6×128，空块 dW=0
-D_CHUNK_OFF0 = {64: 0, 128: 0, 192: 0, 256: 0, 768: 0}  # 第 0 块的列偏移
-D_CHUNK_W0 = {
-    64: 64,
-    128: 128,
-    192: 96,
-    256: 128,
-    768: 128,
-}  # D=64 一块 64；128 一块 128；192=96+96；256=128+128；768 走 6 块循环
-D_CHUNK_OFF1 = {64: 0, 128: 0, 192: 96, 256: 128, 768: 128}  # 第 1 块
-D_CHUNK_W1 = {64: 0, 128: 0, 192: 96, 256: 128, 768: 128}
+D_NCHUNKS = {64: 1, 128: 1, 192: 2, 256: 2, 768: 6, 512: 4}
+D_CHUNK_OFF0 = {64: 0, 128: 0, 192: 0, 256: 0, 768: 0, 512: 0}
+D_CHUNK_W0 = {64: 64, 128: 128, 192: 96, 256: 128, 768: 128, 512: 128}
+D_CHUNK_OFF1 = {64: 0, 128: 0, 192: 96, 256: 128, 768: 128, 512: 128}
+D_CHUNK_W1 = {64: 0, 128: 0, 192: 96, 256: 128, 768: 128, 512: 128}
 # L0A/L0B/L0C 按最宽的一块声明，足以装下任一块
-D_CHUNK_MAXW = {64: 64, 128: 128, 192: 96, 256: 128, 768: 128}
+D_CHUNK_MAXW = {64: 64, 128: 128, 192: 96, 256: 128, 768: 128, 512: 128}
 
 # Cube L1/L0 物理宽钉在 128（d_align=64 只是 tilingkey 分档，Acc/L1 仍按
 # 128 开）。pre/post 已改成 1D 元素切，不再用列宽表。V1 列宽见 v1w。
 # 768 档物理宽仍 256：整头 768 进 L1 会超 512KB，按窗重载（docs/D256设计.md）。
 # 64 档仍是 128 ，受 pypto 前端约束
-D_PHYS_W = {64: 128, 128: 128, 192: 192, 256: 256, 768: 256}
+D_PHYS_W = {64: 128, 128: 128, 192: 192, 256: 256, 768: 256, 512: 256}
 
 # ---- D 轴分块几何 ----
 # cube 侧按这套几何写 workspace，vector 侧从 workspace 读回 cast 必须用同一套，
@@ -104,43 +98,47 @@ D768_STEP = 128
 D768_PHYS = 256
 
 
-def _chunk_step():
-    return D768_STEP if d_align == 768 else D_CHUNK_W0[d_align]
+def _chunk_step(resource_bn2s2=False):
+    return (
+        D768_STEP
+        if d_align >= 512
+        else (D_CHUNK_W0_bn2s2[d_align] if resource_bn2s2 else D_CHUNK_W0[d_align])
+    )
 
 
-def _chunk_off(i):
-    return i * _chunk_step()
+def _chunk_off(i, resource_bn2s2=False):
+    return i * _chunk_step(resource_bn2s2)
 
 
-def _chunk_local(i):
-    return (i % 2) * D768_STEP if d_align == 768 else _chunk_off(i)
+def _chunk_local(i, resource_bn2s2=False):
+    return (i % 2) * D768_STEP if d_align >= 512 else _chunk_off(i, resource_bn2s2)
 
 
 def _chunk_win(i):
-    return (i // 2) * D768_PHYS if d_align == 768 else 0
+    return (i // 2) * D768_PHYS if d_align >= 512 else 0
 
 
-def _chunk_valid_d(dimSize, i):
+def _chunk_valid_d(dimSize, i, resource_bn2s2=False):
     """第 i 块沿 D/Dv 的有效列数：按真实 dim 截断，空块为 0。"""
-    return pl.max(pl.min(_chunk_step(), dimSize - _chunk_off(i)), 0)
+    return pl.max(
+        pl.min(_chunk_step(resource_bn2s2), dimSize - _chunk_off(i, resource_bn2s2)), 0
+    )
 
 
-def dv_chunk_valid(constInfo, chunkIdx):
-    return _chunk_valid_d(constInfo.dvSize, chunkIdx)
+def dv_chunk_valid(constInfo, chunkIdx, resource_bn2s2=False):
+    return _chunk_valid_d(constInfo.dvSize, chunkIdx, resource_bn2s2)
 
 
 # ---- 公开的 D 分块几何（cube 写 / vector 读，口径必须一致）----
-def chunk_step():
-    return _chunk_step()
 
 
-def chunk_off(chunkIdx):
-    return _chunk_off(chunkIdx)
+def chunk_off(chunkIdx, resource_bn2s2=False):
+    return _chunk_off(chunkIdx, resource_bn2s2)
 
 
-def chunk_local(chunkIdx):
+def chunk_local(chunkIdx, resource_bn2s2=False):
     """768 档的窗内偏移（L1 按 256 物理窗重载用）；其余档等于全局偏移。"""
-    return _chunk_local(chunkIdx)
+    return _chunk_local(chunkIdx, resource_bn2s2)
 
 
 def chunk_win(chunkIdx):
@@ -148,8 +146,8 @@ def chunk_win(chunkIdx):
     return _chunk_win(chunkIdx)
 
 
-def chunk_valid_d(dimSize, chunkIdx):
-    return _chunk_valid_d(dimSize, chunkIdx)
+def chunk_valid_d(dimSize, chunkIdx, resource_bn2s2=False):
+    return _chunk_valid_d(dimSize, chunkIdx, resource_bn2s2)
 
 
 CV_CORE_RATIO = 2
@@ -568,4 +566,418 @@ def make_run_infos_2():
         gIdx=0,
         dqFirst=1,
         dqLast=1,
+    )
+
+
+# BN2S2-specific implementation. Names remain distinct from the public family.
+# Resource layout, metadata protocol and task order are preserved.
+
+import pypto_pro.language as pl
+
+from fag_colsplit import ceil_div_signed, col_prefix_body_bn2s2
+
+# ---- 基本块尺寸 ----
+CUBE_BASEM_bn2s2 = 128  # s1 对齐 128
+CUBE_BASEN_bn2s2 = 128  # s2 对齐 128
+# D 的分配宽度。这不是普通常量，而是 tilingkey 字段 d_align 的取值之一 ——
+# 见 FlashAttnGradTilingKey.d_align 与下方 D_CHUNKS 的说明。
+# 需要按档变化的站点一律用 d_align(tilingkey 字段，trace 期常量)；这个名字只
+# 在「明确指 128 这一档」时用，例如 fag_mem 里 BN2 复用的那张图。
+HEAD_DIM_ALIGN_bn2s2 = 128  # D 对齐 128 档
+BLOCK_ELEMS_F16_bn2s2 = 16
+
+# ---- 每档的 D 轴分块表 ----
+# D<=128 只有一块，展开后就是一次完整的 matmul，不产生分块开销。
+# D=192 切成等宽两块 96+96 而非 128+64：实测(bench_dsplit.py/bench_dsplit_n.py，
+# 双点斜率法 + 5 次中位数，单位 us/次完整 D 遍历)
+#     方案            MM2(D 在 K 轴)   dQ/dK(D 在 N 轴)
+#     96+96  (DB)         0.466            0.738
+#     128+64 (DB)         0.549 (+15.2%)   0.818 (+9.8%)
+#     192 单发(无 DB)      0.781            1.123
+# 两段等宽时 mac 与 MTE1 的节拍整齐；128+64 的第二段只有一半宽，盖不住前段。
+# 分块的首要目的是保住 L0A/L0B 双缓冲：[128,96]16-bit=24KB，x2=48KB<=64KB。
+# 若直接按 192 单发，L0 tile 变 48KB，双缓冲放不下 —— 那是之前 319->184us
+# 的最大一项优化。96=6*16 满足 16-bit 的 C0=16 分形对齐。
+#
+# 表拆成几个**平铺的标量表**而不是一个嵌套元组表：把 tuple-of-tuples 赋给
+# 局部变量(哪怕只是 `chunks = TABLE[d_align]` 之后再下标取)会让 codegen 报
+# "Array tuple assignment ... has elements without a C++ name"。
+D_NCHUNKS_bn2s2 = D_NCHUNKS
+D_CHUNK_OFF0_bn2s2 = D_CHUNK_OFF0
+D_CHUNK_W0_bn2s2 = {
+    64: 128,
+    128: 128,
+    192: 96,
+    256: 128,
+    512: 128,
+    768: 128,
+}  # D<=128 一块 128；192=96+96；256=128+128；768 走 6 块循环
+D_CHUNK_OFF1_bn2s2 = D_CHUNK_OFF1
+D_CHUNK_W1_bn2s2 = D_CHUNK_W1
+# L0A/L0B/L0C 按最宽的一块声明，足以装下任一块
+D_CHUNK_MAXW_bn2s2 = {64: 128, 128: 128, 192: 96, 256: 128, 768: 128, 512: 128}
+
+# Cube L1/L0 物理宽钉在 128（d_align=64 只是 tilingkey 分档，Acc/L1 仍按
+# 128 开）。pre/post 已改成 1D 元素切，不再用列宽表。V1 列宽见 v1w。
+# 确定性768档保留已验证的双common整头布局；新增普通512档按256列窗重载。
+D_PHYS_W_bn2s2 = {64: 128, 128: 128, 192: 192, 256: 256, 768: 768, 512: 256}
+
+CV_CORE_RATIO_bn2s2 = 2
+VECTOR_BASEM_bn2s2 = (
+    CUBE_BASEM_bn2s2 // CV_CORE_RATIO_bn2s2
+)  # 64，每个 vector 子核处理半个 S1
+VECTOR_BASEN_bn2s2 = CUBE_BASEN_bn2s2
+
+# 单个 VF 寄存器的 fp32 / 16-bit(fp16/bf16) lane 数
+VF_LANES_bn2s2 = 64
+VF_LANES_F16_bn2s2 = 128  # fp16/bf16 同宽，256B 寄存器各 128 lane
+# 压缩 mask 边长 2048，minValue = 0xFF7FFFFF
+ATTEN_MASK_COMPRESS_bn2s2 = 2048
+ATTEN_MASK_MIN_bn2s2 = -3.4028234663852886e38
+
+# 兼容测试脚本导出的别名
+TILE_M_bn2s2 = CUBE_BASEM_bn2s2
+TILE_N_bn2s2 = CUBE_BASEN_bn2s2
+TILE_D_bn2s2 = HEAD_DIM_ALIGN_bn2s2
+
+
+# ---- NZ 分形排布常量 ----
+# v3/v4 的融合 VF 直接以 NZ 写出，随后 insert 进 CV 共享 L1；
+# 搬运在 fag_block_vec.copy_ub2l1，这里只放几何。
+# NZ 分形：16-bit(fp16/bf16) 的 C0 = 16 元素 = 32B(一个 DataBlock)
+FRACTAL_C0_bn2s2 = 16
+UB_BLOCK_BYTES_bn2s2 = 32
+# 一个分形列占 VECTOR_BASEM*C0 个 16-bit = (64*16)*2/32 = 64 个 32B block，
+# 末尾 +1 垫一个 block 错开 bank：
+#   blockStride = (srcM * blockN) * sizeof(T1) / blockSize + 1
+NZP_BLOCK_STRIDE_bn2s2 = (
+    VECTOR_BASEM_bn2s2 * FRACTAL_C0_bn2s2
+) * 2 // UB_BLOCK_BYTES_bn2s2 + 1  # 65
+NZP_REPEAT_STRIDE_bn2s2 = 1
+NZP_ROWS_bn2s2 = VECTOR_BASEM_bn2s2 + 1  # 65
+
+# ---- cross core sync flags ----
+SYNC_C1_TO_V2_FLAG_bn2s2 = [0, 1]  # mm1(dO@V^T) 结果就绪，按 taskId&1 ping-pong
+SYNC_C2_TO_V2_FLAG_bn2s2 = [2, 3]  # mm2(Q@K^T)  结果就绪，按 taskId&1 ping-pong
+SYNC_V3_TO_C3_FLAG_bn2s2 = 4  # dS 已由 UB 落入 L1，dq/dk 可以开算
+SYNC_V4_TO_C5_FLAG_bn2s2 = 5  # P  已由 UB 落入 L1，dv 可以开算
+SYNC_C4_TO_V3_FLAG_bn2s2 = 8  # 反向：dqk 已读完 dS L1，vector 可覆写
+SYNC_C5_TO_V4_FLAG_bn2s2 = 9  # 反向：dv  已读完 P  L1，vector 可覆写
+# 反向：vector 已读完 mm1/mm2 的 UB 槽位，cube 可以覆写。
+# mm1/mm2 各只有 2 个槽位，
+# 而 cube 领先 vector 两个 task，故 task N 要写的槽位正是 vector 刚读完
+# 的 task N-2 那块，必须显式等这个 flag 才能覆写。
+SYNC_V2_TO_C1_FLAG_bn2s2 = [10, 11]
+SYNC_V2_TO_C2_FLAG_bn2s2 = [12, 13]
+# BN2 1-ahead：mm3/mm4 的 fp32 fixpipe → 独立 Muls+Cast
+SYNC_C3_TO_V5_FLAG_bn2s2 = 6  # mm3 fp32 已进 mm1 UB，v5 可 Muls+Cast dQ
+SYNC_C4_TO_V6_FLAG_bn2s2 = 7  # mm4 fp32 已进 mm2 UB，v6 可 Muls+Cast dK
+# cube 在下一轮 mm1/mm2 前等 v6 写完，避免覆写仍在用的 mm1/mm2 槽
+SYNC_DETER_FIX_FLAG_bn2s2 = 14
+# newDeter template0 的三段 FIX token。事件 6/7 在 BN2 分支使用，
+# 事件 14 也只在与 template0 编译期互斥的路径使用，因此可以安全复用。
+SYNC_DQ_DETER_FIX_FLAG_bn2s2 = 6
+SYNC_DK_DETER_FIX_FLAG_bn2s2 = 7
+SYNC_DV_DETER_FIX_FLAG_bn2s2 = 14
+# BN2S2+deter d≤128 直出档的 dK 槽位握手**奇偶对**（奇偶 = 任务号 = mm2 槽位）。
+# 老算子靠单循环「相邻步骤」把 mm4 列末 fixpipe 与 v5 消费结构性配对（任务
+# 身份由程序顺序携带）；PTO 的 cube/vector 双 section 没有这个结构，任务身份
+# 必须显式编进事件：set/wait 都按任务号奇偶配对，陈旧高电平/顺序错配不可能
+# 跨任务成立——即把 C1/C2_TO_V2 + V2_TO_C1/C2 的 ping-pong 模式移植到直出
+# 握手。复用说明：7/14 与 BN2/老 deter 的单事件编译期互斥（template+deter 位
+# 区分二进制）；10/11 在 BN2S2+deter 二进制空闲（V2_TO_C1 仅非 deter 路径 set，
+# deter 的 vector 从不 set V2、cube 从不 wait V2）。
+SYNC_C4_TO_V6_PP_FLAG_bn2s2 = [7, 10]
+SYNC_DKV_RELEASE_PP_FLAG_bn2s2 = [14, 11]
+
+# Only the ordinary wide-column pipeline uses these pairs. Its one-task
+# lookahead does not use the mm1/mm2 reverse credits (10,12); flag 15 is
+# free between the pre/post barriers. Each column bank has its own credits.
+WIDE_DK_READY_bn2s2 = [7, 10]
+WIDE_DV_READY_bn2s2 = [6, 12]
+WIDE_KV_READ_DONE_bn2s2 = [14, 15]
+
+# cube 领先 vector 的 task 数。PRELOAD_TIMES=3：首轮连发两组
+# mm2+mm1(共四次 matmul)填满两个 UB 槽位，之后第 N 组的 cube 计算与
+# 第 N-2 组的 vector 计算重叠。runInfos 需要 3 份(N / N-1 / N-2)。
+PRELOAD_TIMES_bn2s2 = 3
+
+
+# ==================================================================
+#  SetConstInfo
+# ==================================================================
+def set_const_info_bn2s2(tiling, coreNum, cu_q_tensor, cu_kv_tensor):
+    """由 tiling、运行期核数与 cu_seqlens 视图推导初始化信息。
+
+    coreNum 不在 tiling 里(TilingData 没有该字段)，改由调用方从
+    pl.get_block_num() 取：这是 host SetBlockDim 启动的 cube 数，dense 下
+    等于 metadata blockOuter。cube/vector 两侧同一口径，set/wait 才能配对。
+
+    分核开关用 tilingkey 裸名 ``swizzle``，不要再写进本结构体：字段会
+    被当成运行期值，``if constInfo.enableSwizzle`` 两路都编进同一份二进制。
+
+    t1Size/t2Size 在此统一计算：TND 读取 cu_seqlens[B]，固定布局为 B*S，
+    不读取可能为空的 cu_seqlens 输入。
+    逻辑 s1Size/s2Size 始终保留 tiling 的最大序列长度；GM 视图长度单列，
+    不影响分核、mask 坐标或 host 预留的 workspace 分段容量。
+    """
+    t1Size = tiling.b * tiling.s1
+    t2Size = tiling.b * tiling.s2
+    viewD0Q = tiling.viewD0Q
+    viewD0KV = tiling.viewD0KV
+    s1ViewSize = tiling.s1
+    s2ViewSize = tiling.s2
+    if layout == 1:
+        t1Size = pl.astype(pl.getval(cu_q_tensor, tiling.b), pl.DT_INT64)
+        t2Size = pl.astype(pl.getval(cu_kv_tensor, tiling.b), pl.DT_INT64)
+        viewD0Q = 1
+        viewD0KV = 1
+        s1ViewSize = t1Size
+        s2ViewSize = t2Size
+    s1Outer = (tiling.s1 + CUBE_BASEM_bn2s2 - 1) // CUBE_BASEM_bn2s2
+    s2Outer = (tiling.s2 + CUBE_BASEN_bn2s2 - 1) // CUBE_BASEN_bn2s2
+    # mask3 的 s1Token 可能是 INT32_MAX + s1 - s2，这里不读它。
+    # mask0 不走 packed 反查，列几何折叠成整矩形。
+    if mask_mode == 0:
+        colP = 0
+        colQ = 0
+        packedPerHead = s1Outer * s2Outer
+    else:
+        colQ = ceil_div_signed(tiling.s2Token, CUBE_BASEM_bn2s2)
+        colQ = pl.min(colQ, s2Outer - 1)
+        if mask_mode == 3:
+            colP = s1Outer - 1
+            colLastHi = s1Outer - 1
+        else:
+            colP = ceil_div_signed(tiling.s1Token, CUBE_BASEM_bn2s2)
+            colP = pl.min(colP, s1Outer - 1)
+            lc = ((tiling.s2 + 63) // 64) * 64
+            colLastHi = pl.min(
+                ceil_div_signed(lc + tiling.s1Token, CUBE_BASEM_bn2s2) - 1, s1Outer - 1
+            )
+        lastLo = pl.max(s2Outer - 1 - colQ, 0)
+        packedPerHead = col_prefix_body_bn2s2(
+            s1Outer, colP, colQ, s2Outer - 1
+        ) + pl.max(colLastHi - lastLo + 1, 0)
+    return pl.struct(
+        "FagConstInfo",
+        bSize=tiling.b,
+        enablePreSfmg=tiling.enablePreSfmg,
+        normalL2Bytes=tiling.planL2Bytes,
+        normalMetadataWords=tiling.metadataWordCount,
+        normalSwizzleEnabled=pl.const(0, pl.DT_INT64),
+        normalSwizzleKind=pl.const(0, pl.DT_INT64),
+        fixedGsHasPadding=pl.const(0, pl.DT_INT64),
+        completeKvOwner=pl.const(0, pl.DT_INT64),
+        wideKvSlots=pl.const(0, pl.DT_INT64),
+        wideKvDoubleBuffer=pl.const(0, pl.DT_INT64),
+        normalContinuousBlocks=pl.const(1, pl.DT_INT64),
+        n2Size=tiling.n2,
+        s1Size=tiling.s1,
+        s2Size=tiling.s2,
+        dSize=tiling.d,
+        # V/dO/attn_out/dv 侧的 head dim。D 与 Dv 可以不等长(如 D=192/Dv=128)。
+        # Dv 是纯运行期数值：tile 一律按 d_align 分配，Dv 只决定填多少列。
+        dvSize=tiling.dv,
+        dAlign=(tiling.d + BLOCK_ELEMS_F16_bn2s2 - 1)
+        // BLOCK_ELEMS_F16_bn2s2
+        * BLOCK_ELEMS_F16_bn2s2,
+        dEvenSize=(tiling.d + 1) // 2,
+        dOddSize=tiling.d // 2,
+        dvEvenSize=(tiling.dv + 1) // 2,
+        dvOddSize=tiling.dv // 2,
+        scaleValue=tiling.scaleValue,
+        s1Outer=s1Outer,
+        s2Outer=s2Outer,
+        s1CvTail=tiling.s1 - (s1Outer - 1) * CUBE_BASEM_bn2s2,
+        s2CvTail=tiling.s2 - (s2Outer - 1) * CUBE_BASEN_bn2s2,
+        # BSND: [B,S,N,D] 的行距
+        n2D=tiling.n2 * tiling.d,
+        s1oS2o=s1Outer * s2Outer,
+        # 块网格为 b -> n2 -> g -> s2o -> s1o（g 在 n2 之内、s2o 之外）。
+        # 下面三个常量是对应层级的块数：
+        #   s1oS2o     : 一个 (b,n2,g) 内的块数
+        #   gS1oS2o    : 一个 (b,n2)   内的块数
+        #   n2GS1oS2o  : 一个 b        内的块数
+        gS1oS2o=tiling.gSize * s1Outer * s2Outer,
+        n2GS1oS2o=tiling.n2 * tiling.gSize * s1Outer * s2Outer,
+        totalBlockNum=tiling.b * tiling.n2 * tiling.gSize * s1Outer * s2Outer,
+        gSize=tiling.gSize,
+        coreNum=coreNum,
+        # GM 四维视图：BSND/BNSD 沿用 tiling，TND 为 [1,T,N,D]。
+        # Q 侧 n1=n2*G 个 head，KV 侧 n2 个，故两套。
+        t1Size=t1Size,
+        t2Size=t2Size,
+        s1ViewSize=s1ViewSize,
+        s2ViewSize=s2ViewSize,
+        viewD0Q=viewD0Q,
+        viewD2Q=tiling.viewD2Q,
+        coefB0Q=tiling.coefB0Q,
+        viewD0KV=viewD0KV,
+        viewD2KV=tiling.viewD2KV,
+        coefB0KV=tiling.coefB0KV,
+        coefN0=tiling.coefN0,
+        coefN2=tiling.coefN2,
+        maskMode=tiling.maskMode,
+        winLeft=tiling.winLeft,
+        winRight=tiling.winRight,
+        sparseType=tiling.sparseType,
+        s1Token=tiling.s1Token,
+        s2Token=tiling.s2Token,
+        totalPerBatchNum=tiling.totalPerBatchNum,
+        colP=colP,
+        colQ=colQ,
+        packedPerHead=packedPerHead,
+        bandP=(pl.max(tiling.s1Token, 0) + CUBE_BASEM_bn2s2 - 1) // CUBE_BASEM_bn2s2,
+        bandQ=(pl.max(tiling.s2Token, 0) + CUBE_BASEN_bn2s2 - 1) // CUBE_BASEN_bn2s2,
+        n1Size=tiling.n2 * tiling.gSize,
+        sequsedQOptional=tiling.sequsedQOptional,
+        sequsedKvOptional=tiling.sequsedKvOptional,
+        aivCount=coreNum * 2,
+    )
+
+
+def make_normal_run_infos_bn2s2():
+    """Three scalar records for lookahead; the two CV data slots stay paired."""
+    return pl.struct_array(
+        3,
+        "FagRunInfo",
+        boIdx=0,
+        n2oIdx=0,
+        s1oIdx=0,
+        s2oIdx=0,
+        s1RealSize=0,
+        s2RealSize=0,
+        halfS1RealSize=0,
+        firstHalfS1RealSize=64,
+        firstHalfS2RealSize=0,
+        queryOffset=0,
+        keyOffset=0,
+        goIdx=0,
+        idx0Q=0,
+        idx2Q=0,
+        idx0KV=0,
+        idx2KV=0,
+        loadBase=0,
+        loadBaseTnd=0,
+        tokenBaseQ=0,
+        tokenBaseKV=0,
+        batchS1Len=0,
+        batchS2Len=0,
+        rowShift=0,
+        loadKV=0,
+        dkvAcc=0,
+        flushDkv=0,
+        readyRound=0,
+        gIdx=0,
+        dqFirst=1,
+        dqLast=1,
+    )
+
+
+# ==================================================================
+# BN2S2 TND metadata 确定性的运行状态
+# ==================================================================
+
+
+def plan_run_info_bn2s2():
+    # A separate struct keeps the existing BN2/GS/nondeterministic ABI unchanged.
+    return pl.struct(
+        "FagPlanRunInfo",
+        boIdx=pl.astype(0, pl.DT_INT64),
+        n2oIdx=pl.astype(0, pl.DT_INT64),
+        goIdx=pl.astype(0, pl.DT_INT64),
+        s1oIdx=pl.astype(0, pl.DT_INT64),
+        s2oIdx=pl.astype(0, pl.DT_INT64),
+        s1RealSize=pl.astype(0, pl.DT_INT64),
+        s2RealSize=pl.astype(0, pl.DT_INT64),
+        halfS1RealSize=pl.astype(0, pl.DT_INT64),
+        firstHalfS1RealSize=pl.astype(0, pl.DT_INT64),
+        firstHalfS2RealSize=pl.astype(0, pl.DT_INT64),
+        halfS2RealSize=pl.astype(0, pl.DT_INT64),
+        queryOffset=pl.astype(0, pl.DT_INT64),
+        keyOffset=pl.astype(0, pl.DT_INT64),
+        idx0Q=pl.astype(0, pl.DT_INT64),
+        idx2Q=pl.astype(0, pl.DT_INT64),
+        idx0KV=pl.astype(0, pl.DT_INT64),
+        idx2KV=pl.astype(0, pl.DT_INT64),
+        loadBase=pl.astype(0, pl.DT_INT64),
+        loadBaseTnd=pl.astype(0, pl.DT_INT64),
+        tokenBaseQ=pl.astype(0, pl.DT_INT64),
+        tokenBaseKV=pl.astype(0, pl.DT_INT64),
+        batchS1Len=pl.astype(0, pl.DT_INT64),
+        batchS2Len=pl.astype(0, pl.DT_INT64),
+        rowShift=pl.astype(0, pl.DT_INT64),
+        loadKV=pl.astype(1, pl.DT_INT64),
+        dkvAcc=pl.astype(0, pl.DT_INT64),
+        flushDkv=pl.astype(1, pl.DT_INT64),
+        readyRound=pl.astype(0, pl.DT_INT64),
+        taskId=pl.astype(0, pl.DT_INT64),
+        specialIndex=pl.astype(-1, pl.DT_INT64),
+        columnKey=pl.astype(-1, pl.DT_INT64),
+        dkOutOffset=pl.astype(0, pl.DT_INT64),
+        dvOutOffset=pl.astype(0, pl.DT_INT64),
+        sinkOffset=pl.astype(0, pl.DT_INT64),
+    )
+
+
+def plan_run_infos_bn2s2():
+    # Same scalar fields as plan_run_info, plus cube-only slot release state.
+    # The offline check compares field sets to prevent silent ABI drift.
+    return pl.struct_array(
+        2,
+        "FagPlanRunSlots",
+        boIdx=pl.astype(0, pl.DT_INT64),
+        n2oIdx=pl.astype(0, pl.DT_INT64),
+        goIdx=pl.astype(0, pl.DT_INT64),
+        s1oIdx=pl.astype(0, pl.DT_INT64),
+        s2oIdx=pl.astype(0, pl.DT_INT64),
+        s1RealSize=pl.astype(0, pl.DT_INT64),
+        s2RealSize=pl.astype(0, pl.DT_INT64),
+        halfS1RealSize=pl.astype(0, pl.DT_INT64),
+        firstHalfS1RealSize=pl.astype(0, pl.DT_INT64),
+        firstHalfS2RealSize=pl.astype(0, pl.DT_INT64),
+        halfS2RealSize=pl.astype(0, pl.DT_INT64),
+        queryOffset=pl.astype(0, pl.DT_INT64),
+        keyOffset=pl.astype(0, pl.DT_INT64),
+        idx0Q=pl.astype(0, pl.DT_INT64),
+        idx2Q=pl.astype(0, pl.DT_INT64),
+        idx0KV=pl.astype(0, pl.DT_INT64),
+        idx2KV=pl.astype(0, pl.DT_INT64),
+        loadBase=pl.astype(0, pl.DT_INT64),
+        loadBaseTnd=pl.astype(0, pl.DT_INT64),
+        tokenBaseQ=pl.astype(0, pl.DT_INT64),
+        tokenBaseKV=pl.astype(0, pl.DT_INT64),
+        batchS1Len=pl.astype(0, pl.DT_INT64),
+        batchS2Len=pl.astype(0, pl.DT_INT64),
+        rowShift=pl.astype(0, pl.DT_INT64),
+        loadKV=pl.astype(1, pl.DT_INT64),
+        dkvAcc=pl.astype(0, pl.DT_INT64),
+        flushDkv=pl.astype(1, pl.DT_INT64),
+        readyRound=pl.astype(0, pl.DT_INT64),
+        taskId=pl.astype(0, pl.DT_INT64),
+        specialIndex=pl.astype(-1, pl.DT_INT64),
+        columnKey=pl.astype(-1, pl.DT_INT64),
+        dkOutOffset=pl.astype(0, pl.DT_INT64),
+        dvOutOffset=pl.astype(0, pl.DT_INT64),
+        sinkOffset=pl.astype(0, pl.DT_INT64),
+        directPending=pl.astype(0, pl.DT_INT64),
+    )
+
+
+def plan_pipeline_state_bn2s2():
+    return pl.struct(
+        "FagPlanPipeline",
+        fetched=pl.astype(0, pl.DT_INT64),
+        retired=pl.astype(0, pl.DT_INT64),
+        nextRound=pl.astype(-1, pl.DT_INT64),
+        nextBatch=pl.astype(-1, pl.DT_INT64),
+        nextHead=pl.astype(-1, pl.DT_INT64),
+        nextRow=pl.astype(-1, pl.DT_INT64),
+        nextCol=pl.astype(-1, pl.DT_INT64),
+        previousKey=pl.astype(-1, pl.DT_INT64),
+        issue=pl.astype(0, pl.DT_INT64),
+        retire=pl.astype(0, pl.DT_INT64),
+        issueSlot=pl.astype(0, pl.DT_INT64),
+        retireSlot=pl.astype(0, pl.DT_INT64),
     )

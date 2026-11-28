@@ -115,7 +115,7 @@ def seek_tnd_dense_batch(ci, ident, plan, cuq, cuk, usedq, usedk):
         )
 
 
-def init_tnd_dense_schedule(ci, k, cuq, cuk, usedq, usedk):
+def tnd_dense_rounds(ci, k, cuq, cuk, usedq, usedk):
     """Mirror CalcleTNDDenseDeterParam, with an explicit all-zero fast exit."""
     area = pl.astype(0, pl.DT_INT64)
     max_m = pl.astype(0, pl.DT_INT64)
@@ -134,6 +134,12 @@ def init_tnd_dense_schedule(ci, k, cuq, cuk, usedq, usedk):
             pl.max(pl.max((total + k - 1) // k, max_m * ci.gSize), max_n),
             pl.DT_INT64,
         )
+    return rounds
+
+
+def init_tnd_dense_schedule(ci, k, cuq, cuk, usedq, usedk):
+    """Construct this decoder's private state from the common round count."""
+    rounds = tnd_dense_rounds(ci, k, cuq, cuk, usedq, usedk)
     return make_tnd_deter_schedule(rounds, rounds, 0, 0, 0, 0, 0)
 
 
@@ -163,4 +169,78 @@ def tnd_dense_gidx(ci, c, k, r, plan, cuq, cuk, usedq, usedk):
                 - 1,
                 pl.DT_INT64,
             )
+    return out
+
+
+# BN2S2 TND column-owner schedule. The fixed-layout caller keeps its zero guard.
+
+
+def load_bn2s2_batch(ci, k, plan, cuq, cuk, usedq, usedk):
+    """Refresh the cursor batch's column geometry and round width."""
+    sq, sk = tnd_deter_lengths(ci, plan.cursorBatch, cuq, cuk, usedq, usedk)
+    plan.cursorM = pl.astype((sq + 127) // 128, pl.DT_INT64)
+    plan.cursorN = pl.astype((sk + 127) // 128, pl.DT_INT64)
+    plan.cursorCols = pl.astype(plan.cursorN * ci.n2Size * ci.gSize, pl.DT_INT64)
+    kk = pl.max(k, 1)
+    plan.cursorRounds = pl.astype(
+        ((plan.cursorCols + kk - 1) // kk) * plan.cursorM, pl.DT_INT64
+    )
+
+
+def seek_bn2s2_batch(ci, r, k, plan, cuq, cuk, usedq, usedk):
+    """Locate r's batch window; monotone rounds cross each batch at most once.
+
+    Reverse seeking exists for CPU random-access parity checks only.
+    Zero-round batches have empty windows and are crossed without ever
+    dividing by their dimensions.
+    """
+    if plan.cursorReady == 0:
+        load_bn2s2_batch(ci, k, plan, cuq, cuk, usedq, usedk)
+        plan.cursorRoundBegin = pl.astype(0, pl.DT_INT64)
+        plan.cursorRoundEnd = pl.astype(plan.cursorRounds, pl.DT_INT64)
+        plan.cursorReady = pl.astype(1, pl.DT_INT64)
+    while r >= plan.cursorRoundEnd and plan.cursorBatch + 1 < ci.bSize:
+        plan.cursorRoundBegin = pl.astype(plan.cursorRoundEnd, pl.DT_INT64)
+        plan.cursorBatch = pl.astype(plan.cursorBatch + 1, pl.DT_INT64)
+        load_bn2s2_batch(ci, k, plan, cuq, cuk, usedq, usedk)
+        plan.cursorRoundEnd = pl.astype(
+            plan.cursorRoundBegin + plan.cursorRounds, pl.DT_INT64
+        )
+    while r < plan.cursorRoundBegin and plan.cursorBatch > 0:
+        plan.cursorRoundEnd = pl.astype(plan.cursorRoundBegin, pl.DT_INT64)
+        plan.cursorBatch = pl.astype(plan.cursorBatch - 1, pl.DT_INT64)
+        load_bn2s2_batch(ci, k, plan, cuq, cuk, usedq, usedk)
+        plan.cursorRoundBegin = pl.astype(
+            plan.cursorRoundEnd - plan.cursorRounds, pl.DT_INT64
+        )
+
+
+def bn2s2_gidx(ci, c, k, r, plan, cuq, cuk, usedq, usedk):
+    """Map 0-based (core, round) to a synthetic fused-grid tile index, or -1.
+
+    Column enumeration inside a batch is (n2, g, s2o) with n2 major, matching
+    the fused grid order b -> n2 -> g -> s2o -> s1o, so set_run_info decodes
+    the result unchanged.
+    """
+    out = pl.astype(-1, pl.DT_INT64)
+    if c >= 0 and c < k and r >= 0 and r < plan.maxRound and ci.bSize > 0:
+        seek_bn2s2_batch(ci, r, k, plan, cuq, cuk, usedq, usedk)
+        if r >= plan.cursorRoundBegin and r < plan.cursorRoundEnd:
+            delta = pl.astype(r - plan.cursorRoundBegin, pl.DT_INT64)
+            m = pl.max(plan.cursorM, 1)
+            q = delta // m
+            colLocal = c + q * k
+            if colLocal < plan.cursorCols:
+                head2 = colLocal // plan.cursorN
+                s2o = colLocal % plan.cursorN
+                n2o = head2 // ci.gSize
+                go = head2 % ci.gSize
+                # 老算子 swizzle 坐标序：S1 旋转起点分散 dQ 原子热点。
+                s1o = (s2o + delta) % m
+                out = pl.astype(
+                    ((plan.cursorBatch * ci.n2Size + n2o) * ci.gSize + go) * ci.s1oS2o
+                    + s2o * ci.s1Outer
+                    + s1o,
+                    pl.DT_INT64,
+                )
     return out

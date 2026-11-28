@@ -9,6 +9,8 @@
  */
 
 #include "flash_attn_grad_tiling_nzout.h"
+#include "flash_attn_grad_block_outer.h"
+#include "deterministic/fixed/planner.h"
 
 namespace optiling {
 namespace {
@@ -39,6 +41,18 @@ void DecideNzOut(const FagParsedInfo& info, FagKernelPlan& kernel, FagRouteTrace
     if (!NzOutFeasible(info, kernel)) {
         trace.nzOutReject = "capability";
         return;
+    }
+    // Limit this admission alignment to fixed-length deterministic GS.
+    // ASC uses the original L2/full-chip gate, not the final swizzle mode.
+    if (info.isDeterministic && !info.isTnd) {
+        int64_t s1Outer = 0;
+        int64_t s2Outer = 0;
+        FagS1S2Outer(info.s1, info.s2, s1Outer, s2Outer);
+        const auto footprint = fag_pto_fixed::CountFixedFootprint(info, s1Outer, s2Outer);
+        if (!fag_pto_fixed::EnableFixedSwizzle(info, footprint)) {
+            trace.nzOutReject = "fixed-deterministic-swizzle-admission";
+            return;
+        }
     }
     if (!PreferNzOut(info)) {
         trace.nzOutReject = "short-sequence";

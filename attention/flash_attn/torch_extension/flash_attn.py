@@ -14,7 +14,7 @@ from cann_ops_transformer.op_builder import OpBuilder, get_as_library
 
 FA_METADATA_OP_NAME = "flash_attn_metadata"
 METADATA_STRIDE = 16
-FAG_METADATA_SIZE = 412  # FAG (Flash Attn Grad) metadata size, in int32 elements
+FAG_METADATA_SIZE = 416  # Includes the ordinary fallback flag at word 412.
 
 
 _LAYOUT_DIMS = {
@@ -142,10 +142,19 @@ def _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q):
 
 
 def _fag_deter_elems(
-    batch_size, num_heads_q, num_heads_kv, max_seqlen_q, max_seqlen_kv
+    batch_size,
+    num_heads_q,
+    num_heads_kv,
+    max_seqlen_q,
+    max_seqlen_kv,
+    is_grad_enabled=False,
 ):
-    """Versioned bounded TND schedule tail (int32 words), independent of rounds."""
-    return 518 + 32 * batch_size
+    """Bound both independent schedule extensions, including their 64-byte alignment.
+
+    The WJF deterministic plan and LWY TND plan are generated together: the
+    metadata operator must not predict the later FlashAttnGrad execution mode.
+    """
+    return 15 + 5904 + 15 + 518 + 32 * batch_size + 290 if is_grad_enabled else 0
 
 
 def _calculate_metadata_size(
@@ -154,6 +163,7 @@ def _calculate_metadata_size(
     num_heads_q=None,
     max_seqlen_q=None,
     max_seqlen_kv=None,
+    is_grad_enabled=False,
 ):
     """计算 metadata tensor 的对齐后大小"""
     align_size = 4096
@@ -165,7 +175,12 @@ def _calculate_metadata_size(
     metadata_size = head_size + fa_size + fd_size
     metadata_size += FAG_METADATA_SIZE  # FAG (Flash Attn Grad) metadata size
     metadata_size += _fag_deter_elems(
-        batch_size, num_heads_q, num_heads_kv, max_seqlen_q, max_seqlen_kv
+        batch_size,
+        num_heads_q,
+        num_heads_kv,
+        max_seqlen_q,
+        max_seqlen_kv,
+        is_grad_enabled,
     )
     return ((metadata_size + align_size - 1) // align_size) * align_size
 
@@ -228,7 +243,12 @@ class FlashAttenOpBuilder(OpBuilder):
         ):
             b_size = _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q)
             metadata_size = _calculate_metadata_size(
-                b_size, num_heads_kv, num_heads_q, max_seqlen_q, max_seqlen_kv
+                b_size,
+                num_heads_kv,
+                num_heads_q,
+                max_seqlen_q,
+                max_seqlen_kv,
+                is_grad_enabled,
             )
             return torch.empty((metadata_size,), dtype=torch.int32, device="meta")
 
@@ -708,7 +728,7 @@ def flash_attn_metadata(
 
     op_module = flash_attn_op_builder.load()
     metadata_size = _calculate_metadata_size(
-        b_size, num_heads_kv, num_heads_q, max_seqlen_q, max_seqlen_kv
+        b_size, num_heads_kv, num_heads_q, max_seqlen_q, max_seqlen_kv, is_grad_enabled
     )
     output = torch.empty((metadata_size,), dtype=torch.int32, device="npu")
 

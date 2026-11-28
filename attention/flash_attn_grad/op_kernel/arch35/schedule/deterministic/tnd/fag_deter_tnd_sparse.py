@@ -209,7 +209,7 @@ def seek_tnd_sparse_batch(ci, ident, copies, phase, plan, cuq, cuk, usedq, usedk
         )
 
 
-def init_tnd_sparse_schedule(ci, k, cuq, cuk, usedq, usedk):
+def tnd_sparse_rounds(ci, k, cuq, cuk, usedq, usedk):
     """Build one common physical-round plan from effective batch lengths."""
     all_equal = pl.astype(1, pl.DT_INT64)
     band_area = pl.astype(0, pl.DT_INT64)
@@ -293,6 +293,14 @@ def init_tnd_sparse_schedule(ci, k, cuq, cuk, usedq, usedk):
             if remainder > 0 and band_area > 0:
                 r1 = pl.max(tnd_sparse_ceil(band_area * remainder, kk), band_bound)
             max_round = rwhole + r1
+    return max_round, r0, r1, r2, divided, causal, rwhole
+
+
+def init_tnd_sparse_schedule(ci, k, cuq, cuk, usedq, usedk):
+    """Construct this decoder's private state from the common phase counts."""
+    max_round, r0, r1, r2, divided, causal, rwhole = tnd_sparse_rounds(
+        ci, k, cuq, cuk, usedq, usedk
+    )
     return make_tnd_deter_schedule(max_round, r0, r1, r2, divided, causal, rwhole)
 
 

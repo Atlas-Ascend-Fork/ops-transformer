@@ -190,6 +190,7 @@ ge::graphStatus ParsePlatform(gert::TilingContext* context, FagParsedInfo& info)
         info.aicNum = compileInfo->aicNum;
         info.libapiWorkspaceSize = static_cast<size_t>(compileInfo->libapiWorkspaceSize);
         info.l2CacheSize = compileInfo->l2CacheSize;
+        info.ubSize = compileInfo->ubSize;
         OP_CHECK_IF(info.aicNum == 0 || info.aivNum == 0,
                     OP_LOGE(context->GetNodeName(), "num of core from compile info is 0, aicNum=%u, aivNum=%u.",
                             info.aicNum, info.aivNum),
@@ -204,6 +205,7 @@ ge::graphStatus ParsePlatform(gert::TilingContext* context, FagParsedInfo& info)
     info.aivNum = ascendcPlatform.GetCoreNumAiv();
     info.aicNum = ascendcPlatform.GetCoreNumAic();
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, info.l2CacheSize);
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, info.ubSize);
     OP_CHECK_IF(
         info.aicNum == 0 || info.aivNum == 0,
         OP_LOGE(context->GetNodeName(), "num of core obtained is 0, aicNum=%u, aivNum=%u.", info.aicNum, info.aivNum),
@@ -238,7 +240,7 @@ ge::graphStatus ParseFlashAttnGradInfo(gert::TilingContext* context, FagParsedIn
     FillLayoutView(info);
     FagFillSparseInfo(info);
     info.isDeterministic = (context->GetDeterministic() == 1);
-    return ge::GRAPH_SUCCESS;
+    return ConfigureDeterMetadata(context, info);
 }
 
 bool IsEmptyShape(const FagParsedInfo& info)
@@ -246,4 +248,81 @@ bool IsEmptyShape(const FagParsedInfo& info)
     return info.b <= 0 || info.s1 <= 0 || info.s2 <= 0 || info.d <= 0 || info.dv <= 0;
 }
 
+} // namespace optiling
+
+namespace optiling {
+ge::graphStatus ConfigureDeterMetadata(gert::TilingContext* context, FagParsedInfo& info)
+{
+    namespace fd = fag_deter;
+    if (info.isTnd) {
+        // Base416, fixed WJF extension and independent TND v3 payload. Actual
+        // section offsets are validated by AICPU and the device descriptors.
+        constexpr int64_t TND_FIXED_WORDS = 16 + 416 + 5904 + 808;
+        const auto* shape = context->GetOptionalInputShape(METADATA_INDEX);
+        OP_CHECK_IF(info.b <= 0 || info.b > 65536 || shape == nullptr ||
+                        shape->GetStorageShape().GetShapeSize() < TND_FIXED_WORDS + 32 * info.b,
+                    OP_LOGE(context->GetNodeName(), "TND metadata lacks both versioned schedule extensions."),
+                    return ge::GRAPH_PARAM_INVALID);
+    }
+    auto& config = info.deterConfig;
+    auto& schedule = config.schedule;
+    auto& route = schedule.route;
+    // CheckParams has already required Q/KV/output layouts to match.
+    route.allLayoutsTnd = info.isTnd;
+    route.deterministic = info.isDeterministic;
+    route.batch = info.b;
+    route.totalQ = info.t1;
+    route.totalKv = info.t2;
+    route.maxQ = info.maxSeqlenQ;
+    route.maxKv = info.maxSeqlenKv;
+    route.headsQ = info.n1;
+    route.headsKv = info.n2;
+    route.dimQ = info.d;
+    route.dimV = info.dv;
+    route.maskMode = info.maskMode;
+    route.hasSequsedQ = info.hasSequsedQ;
+    route.hasSequsedKv = info.hasSequsedKv;
+    const auto dtype = context->GetInputDesc(Q_INDEX)->GetDataType();
+    route.dtype = dtype == ge::DT_FLOAT16 ? fd::DType::FP16 :
+                  dtype == ge::DT_BF16    ? fd::DType::BF16 :
+                                            static_cast<fd::DType>(-1);
+    if (fd::Admit(route) != fd::Admission::ELIGIBLE) {
+        return ge::GRAPH_SUCCESS;
+    }
+
+    // Only descriptors and this invocation's resources are available on host.
+    // Actual sequence-dependent split and prefixes come from FlashAttnMetadata.
+    schedule.aicNum = info.aicNum;
+    schedule.aivNum = info.aivNum;
+    // Match the metadata planning estimate; actual L2 capacity is not an admission constraint.
+    schedule.l2Bytes = fd::PLAN_L2_ESTIMATE_BYTES;
+    schedule.windowLeft = info.winLeft;
+    schedule.windowRight = info.winRight;
+    schedule.hasMask = info.hasAttenMask;
+    schedule.maskShapeType = info.hasAttenMask ? 2 : 99;
+    config.sink = info.hasSinks;
+    config.ubBytes = fd::ASCEND950_UB_BYTES;
+    const auto deterministicLevel = context->GetDeterministicLevel();
+    OP_CHECK_IF(route.batch > 2048 || route.totalQ > INT32_MAX || route.totalKv > INT32_MAX || schedule.aicNum <= 0 ||
+                    schedule.aicNum > fd::MAX_CORES || schedule.aivNum != schedule.aicNum * 2 ||
+                    deterministicLevel < 0 || deterministicLevel > 255 ||
+                    !fd::WorkspaceCapacity(config, info.deterWorkspaceBytes),
+                OP_LOGE(context->GetNodeName(), "Unsupported deterministic metadata resources or workspace."),
+                return ge::GRAPH_PARAM_INVALID);
+
+    const auto* metadata = context->GetOptionalInputShape(METADATA_INDEX);
+    const auto* desc = context->GetOptionalInputDesc(METADATA_INDEX);
+    OP_CHECK_IF(metadata == nullptr || desc == nullptr || desc->GetDataType() != ge::DT_INT32 ||
+                    metadata->GetStorageShape().GetDimNum() != 1,
+                OP_LOGE(context->GetNodeName(), "TND deterministic BN2S2 requires FlashAttnMetadata."),
+                return ge::GRAPH_PARAM_INVALID);
+    const auto elements = metadata->GetStorageShape().GetDim(0);
+    OP_CHECK_IF(elements < static_cast<int64_t>(16 + 416 + fd::METADATA_I32_WORDS) ||
+                    elements > INT64_MAX / static_cast<int64_t>(sizeof(int32_t)),
+                OP_LOGE(context->GetNodeName(), "Metadata buffer is too small for deterministic FAG extension."),
+                return ge::GRAPH_PARAM_INVALID);
+    info.deterMetadataBytes = elements * static_cast<int64_t>(sizeof(int32_t));
+    info.useDeterPlan = true;
+    return ge::GRAPH_SUCCESS;
+}
 } // namespace optiling

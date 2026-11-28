@@ -78,6 +78,17 @@ ACLNN_API aclnnStatus aclnnFlashAttnMetadataGetWorkspaceSize(
     }
     const char* socVersion = npuInfo.GetSocLongVersion().c_str();
 
+    // Plan generation depends on existing metadata inputs, not the invocation's
+    // deterministic switch. Reuse the executor's effective core limits for
+    // both modes; FAG host tiling chooses whether to consume the plan.
+    const auto resources = uniqueExecutor->GetOpConfigInfo();
+    if (isGradEnabled && std::strcmp(layoutQ, "TND") == 0 && std::strcmp(layoutKv, "TND") == 0 &&
+        std::strcmp(layoutOut, "TND") == 0 && npuInfo.GetSocLongVersion().find("Ascend950") == 0) {
+        CHECK_RET(resources.aicNum_ > 0 && resources.aivNum_ > 0, ACLNN_ERR_PARAM_INVALID);
+        aicCoreNum = resources.aicNum_;
+        aivCoreNum = resources.aivNum_;
+    }
+
     auto output = l0op::FlashAttnMetadata(
         cuSeqlensQOptional, cuSeqlensKvOptional, sequsedQOptional, sequsedKvOptional, batchSize, maxSeqlenQ,
         maxSeqlenKv, numHeadsQ, numHeadsKv, headDim, headDimV, maskMode, winLeft, winRight, layoutQ, layoutKv,

@@ -29,6 +29,10 @@ call），所以这里是**一个 buffer 一个工厂函数**：调用点写
 **声明顺序有意义**：tile 的声明顺序决定 codegen 里 buffer 的初始化顺序，
 调用点请按本文件的书写顺序调用。
 
+公共工厂通过编译期参数 ``resource_bn2s2`` 选择资源表；默认保持公共布局，
+BN2S2 调用显式传 True，保留其地址、mutex、槽位与清零窗口。别名视图也分别
+调用工厂创建独立游标，不直接复用写侧 tile_group 对象。
+
 BN2 与 BN2GS1S2 共用 CV 共享区、cube L1 与 L0 工作集（窄档 ``d_align`` 64/128
 ``D_NCHUNKS`` 为 1；192/256 档差别在 L0C：GS1S2 192/256 与 BN2 256 的 dK 复用
 acc 槽位作 mm4 scratch、只把 dV 两块常驻，BN2 192 则 dK/dV 都常驻（acc 退回
@@ -57,7 +61,7 @@ from fag_common import (
 
 
 # 192 档 L0C 按模板分叉（BN2 用 dK/dV 常驻表 _B2，其余用 acc 双槽表）。
-# 判定写在工厂**自己体内**，调用点不传标志位：tilingkey 常量（template / d_align）
+# 模板分流写在工厂**自己体内**：tilingkey 常量（template / d_align）
 # 由 pypto 在 trace 时注入被内联函数的闭包，函数体里可以直接引用。
 #
 # 两条硬约束（都是 pypto 前端实测出来的，别绕）：
@@ -79,96 +83,133 @@ from fag_common import (
 # ==================================================================
 #  CV 共享区 —— 必须声明在两个 section 之外
 # ==================================================================
-def make_mm1_res():
+def make_mm1_res(resource_bn2s2=False):
     """mm1(dP = dO@V^T) 的结果 UB，双槽按 taskId % 2 ping-pong。
 
-    cube 侧 fixpipe 写、vector 侧读，故声明在两个 section 之外。
-    """
+    cube 侧 fixpipe 写、vector 侧读，故声明在两个 section 之外。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[VECTOR_BASEM, VECTOR_BASEN],
+            shape=[VECTOR_BASEM_bn2s2, VECTOR_BASEN_bn2s2]
+            if resource_bn2s2
+            else [VECTOR_BASEM, VECTOR_BASEN],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Vec,
             compact=0,
         ),
-        addrs=[mem.UB_MM1_0, mem.UB_MM1_1],
-        mutex_ids=mem.MTX_MM1_RES,
+        addrs=[mem.UB_MM1_0_bn2s2, mem.UB_MM1_1_bn2s2]
+        if resource_bn2s2
+        else [mem.UB_MM1_0, mem.UB_MM1_1],
+        mutex_ids=mem.MTX_MM1_RES_bn2s2 if resource_bn2s2 else mem.MTX_MM1_RES,
     )
 
 
-def make_mm2_res():
+def make_mm2_res(resource_bn2s2=False):
     """mm2(S = Q@K^T) 的结果 UB，双槽 ping-pong。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[VECTOR_BASEM, VECTOR_BASEN],
+            shape=[VECTOR_BASEM_bn2s2, VECTOR_BASEN_bn2s2]
+            if resource_bn2s2
+            else [VECTOR_BASEM, VECTOR_BASEN],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Vec,
             compact=0,
         ),
-        addrs=[mem.UB_MM2_0, mem.UB_MM2_1],
-        mutex_ids=mem.MTX_MM2_RES,
+        addrs=[mem.UB_MM2_0_bn2s2, mem.UB_MM2_1_bn2s2]
+        if resource_bn2s2
+        else [mem.UB_MM2_0, mem.UB_MM2_1],
+        mutex_ids=mem.MTX_MM2_RES_bn2s2 if resource_bn2s2 else mem.MTX_MM2_RES,
     )
 
 
-def make_ds_l1():
+def _make_score_l1(probability=False, resource_bn2s2=False):
+    """Compile-time resource policy; every call creates its own original view."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[CUBE_BASEM_bn2s2, CUBE_BASEN_bn2s2]
+            if resource_bn2s2
+            else [CUBE_BASEM, CUBE_BASEN],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            layout=pl.NZ,
+            compact=1,
+        ),
+        addrs=[
+            mem.L1_P_ADDR_bn2s2[d_align]
+            if probability
+            else mem.L1_DS_ADDR_bn2s2[d_align]
+        ]
+        if resource_bn2s2
+        else (
+            mem.L1_P_DB_ADDRS[d_align] if probability else mem.L1_DS_DB_ADDRS[d_align]
+        )
+        if template == Tmpl.BN2GS1S2
+        and d_align <= 128
+        and (deter == 0)
+        and (swizzle == 0)
+        else [mem.L1_P_ADDR[d_align] if probability else mem.L1_DS_ADDR[d_align]],
+        mutex_ids=(mem.MTX_L1_P_bn2s2 if probability else mem.MTX_L1_DS_bn2s2)
+        if resource_bn2s2
+        else (mem.MTX_L1_P_DB if probability else mem.MTX_L1_DS_DB)
+        if template == Tmpl.BN2GS1S2
+        and d_align <= 128
+        and (deter == 0)
+        and (swizzle == 0)
+        else mem.MTX_L1_P
+        if probability
+        else mem.MTX_L1_DS,
+    )
+
+
+def make_ds_l1(resource_bn2s2=False):
     """dS 的 CV 共享 L1（NZ）：v3 写、mm3/mm4 读。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEM, CUBE_BASEN],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            layout=pl.NZ,
-            compact=1,
-        ),
-        addrs=(
-            mem.L1_DS_DB_ADDRS[d_align]
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else [mem.L1_DS_ADDR[d_align]]
-        ),
-        mutex_ids=(
-            mem.MTX_L1_DS_DB
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else mem.MTX_L1_DS
-        ),
-    )
+    return _make_score_l1(False, resource_bn2s2)
 
 
-def make_p_l1():
+def make_p_l1(resource_bn2s2=False):
     """P 的 CV 共享 L1（NZ）：v4 写、mm5 读。"""
+    return _make_score_l1(True, resource_bn2s2)
+
+
+def _make_score_t_l1(probability=False, resource_bn2s2=False):
+    """Compile-time resource policy; every call creates its own original view."""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[CUBE_BASEM, CUBE_BASEN],
+            shape=[CUBE_BASEN_bn2s2, CUBE_BASEM_bn2s2]
+            if resource_bn2s2
+            else [CUBE_BASEN, CUBE_BASEM],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Mat,
-            layout=pl.NZ,
+            layout=pl.ZN,
             compact=1,
         ),
-        addrs=(
-            mem.L1_P_DB_ADDRS[d_align]
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else [mem.L1_P_ADDR[d_align]]
-        ),
-        mutex_ids=(
-            mem.MTX_L1_P_DB
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else mem.MTX_L1_P
-        ),
+        addrs=[
+            mem.L1_P_ADDR_bn2s2[d_align]
+            if probability
+            else mem.L1_DS_ADDR_bn2s2[d_align]
+        ]
+        if resource_bn2s2
+        else (
+            mem.L1_P_DB_ADDRS[d_align] if probability else mem.L1_DS_DB_ADDRS[d_align]
+        )
+        if template == Tmpl.BN2GS1S2
+        and d_align <= 128
+        and (deter == 0)
+        and (swizzle == 0)
+        else [mem.L1_P_ADDR[d_align] if probability else mem.L1_DS_ADDR[d_align]],
+        mutex_ids=(mem.MTX_L1_P_T_bn2s2 if probability else mem.MTX_L1_DS_T_bn2s2)
+        if resource_bn2s2
+        else (mem.MTX_L1_P_T_DB if probability else mem.MTX_L1_DS_T_DB)
+        if template == Tmpl.BN2GS1S2
+        and d_align <= 128
+        and (deter == 0)
+        and (swizzle == 0)
+        else mem.MTX_L1_P_T
+        if probability
+        else mem.MTX_L1_DS_T,
     )
 
 
-def make_ds_t_l1():
+def make_ds_t_l1(resource_bn2s2=False):
     """dS^T：ds_l1 同一地址上的 ZN 视图，供 mm4 当左矩阵。
 
     dS^T / P^T 不再单独存一份：[M,N] 按 NZ 存放的字节布局，与 [N,M] 按 ZN
@@ -179,70 +220,20 @@ def make_ds_t_l1():
     这替掉了原先的 pl.transpose：实测单次 24.9us(44864 cycles)，整核估算
     5672us，占 8192 场景实测 6011us 的 94%，是性能差距主因。注意 L1->L0
     无法随路转置(TMov static_assert 要求 shape 相同)，Python validator 里
-    「允许 2D 转置」的注释能过 parse 但 codegen 失败。
-    """
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEN, CUBE_BASEM],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            layout=pl.ZN,
-            compact=1,
-        ),
-        addrs=(
-            mem.L1_DS_DB_ADDRS[d_align]
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else [mem.L1_DS_ADDR[d_align]]
-        ),
-        mutex_ids=(
-            mem.MTX_L1_DS_T_DB
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else mem.MTX_L1_DS_T
-        ),
-    )
+    「允许 2D 转置」的注释能过 parse 但 codegen 失败。"""
+    return _make_score_t_l1(False, resource_bn2s2)
 
 
-def make_p_t_l1():
+def make_p_t_l1(resource_bn2s2=False):
     """P^T：p_l1 同一地址上的 ZN 视图，供 mm5 当左矩阵。见 :func:`make_ds_t_l1`。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEN, CUBE_BASEM],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            layout=pl.ZN,
-            compact=1,
-        ),
-        addrs=(
-            mem.L1_P_DB_ADDRS[d_align]
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else [mem.L1_P_ADDR[d_align]]
-        ),
-        mutex_ids=(
-            mem.MTX_L1_P_T_DB
-            if template == Tmpl.BN2GS1S2
-            and d_align <= 128
-            and deter == 0
-            and swizzle == 0
-            else mem.MTX_L1_P_T
-        ),
-    )
+    return _make_score_t_l1(True, resource_bn2s2)
 
 
 def make_ds_l1_no_sync():
     """单槽 dS 的 Cube 只读 NZ 别名；生命周期由 CV ready/free 保证。
 
     只供普通 D192/Dv128 SW1 causal 特化使用，不改变 Vector writer。
-    不配置 mutex，避免在显式跨核同步之外再给 L1 消费操作插入核内锁。
-    """
+    不配置 mutex，避免在显式跨核同步之外再给 L1 消费操作插入核内锁。"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[CUBE_BASEM, CUBE_BASEN],
@@ -256,8 +247,8 @@ def make_ds_l1_no_sync():
     )
 
 
-def make_ds_t_l1_no_sync():
-    """与单槽 dS 同址的 Cube 只读 ZN 别名；不参与自动 mutex。"""
+def _make_score_t_l1_no_sync(probability=False):
+    """Compile-time resource policy; every call creates its own original view."""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[CUBE_BASEN, CUBE_BASEM],
@@ -266,63 +257,87 @@ def make_ds_t_l1_no_sync():
             layout=pl.ZN,
             compact=1,
         ),
-        addrs=[mem.L1_DS_ADDR[d_align]],
+        addrs=[mem.L1_P_ADDR[d_align] if probability else mem.L1_DS_ADDR[d_align]],
         depth=1,
     )
+
+
+def make_ds_t_l1_no_sync():
+    """与单槽 dS 同址的 Cube 只读 ZN 别名；不参与自动 mutex。"""
+    return _make_score_t_l1_no_sync(False)
 
 
 def make_p_t_l1_no_sync():
     """与单槽 P 同址的 Cube 只读 ZN 别名；不参与自动 mutex。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEN, CUBE_BASEM],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            layout=pl.ZN,
-            compact=1,
-        ),
-        addrs=[mem.L1_P_ADDR[d_align]],
-        depth=1,
-    )
+    return _make_score_t_l1_no_sync(True)
 
 
 # ==================================================================
 #  Cube 侧 L1
 # ==================================================================
-def make_q_l1():
-    """Q 的 L1，多槽 double buffer（mm2 写入，mm4 经延后视图复用）。"""
+def _make_query_l1(gradient=False, resource_bn2s2=False):
+    """Compile-time resource policy; every call creates its own original view."""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[CUBE_BASEM, D_PHYS_W[d_align]],
+            shape=[CUBE_BASEM_bn2s2, D_PHYS_W_bn2s2[d_align]]
+            if resource_bn2s2
+            else [CUBE_BASEM, D_PHYS_W[d_align]],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Mat,
             compact=1,
         ),
-        addrs=mem.L1_Q_ADDRS[d_align],
-        mutex_ids=mem.L1_Q_MUTEX[d_align],
+        addrs=(
+            mem.L1_DO_ADDRS_bn2s2[d_align]
+            if gradient
+            else mem.L1_Q_ADDRS_bn2s2[d_align]
+        )
+        if resource_bn2s2
+        else mem.L1_DO_ADDRS[d_align]
+        if gradient
+        else mem.L1_Q_ADDRS[d_align],
+        mutex_ids=(
+            mem.L1_DO_MUTEX_bn2s2[d_align]
+            if gradient
+            else mem.L1_Q_MUTEX_bn2s2[d_align]
+        )
+        if resource_bn2s2
+        else mem.L1_DO_MUTEX[d_align]
+        if gradient
+        else mem.L1_Q_MUTEX[d_align],
     )
 
 
-def make_k_l1():
+def make_q_l1(resource_bn2s2=False):
+    """Q 的 L1，多槽 double buffer（mm2 写入，mm4 经延后视图复用）。"""
+    return _make_query_l1(False, resource_bn2s2)
+
+
+def make_k_l1(resource_bn2s2=False):
     """K^T ZN[D,S2]; GS keeps two slots shared by C2 and delayed C3."""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[D_PHYS_W[d_align], CUBE_BASEN],
+            shape=[D_PHYS_W_bn2s2[d_align], CUBE_BASEN_bn2s2]
+            if resource_bn2s2
+            else [D_PHYS_W[d_align], CUBE_BASEN],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Mat,
             layout=pl.ZN,
             compact=1,
         ),
-        addrs=mem.L1_K_REUSE_ADDRS[d_align]
+        addrs=[mem.L1_K_ADDR_bn2s2[d_align]]
+        if resource_bn2s2
+        else mem.L1_K_REUSE_ADDRS[d_align]
         if template == Tmpl.BN2GS1S2 and d_align <= 256
         else [mem.L1_K_ADDR[d_align]],
-        mutex_ids=mem.L1_K_REUSE_MUTEX[d_align]
+        mutex_ids=mem.MTX_L1_K_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.L1_K_REUSE_MUTEX[d_align]
         if template == Tmpl.BN2GS1S2 and d_align <= 256
         else mem.MTX_L1_K[d_align],
     )
 
 
-def make_k_nd_l1():
+def make_k_nd_l1(resource_bn2s2=False):
     """K NZ[S2,D] for C3, with a cursor independent from the C2 writer.
 
     GS uses the same addresses/mutex ids as K^T ZN[D,S2]. Both cursors
@@ -331,60 +346,63 @@ def make_k_nd_l1():
     normal D192/Dv128 causal swizzle path. Other swizzle preload3 paths retain
     their two-round delay but consume the old C3 before issuing the current C2,
     so two K slots also suffice. Empty deterministic rounds advance neither
-    cursor. BN2 and wide-D retain separate loads.
-    """
+    cursor. BN2 and wide-D retain separate loads."""
+    # A5 Mat defaults to NZ, including the BN2S2 view. Keep one descriptor:
+    # TileType ternaries and guarded factory returns are not supported here.
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[CUBE_BASEN, D_PHYS_W[d_align]],
+            shape=[CUBE_BASEN_bn2s2, D_PHYS_W_bn2s2[d_align]]
+            if resource_bn2s2
+            else [CUBE_BASEN, D_PHYS_W[d_align]],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Mat,
             layout=pl.NZ,
             compact=1,
         ),
-        addrs=mem.L1_K_REUSE_ADDRS[d_align]
+        addrs=[mem.L1_KND_ADDR_bn2s2[d_align]]
+        if resource_bn2s2
+        else mem.L1_K_REUSE_ADDRS[d_align]
         if template == Tmpl.BN2GS1S2 and d_align <= 256
         else [mem.L1_KND_ADDR[d_align]],
-        mutex_ids=mem.L1_K_REUSE_MUTEX[d_align]
+        mutex_ids=mem.MTX_L1_K_ND_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.L1_K_REUSE_MUTEX[d_align]
         if template == Tmpl.BN2GS1S2 and d_align <= 256
         else mem.MTX_L1_K_ND[d_align],
     )
 
 
-def make_v_l1():
+def make_v_l1(resource_bn2s2=False):
     """V^T 的 L1（ZN），供 mm1 当右矩阵。
 
     V/dO 是 Dv 宽，但 tile 仍按 d_align 分配(Dv<=D)：多出来的列是 padding，
     由 load/matmul 的 valid_shape 挡掉。这样两侧共用一套地址步长，L1 布局
-    不必再分 D/Dv 两种块大小。
-    """
+    不必再分 D/Dv 两种块大小。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[D_PHYS_W[d_align], CUBE_BASEN],
+            shape=[D_PHYS_W_bn2s2[d_align], CUBE_BASEN_bn2s2]
+            if resource_bn2s2
+            else [D_PHYS_W[d_align], CUBE_BASEN],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Mat,
             layout=pl.ZN,
             compact=1,
         ),
-        addrs=[mem.L1_V_ADDR[d_align]],
-        mutex_ids=mem.MTX_L1_V[d_align],
+        addrs=[mem.L1_V_ADDR_bn2s2[d_align]]
+        if resource_bn2s2
+        else [mem.L1_V_ADDR[d_align]],
+        mutex_ids=mem.MTX_L1_V_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.MTX_L1_V[d_align],
     )
 
 
-def make_do_l1():
+def make_do_l1(resource_bn2s2=False):
     """dO 的 L1，多槽 double buffer（mm1 写入，mm5 经延后视图复用）。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEM, D_PHYS_W[d_align]],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            compact=1,
-        ),
-        addrs=mem.L1_DO_ADDRS[d_align],
-        mutex_ids=mem.L1_DO_MUTEX[d_align],
-    )
+    return _make_query_l1(True, resource_bn2s2)
 
 
-def make_q_lag_view():
+def make_q_lag_view(resource_bn2s2=False):
     """mm4 读 Q 用的**延后游标视图**（dK = dS^T @ Q 复用 mm2 搬好的 Q）。
 
     地址与 mutex_id 和 :func:`make_q_l1` 完全相同(共享同一块 L1 与同一套同步
@@ -395,32 +413,13 @@ def make_q_lag_view():
     mutex_ids 必须与 writer 视图完全相同：同一块 L1 的两个访问器靠同一套
     id 把「mm2 写」与「mm4 读」排序。
     若给 reader 另一套 id，这层互锁就没了，mm2(task N) 会在 mm4 读完前覆写，
-    实测 dK/dV 错(0.61/0.57)。
-    """
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEM, D_PHYS_W[d_align]],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            compact=1,
-        ),
-        addrs=mem.L1_Q_ADDRS[d_align],
-        mutex_ids=mem.L1_Q_MUTEX[d_align],
-    )
+    实测 dK/dV 错(0.61/0.57)。"""
+    return make_q_l1(resource_bn2s2)
 
 
-def make_do_lag_view():
+def make_do_lag_view(resource_bn2s2=False):
     """mm5 读 dO 用的延后游标视图。语义同 :func:`make_q_lag_view`。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEM, D_PHYS_W[d_align]],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            compact=1,
-        ),
-        addrs=mem.L1_DO_ADDRS[d_align],
-        mutex_ids=mem.L1_DO_MUTEX[d_align],
-    )
+    return make_do_l1(resource_bn2s2)
 
 
 # ==================================================================
@@ -430,17 +429,23 @@ def make_do_lag_view():
 # 24KB、双缓冲 2x24=48KB<=64KB 得以保留 —— 这正是切 D 轴的首要目的。
 # 列宽取 mem.ACC_COLS = max(CUBE_BASEN, 分块宽)：MM2/MM1 的左矩阵是 Q/dO 的 D
 # 分块，MM3/MM4/MM5 的左矩阵是 dS/P([M,N])。
-def make_l0a():
+def make_l0a(resource_bn2s2=False):
     """L0A（左矩阵），双缓冲。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[CUBE_BASEM, mem.ACC_COLS[d_align]],
+            shape=[CUBE_BASEM_bn2s2, mem.ACC_COLS_bn2s2[d_align]]
+            if resource_bn2s2
+            else [CUBE_BASEM, mem.ACC_COLS[d_align]],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Left,
             compact=1,
         ),
-        addrs=mem.L0AB_ADDRS[d_align],
-        mutex_ids=mem.MTX_L0A[d_align],
+        addrs=mem.L0AB_ADDRS_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.L0AB_ADDRS[d_align],
+        mutex_ids=mem.MTX_L0A_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.MTX_L0A[d_align],
     )
 
 
@@ -476,8 +481,8 @@ def make_l0a_no_sync():
     )
 
 
-def make_q_l1_no_sync():
-    """Same Q slots; explicit MTE1 lock spans all K/N chunks of one GEMM."""
+def _make_query_l1_no_sync(gradient=False):
+    """Compile-time resource policy; every call creates its own original view."""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[CUBE_BASEM, D_PHYS_W[d_align]],
@@ -485,23 +490,19 @@ def make_q_l1_no_sync():
             target_memory=pl.MemorySpace.Mat,
             compact=1,
         ),
-        addrs=mem.L1_Q_ADDRS[d_align],
+        addrs=mem.L1_DO_ADDRS[d_align] if gradient else mem.L1_Q_ADDRS[d_align],
         depth=3,
     )
+
+
+def make_q_l1_no_sync():
+    """Same Q slots; explicit MTE1 lock spans all K/N chunks of one GEMM."""
+    return _make_query_l1_no_sync(False)
 
 
 def make_do_l1_no_sync():
     """dO consumer view; identical three slots to the automatic producer."""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[CUBE_BASEM, D_PHYS_W[d_align]],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Mat,
-            compact=1,
-        ),
-        addrs=mem.L1_DO_ADDRS[d_align],
-        depth=3,
-    )
+    return _make_query_l1_no_sync(True)
 
 
 def make_v_l1_no_sync():
@@ -564,7 +565,7 @@ def make_l0b():
     )
 
 
-def make_l0c_acc():
+def make_l0c_acc(resource_bn2s2=False):
     """mm1/mm2/mm3 轮流使用的 L0C 累加器。
 
     Most keys have two slots. BN2 D192 and GS D192/Dv128 have one slot to keep
@@ -577,95 +578,83 @@ def make_l0c_acc():
     select this allocation; their pipeline owns the explicit slot state."""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[CUBE_BASEM, mem.ACC_COLS[d_align]],
+            shape=[CUBE_BASEM_bn2s2, mem.ACC_COLS_bn2s2[d_align]]
+            if resource_bn2s2
+            else [CUBE_BASEM, mem.ACC_COLS[d_align]],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Acc,
             compact=1,
         ),
-        addrs=(
-            mem.L0C_ACC_D192DV128_ADDRS
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
+        addrs=mem.L0C_ACC_ADDRS_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.L0C_ACC_D192DV128_ADDRS
+        if template == Tmpl.BN2GS1S2
+        and d_align == 192
+        and (dv_align == 128)
+        and (
+            swizzle == 0
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
+            or (
+                swizzle == 1
+                and deter == 0
+                and (layout == 0)
+                and (mask_mode == 3)
+                and (sink == 0)
+            )
+            or (
+                swizzle == 1
+                and deter == 0
+                and (not (layout == 0 and mask_mode == 3 and (sink == 0)))
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
                 and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
                 )
             )
-            else mem.L0C_ACC_ADDRS_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.L0C_ACC_ADDRS[d_align]
-        ),
-        mutex_ids=(
-            mem.L0C_ACC_D192DV128_MUTEX
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
+        )
+        else mem.L0C_ACC_ADDRS_B2[d_align]
+        if template == Tmpl.BN2 and d_align == 192
+        else mem.L0C_ACC_ADDRS[d_align],
+        mutex_ids=mem.L0C_ACC_MUTEX_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.L0C_ACC_D192DV128_MUTEX
+        if template == Tmpl.BN2GS1S2
+        and d_align == 192
+        and (dv_align == 128)
+        and (
+            swizzle == 0
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
+            or (
+                swizzle == 1
+                and deter == 0
+                and (layout == 0)
+                and (mask_mode == 3)
+                and (sink == 0)
+            )
+            or (
+                swizzle == 1
+                and deter == 0
+                and (not (layout == 0 and mask_mode == 3 and (sink == 0)))
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
                 and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
                 )
             )
-            else mem.L0C_ACC_MUTEX_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.L0C_ACC_MUTEX[d_align]
-        ),
+        )
+        else mem.L0C_ACC_MUTEX_B2[d_align]
+        if template == Tmpl.BN2 and d_align == 192
+        else mem.L0C_ACC_MUTEX[d_align],
     )
 
 
@@ -690,51 +679,46 @@ def make_l0c_acc_n64():
 # BN2 D192 has two resident N96 chunks. Other wide-D paths use acc scratch.
 # dV：常驻，需在同一 s2 块内跨 s1 轮次存活，按 current() 而非 next() 访问；故每个
 # D 分块各建独立 tile_group，不做多槽位 group。
-def make_dk_l0c_chunk0():
-    """dK 第 0 个 D 分块的 L0C 槽。
-
-    64/128 是 dK 的常驻累加器；GS D192/Dv128 uses a resident N128 view.
-    Other GS 192/256 and BN2 256 alias acc scratch; BN2 192 is resident N96,
-    and 768 has independent scratch.
-    """
+def _make_dkv_l0c_chunk(second_chunk=False, value_gradient=False, resource_bn2s2=False):
+    """Resident gradient view; callers retain the original chunk/owner policy."""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[
-                CUBE_BASEN,
-                128
-                if (
-                    template == Tmpl.BN2GS1S2
-                    and d_align == 192
-                    and dv_align == 128
-                    and (
-                        swizzle == 0
-                        or (
-                            swizzle == 1
-                            and deter == 1
-                            and layout == 1
-                            and deter_family == 12
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and layout == 0
-                            and mask_mode == 3
-                            and sink == 0
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and not (layout == 0 and mask_mode == 3 and sink == 0)
-                        )
-                        or (
-                            deter == 1
-                            and layout == 0
-                            and mask_mode == 0
-                            and sink == 0
-                            and (
-                                (swizzle == 1 and deter_family == 1)
-                                or (swizzle == 0 and deter_family == 21)
-                            )
+                CUBE_BASEN_bn2s2 if resource_bn2s2 else CUBE_BASEN,
+                D_CHUNK_MAXW_bn2s2[d_align]
+                if resource_bn2s2
+                else (128 if value_gradient else 64 if second_chunk else 128)
+                if template == Tmpl.BN2GS1S2
+                and d_align == 192
+                and (dv_align == 128)
+                and (
+                    swizzle == 0
+                    or (
+                        swizzle == 1
+                        and deter == 1
+                        and (layout == 1)
+                        and (deter_family == 12)
+                    )
+                    or (
+                        swizzle == 1
+                        and deter == 0
+                        and (layout == 0)
+                        and (mask_mode == 3)
+                        and (sink == 0)
+                    )
+                    or (
+                        swizzle == 1
+                        and deter == 0
+                        and (not (layout == 0 and mask_mode == 3 and (sink == 0)))
+                    )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
                         )
                     )
                 )
@@ -745,505 +729,170 @@ def make_dk_l0c_chunk0():
             compact=1,
         ),
         addrs=[
-            mem.L0C_DK_D192DV128_ADDRS[0]
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
+            (
+                mem.L0C_DK1_ADDR_bn2s2[d_align]
+                if second_chunk
+                else mem.L0C_DK0_ADDR_bn2s2[d_align]
+            )
+            if resource_bn2s2
+            else (
+                mem.L0C_DV128_ADDR
+                if value_gradient
+                else mem.L0C_DK_D192DV128_N64_ADDR
+                if second_chunk
+                else mem.L0C_DK_D192DV128_ADDRS[0]
+            )
+            if template == Tmpl.BN2GS1S2
+            and d_align == 192
+            and (dv_align == 128)
+            and (
+                swizzle == 0
+                or (
+                    swizzle == 1
+                    and deter == 1
+                    and (layout == 1)
+                    and (deter_family == 12)
+                )
+                or (
+                    swizzle == 1
+                    and deter == 0
+                    and (layout == 0)
+                    and (mask_mode == 3)
+                    and (sink == 0)
+                )
+                or (
+                    swizzle == 1
+                    and deter == 0
+                    and (not (layout == 0 and mask_mode == 3 and (sink == 0)))
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
                     )
                 )
             )
-            else mem.L0C_DK0_ADDR_B2[d_align]
+            else (
+                (
+                    mem.L0C_DV1_ADDR_B2[d_align]
+                    if value_gradient
+                    else mem.L0C_DK1_ADDR_B2[d_align]
+                )
+                if second_chunk
+                else mem.L0C_DV0_ADDR_B2[d_align]
+                if value_gradient
+                else mem.L0C_DK0_ADDR_B2[d_align]
+            )
             if template == Tmpl.BN2 and d_align == 192
+            else (
+                mem.L0C_DV1_ADDR[d_align]
+                if value_gradient
+                else mem.L0C_DK1_ADDR[d_align]
+            )
+            if second_chunk
+            else mem.L0C_DV0_ADDR[d_align]
+            if value_gradient
             else mem.L0C_DK0_ADDR[d_align]
         ],
         mutex_ids=[
-            mem.L0C_DK_D192DV128_MUTEX[0]
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
+            (
+                mem.MTX_L0C_DK1_bn2s2[d_align]
+                if second_chunk
+                else mem.MTX_L0C_DK0_bn2s2[d_align]
+            )
+            if resource_bn2s2
+            else (
+                mem.MTX_L0C_DV128 if value_gradient else mem.L0C_DK_D192DV128_MUTEX[0]
+            )
+            if template == Tmpl.BN2GS1S2
+            and d_align == 192
+            and (dv_align == 128)
+            and (
+                swizzle == 0
+                or (
+                    swizzle == 1
+                    and deter == 1
+                    and (layout == 1)
+                    and (deter_family == 12)
+                )
+                or (
+                    swizzle == 1
+                    and deter == 0
+                    and (layout == 0)
+                    and (mask_mode == 3)
+                    and (sink == 0)
+                )
+                or (
+                    swizzle == 1
+                    and deter == 0
+                    and (not (layout == 0 and mask_mode == 3 and (sink == 0)))
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
                     )
                 )
             )
-            else mem.MTX_L0C_DK0_B2[d_align]
+            else (
+                (
+                    mem.MTX_L0C_DV1_B2[d_align]
+                    if value_gradient
+                    else mem.MTX_L0C_DK1_B2[d_align]
+                )
+                if second_chunk
+                else mem.MTX_L0C_DV0_B2[d_align]
+                if value_gradient
+                else mem.MTX_L0C_DK0_B2[d_align]
+            )
             if template == Tmpl.BN2 and d_align == 192
+            else (
+                mem.MTX_L0C_DV1[d_align] if value_gradient else mem.MTX_L0C_DK1[d_align]
+            )
+            if second_chunk
+            else mem.MTX_L0C_DV0[d_align]
+            if value_gradient
             else mem.MTX_L0C_DK0[d_align]
         ],
     )
 
 
+def make_dk_l0c_chunk0(resource_bn2s2=False):
+    """dK 第 0 个 D 分块的 L0C 槽。
+
+    64/128 是 dK 的常驻累加器；GS D192/Dv128 uses a resident N128 view.
+    Other GS 192/256 and BN2 256 alias acc scratch; BN2 192 is resident N96,
+    and 768 has independent scratch."""
+    return _make_dkv_l0c_chunk(False, False, resource_bn2s2)
+
+
 def make_dv_l0c_chunk0():
     """dV 第 0 个 D 分块的常驻 L0C。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[
-                CUBE_BASEN,
-                128
-                if (
-                    template == Tmpl.BN2GS1S2
-                    and d_align == 192
-                    and dv_align == 128
-                    and (
-                        swizzle == 0
-                        or (
-                            swizzle == 1
-                            and deter == 1
-                            and layout == 1
-                            and deter_family == 12
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and layout == 0
-                            and mask_mode == 3
-                            and sink == 0
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and not (layout == 0 and mask_mode == 3 and sink == 0)
-                        )
-                        or (
-                            deter == 1
-                            and layout == 0
-                            and mask_mode == 0
-                            and sink == 0
-                            and (
-                                (swizzle == 1 and deter_family == 1)
-                                or (swizzle == 0 and deter_family == 21)
-                            )
-                        )
-                    )
-                )
-                else D_CHUNK_MAXW[d_align],
-            ],
-            dtype=pl.DT_FP32,
-            target_memory=pl.MemorySpace.Acc,
-            compact=1,
-        ),
-        addrs=[
-            mem.L0C_DV128_ADDR
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
-                )
-            )
-            else mem.L0C_DV0_ADDR_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.L0C_DV0_ADDR[d_align]
-        ],
-        mutex_ids=[
-            mem.MTX_L0C_DV128
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
-                )
-            )
-            else mem.MTX_L0C_DV0_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.MTX_L0C_DV0[d_align]
-        ],
-    )
+    return _make_dkv_l0c_chunk(False, True, False)
 
 
-def make_dk_l0c_chunk1():
+def make_dk_l0c_chunk1(resource_bn2s2=False):
     """dK 第 1 个 D 分块的 L0C 槽。
 
     GS1S2 192/256 与 BN2 256 与 acc 第 1 槽同址（dK 走 ws，该路径不会用到它）；
     BN2 192 有独立常驻槽；64/128/768 别名到第 0 块 —— ``D_NCHUNKS == 1`` 时
     该形参被 trace 期整块剪掉。该工厂主要为 ``iterate_mm_n_l0c`` 的 ``acc1``
     形参保留。GS D192/Dv128 uses the final N64 region of one 96KiB allocation,
-    with the same mutex as its N128 region and full-width flush view.
-    """
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[
-                CUBE_BASEN,
-                64
-                if (
-                    template == Tmpl.BN2GS1S2
-                    and d_align == 192
-                    and dv_align == 128
-                    and (
-                        swizzle == 0
-                        or (
-                            swizzle == 1
-                            and deter == 1
-                            and layout == 1
-                            and deter_family == 12
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and layout == 0
-                            and mask_mode == 3
-                            and sink == 0
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and not (layout == 0 and mask_mode == 3 and sink == 0)
-                        )
-                        or (
-                            deter == 1
-                            and layout == 0
-                            and mask_mode == 0
-                            and sink == 0
-                            and (
-                                (swizzle == 1 and deter_family == 1)
-                                or (swizzle == 0 and deter_family == 21)
-                            )
-                        )
-                    )
-                )
-                else D_CHUNK_MAXW[d_align],
-            ],
-            dtype=pl.DT_FP32,
-            target_memory=pl.MemorySpace.Acc,
-            compact=1,
-        ),
-        addrs=[
-            mem.L0C_DK_D192DV128_N64_ADDR
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
-                )
-            )
-            else mem.L0C_DK1_ADDR_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.L0C_DK1_ADDR[d_align]
-        ],
-        mutex_ids=[
-            mem.L0C_DK_D192DV128_MUTEX[0]
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
-                )
-            )
-            else mem.MTX_L0C_DK1_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.MTX_L0C_DK1[d_align]
-        ],
-    )
+    with the same mutex as its N128 region and full-width flush view."""
+    return _make_dkv_l0c_chunk(True, False, resource_bn2s2)
 
 
 def make_dv_l0c_chunk1():
     """dV chunk 1; the single Dv128 path aliases chunk 0 with the same mutex."""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[
-                CUBE_BASEN,
-                128
-                if (
-                    template == Tmpl.BN2GS1S2
-                    and d_align == 192
-                    and dv_align == 128
-                    and (
-                        swizzle == 0
-                        or (
-                            swizzle == 1
-                            and deter == 1
-                            and layout == 1
-                            and deter_family == 12
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and layout == 0
-                            and mask_mode == 3
-                            and sink == 0
-                        )
-                        or (
-                            swizzle == 1
-                            and deter == 0
-                            and not (layout == 0 and mask_mode == 3 and sink == 0)
-                        )
-                        or (
-                            deter == 1
-                            and layout == 0
-                            and mask_mode == 0
-                            and sink == 0
-                            and (
-                                (swizzle == 1 and deter_family == 1)
-                                or (swizzle == 0 and deter_family == 21)
-                            )
-                        )
-                    )
-                )
-                else D_CHUNK_MAXW[d_align],
-            ],
-            dtype=pl.DT_FP32,
-            target_memory=pl.MemorySpace.Acc,
-            compact=1,
-        ),
-        addrs=[
-            mem.L0C_DV128_ADDR
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
-                )
-            )
-            else mem.L0C_DV1_ADDR_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.L0C_DV1_ADDR[d_align]
-        ],
-        mutex_ids=[
-            mem.MTX_L0C_DV128
-            if (
-                template == Tmpl.BN2GS1S2
-                and d_align == 192
-                and dv_align == 128
-                and (
-                    swizzle == 0
-                    or (
-                        swizzle == 1
-                        and deter == 1
-                        and layout == 1
-                        and deter_family == 12
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and layout == 0
-                        and mask_mode == 3
-                        and sink == 0
-                    )
-                    or (
-                        swizzle == 1
-                        and deter == 0
-                        and not (layout == 0 and mask_mode == 3 and sink == 0)
-                    )
-                    or (
-                        deter == 1
-                        and layout == 0
-                        and mask_mode == 0
-                        and sink == 0
-                        and (
-                            (swizzle == 1 and deter_family == 1)
-                            or (swizzle == 0 and deter_family == 21)
-                        )
-                    )
-                )
-            )
-            else mem.MTX_L0C_DV1_B2[d_align]
-            if template == Tmpl.BN2 and d_align == 192
-            else mem.MTX_L0C_DV1[d_align]
-        ],
-    )
+    return _make_dkv_l0c_chunk(True, True, False)
 
 
 # 64/128 不切 D（D_NCHUNKS=1；64 档 D_CHUNK_MAXW==64，D_PHYS_W==128；128 档 D_CHUNK_MAXW==D_PHYS_W==128），
@@ -1258,20 +907,20 @@ def make_y_ub(v1w):
     """前向输出 y 的 UB（V1 的输入之一）。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[8, 768] if dv_align == 768 else [VECTOR_BASEM, v1w],
+            shape=[8, dv_align] if dv_align >= 512 else [VECTOR_BASEM, v1w],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             compact=0,
         ),
         addrs=mem.UB_SFMG_WIDE_Y_A
-        if dv_align == 768
+        if dv_align >= 512
         else [
             mem.UB_Y_A[HEAD_DIM_ALIGN]
             if template == Tmpl.BN2 and d_align <= 128
             else mem.UB_Y_A[v1w]
         ],
-        mutex_ids=mem.MTX_UB_SFMG_WIDE_Y if dv_align == 768 else mem.MTX_UB_Y,
+        mutex_ids=mem.MTX_UB_SFMG_WIDE_Y if dv_align >= 512 else mem.MTX_UB_Y,
     )
 
 
@@ -1279,25 +928,29 @@ def make_dy_ub(v1w):
     """上游梯度 dO 的 UB（V1 的输入之一）。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[8, 768] if dv_align == 768 else [VECTOR_BASEM, v1w],
+            shape=[8, dv_align] if dv_align >= 512 else [VECTOR_BASEM, v1w],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             compact=0,
         ),
         addrs=mem.UB_SFMG_WIDE_DY_A
-        if dv_align == 768
+        if dv_align >= 512
         else [
             mem.UB_DY_A[HEAD_DIM_ALIGN]
             if template == Tmpl.BN2 and d_align <= 128
             else mem.UB_DY_A[v1w]
         ],
-        mutex_ids=mem.MTX_UB_SFMG_WIDE_DY if dv_align == 768 else mem.MTX_UB_DY,
+        mutex_ids=mem.MTX_UB_SFMG_WIDE_DY if dv_align >= 512 else mem.MTX_UB_DY,
     )
 
 
 def make_nzp_ub(v1w):
-    """BN2 的 v3/v4 共用输出缓冲，保留原来的 NZ 布局与地址。"""
+    """BN2 v3/v4 shared NZ+1 buffer. Actual-M keeps a physical 65-row pitch.
+
+    VF writes with block_stride=65; compact=2 would derive a different source
+    pitch after set_validshape shrinks rows to 32/31. Keep compact=0 in the
+    actual-M family, as on GS, without changing addresses or mutex ownership."""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[NZP_ROWS, VECTOR_BASEN],
@@ -1305,7 +958,20 @@ def make_nzp_ub(v1w):
             target_memory=pl.MemorySpace.Vec,
             layout=pl.NZ,
             valid_shape=[-1, -1],
-            compact=0 if template == Tmpl.BN2GS1S2 else 2,
+            compact=0
+            if template == Tmpl.BN2GS1S2
+            or (
+                template == Tmpl.BN2
+                and d_align == 256
+                and dv_align == 256
+                and is_bn2_multiblk == 0
+                and deter == 0
+                and mask_mode == 0
+                and sink == 0
+                and swizzle == 0
+                and nz_out == 0
+            )
+            else 2,
         ),
         addrs=[
             mem.UB_NZP_A[HEAD_DIM_ALIGN]
@@ -1316,44 +982,55 @@ def make_nzp_ub(v1w):
     )
 
 
-def make_ds_out_ub(v1w):
-    """GS 的 dS cast/NZ 输出，独立于 P 输出的地址与 mutex。
-
-    非 compact NZ 的物理分形步长恒为 65，insert 按有效 rows 搬运，
-    srcGap=65-rows；与 VF 的 block_stride=65 及均分 S1 尾块一致。
-    """
+def _make_score_nzp(v1w, probability=False, resource_bn2s2=False):
+    """Compile-time resource policy; each call keeps its own view and cursor."""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[NZP_ROWS, VECTOR_BASEN],
+            shape=[
+                NZP_ROWS_bn2s2 if resource_bn2s2 else NZP_ROWS,
+                VECTOR_BASEN_bn2s2 if resource_bn2s2 else VECTOR_BASEN,
+            ],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Vec,
             layout=pl.NZ,
             valid_shape=[-1, -1],
             compact=0,
         ),
-        addrs=[mem.UB_NZP_A[v1w]],
-        mutex_ids=mem.MTX_UB_NZP,
+        addrs=[
+            (
+                mem.NORMAL_P_NZP_ADDR_bn2s2[v1w]
+                if resource_bn2s2
+                else mem.UB_P_OUT_A[v1w]
+            )
+            if probability
+            else mem.UB_NZP_A_bn2s2[v1w]
+            if resource_bn2s2
+            else mem.UB_NZP_A[v1w]
+        ],
+        mutex_ids=(
+            mem.PLAN_P_NZP_MUTEX_bn2s2[v1w] if resource_bn2s2 else mem.MTX_UB_P_OUT
+        )
+        if probability
+        else mem.MTX_UB_NZP_bn2s2
+        if resource_bn2s2
+        else mem.MTX_UB_NZP,
     )
+
+
+def make_ds_out_ub(v1w):
+    """GS 的 dS cast/NZ 输出，独立于 P 输出的地址与 mutex。
+
+    非 compact NZ 的物理分形步长恒为 65，insert 按有效 rows 搬运，
+    srcGap=65-rows；与 VF 的 block_stride=65 及均分 S1 尾块一致。"""
+    return _make_score_nzp(v1w, False, False)
 
 
 def make_p_out_ub(v1w):
     """GS 的 P cast/NZ 输出；BN2-only scratch 在此模板不创建。
 
     与 dS 保持相同的 65 行物理步长，使用独立地址和 mutex，避免
-    P 的 UB->L1 搬运与 dS 的 VF 写出因共用出口而串行。
-    """
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[NZP_ROWS, VECTOR_BASEN],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Vec,
-            layout=pl.NZ,
-            valid_shape=[-1, -1],
-            compact=0,
-        ),
-        addrs=[mem.UB_P_OUT_A[v1w]],
-        mutex_ids=mem.MTX_UB_P_OUT,
-    )
+    P 的 UB->L1 搬运与 dS 的 VF 写出因共用出口而串行。"""
+    return _make_score_nzp(v1w, True, False)
 
 
 def make_sfmg_ub(v1w):
@@ -1379,8 +1056,7 @@ def make_sfmg_prefetch_ub(v1w):
     """普通 D192/Dv128 SW1 causal 无 sink 路径的 SFMG 输入双槽。
 
     第二槽借用该路径不使用的 sink_part，地址和 mutex 均沿用原记录。
-    PRE/POST 与主循环由 sync_all 隔开，不改变任何原有 UB 分配。
-    """
+    PRE/POST 与主循环由 sync_all 隔开，不改变任何原有 UB 分配。"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[VECTOR_BASEM, 1],
@@ -1404,11 +1080,10 @@ def make_sp_y_ub(v1w):
     形状按档取窗口规格；双槽（slots=2，对齐 1102 已上板验证的设计）——
     循环内 .next() 乒乓轮转：load(N+1) 写下一槽、VF(N) 读本槽，物理
     隔离无需跨队列 wait。**不能用单槽 .current()**：pypto 对同一 tile
-    的跨队列操作不插 wait，load 会覆盖 VF 正在读的窗口（上板 sfmg 错）。
-    """
+    的跨队列操作不插 wait，load 会覆盖 VF 正在读的窗口（上板 sfmg 错）。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[32, 768] if dv_align == 768 else [SP_ROWS[v1w], SP_WORK_W[v1w]],
+            shape=[32, dv_align] if dv_align >= 512 else [SP_ROWS[v1w], SP_WORK_W[v1w]],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
@@ -1423,7 +1098,7 @@ def make_sp_dy_ub(v1w):
     """sfmg 前移独立 dy 缓冲（双槽口径与 make_sp_y_ub 一致）。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[32, 768] if dv_align == 768 else [SP_ROWS[v1w], SP_WORK_W[v1w]],
+            shape=[32, dv_align] if dv_align >= 512 else [SP_ROWS[v1w], SP_WORK_W[v1w]],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
@@ -1455,8 +1130,7 @@ def make_sp_out_flat(v1w):
     无法用 order=[1,0] 落扁平行。改用本视图走 zt/sink 的恒等映射口径：
     validshape [1,rows] + 无 order，语义为「线性 rows 个 fp32」。
     VF 写 DN 列 tile、store 读本视图，同 mutex 保证先后序。
-    与 sp_out 共用同一 (addr, mutex) 槽位对——循环内同步 .next() 保持轮转一致。
-    """
+    与 sp_out 共用同一 (addr, mutex) 槽位对——循环内同步 .next() 保持轮转一致。"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[1, SP_ROWS[v1w]],
@@ -1469,18 +1143,20 @@ def make_sp_out_flat(v1w):
     )
 
 
-def make_lse_ub(v1w):
+def make_lse_ub(v1w, resource_bn2s2=False):
     """softmax_lse 的 UB，双槽 ping-pong。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[VECTOR_BASEM, 1],
+            shape=[VECTOR_BASEM_bn2s2, 1] if resource_bn2s2 else [VECTOR_BASEM, 1],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Vec,
             layout=pl.DN,
             valid_shape=[-1, -1],
             compact=0,
         ),
-        addrs=[
+        addrs=[mem.UB_LSE0_A_bn2s2[v1w], mem.UB_LSE1_A_bn2s2[v1w]]
+        if resource_bn2s2
+        else [
             mem.UB_LSE0_A[HEAD_DIM_ALIGN]
             if template == Tmpl.BN2 and d_align <= 128
             else mem.UB_LSE0_A[v1w],
@@ -1488,49 +1164,55 @@ def make_lse_ub(v1w):
             if template == Tmpl.BN2 and d_align <= 128
             else mem.UB_LSE1_A[v1w],
         ],
-        mutex_ids=mem.MTX_UB_LSE,
+        mutex_ids=mem.MTX_UB_LSE_bn2s2 if resource_bn2s2 else mem.MTX_UB_LSE,
     )
 
 
-def make_mask_view(v1w):
-    """attenmask 的 UB 视图 —— **故意**与 y_ub 同址同 mutex。
-
-    v1 用完 y 之后 v2 才搬 mask，两者复用同一块 UB。
-    """
+def _make_mask_view(v1w, resource_bn2s2=False, forward_window=False):
+    """Compile-time resource policy; each call keeps its own view and cursor."""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[VECTOR_BASEM, VECTOR_BASEN],
+            shape=[VECTOR_BASEM_bn2s2, VECTOR_BASEN_bn2s2]
+            if resource_bn2s2
+            else [VECTOR_BASEM, VECTOR_BASEN],
             dtype=pl.DT_UINT8,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             compact=0,
         ),
         addrs=[
-            mem.UB_MASK_A[HEAD_DIM_ALIGN]
-            if template == Tmpl.BN2 and d_align <= 128
-            else mem.UB_MASK_A[v1w]
-        ],
-        mutex_ids=mem.MTX_UB_Y,
-    )
-
-
-def make_mask_pre_view(v1w):
-    """band mask 的第二块（前向窗口），与 dy_ub 同址同 mutex。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[VECTOR_BASEM, VECTOR_BASEN],
-            dtype=pl.DT_UINT8,
-            target_memory=pl.MemorySpace.Vec,
-            valid_shape=[-1, -1],
-            compact=0,
-        ),
-        addrs=[
-            mem.UB_MASK_PRE_A[HEAD_DIM_ALIGN]
+            mem.UB_MASK_PRE_A_bn2s2[v1w] if forward_window else mem.UB_MASK_A_bn2s2[v1w]
+        ]
+        if resource_bn2s2
+        else [
+            (
+                mem.UB_MASK_PRE_A[HEAD_DIM_ALIGN]
+                if forward_window
+                else mem.UB_MASK_A[HEAD_DIM_ALIGN]
+            )
             if template == Tmpl.BN2 and d_align <= 128
             else mem.UB_MASK_PRE_A[v1w]
+            if forward_window
+            else mem.UB_MASK_A[v1w]
         ],
-        mutex_ids=mem.MTX_UB_DY,
+        mutex_ids=(mem.MTX_UB_DY_bn2s2 if forward_window else mem.MTX_UB_Y_bn2s2)
+        if resource_bn2s2
+        else mem.MTX_UB_DY
+        if forward_window
+        else mem.MTX_UB_Y,
     )
+
+
+def make_mask_view(v1w, resource_bn2s2=False):
+    """attenmask 的 UB 视图 —— **故意**与 y_ub 同址同 mutex。
+
+    v1 用完 y 之后 v2 才搬 mask，两者复用同一块 UB。"""
+    return _make_mask_view(v1w, resource_bn2s2, False)
+
+
+def make_mask_pre_view(v1w, resource_bn2s2=False):
+    """band mask 的第二块（前向窗口），与 dy_ub 同址同 mutex。"""
+    return _make_mask_view(v1w, resource_bn2s2, True)
 
 
 # ==================================================================
@@ -1544,8 +1226,7 @@ def make_ws_load_f32_ub():
     """wide（d_align>128）：从 4D fp32 workspace 读回的 [64, chunk] load tile。
 
     列宽取该档的 D 分块宽（192→96，256/768→128），整块一次 cast，避免 64 列
-    的短 burst。地址 alias 到 y（V2 之后已死），尺寸正好相等（24KB/32KB）。
-    """
+    的短 burst。地址 alias 到 y（V2 之后已死），尺寸正好相等（24KB/32KB）。"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[VECTOR_BASEM, D_CHUNK_MAXW[d_align]],
@@ -1554,15 +1235,14 @@ def make_ws_load_f32_ub():
             valid_shape=[-1, -1],
         ),
         addrs=[mem.UB_WSF32[d_align]],
-        mutex_ids=mem.MTX_UB_WSF32_WIDE if dv_align == 768 else mem.MTX_UB_WSF32,
+        mutex_ids=mem.MTX_UB_WSF32_WIDE if dv_align >= 512 else mem.MTX_UB_WSF32,
     )
 
 
 def make_ws_cast_f16_ub():
     """wide 的 [64, chunk] 16-bit 出口，与 :func:`make_ws_load_f32_ub` stride 一致。
 
-    alias 到 cast（16KB，chunk=96/128 时占 12/16KB）
-    """
+    alias 到 cast（16KB，chunk=96/128 时占 12/16KB）"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[VECTOR_BASEM, D_CHUNK_MAXW[d_align]],
@@ -1578,8 +1258,7 @@ def make_ws_cast_f16_ub():
 def make_l0c_cast_ub():
     """
     v5/v6 出口的 16-bit 缓冲，地址档由工厂自己按 template/d_align 判。
-    BN2 narrow 与它整张 UB 图同档（HEAD_DIM_ALIGN）；其余用当前 d_align 档。
-    """
+    BN2 narrow 与它整张 UB 图同档（HEAD_DIM_ALIGN）；其余用当前 d_align 档。"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[VECTOR_BASEM, mem.CAST_W],
@@ -1599,8 +1278,7 @@ def make_l0c_cast_ub():
 def make_l0c_load_ub():
     """
     （BN2 192）：dK chunk1 的 L0C→UB 出口，[64,128] fp32。
-     与 mm2_res 同宽同 stride，供 ``muls_cast_vf`` 一次搬完
-    """
+     与 mm2_res 同宽同 stride，供 ``muls_cast_vf`` 一次搬完"""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[VECTOR_BASEM, VECTOR_BASEN if d_align == 192 else VECTOR_BASEN // 2],
@@ -1632,12 +1310,10 @@ def make_sink_part_ub(v1w):
     )
 
 
-def make_sink_row_post_ub(v1w):
-    """dsink 收尾归约的批量行 tile：返回 SINK_REDUCE_BATCH 个 [1, VECTOR_BASEN]。
-
-    每个 tile 对应一条 AIV 槽位行；一批里发多次 load、只等一次 bar_mte2。
-    内核会被 trace：推导式 / tuple(...) / 嵌套 def 都不支持，故显式展开。
-    """
+def make_sink_row_post_tiles(
+    addr0, addr1, addr2, addr3, mutex0, mutex1, mutex2, mutex3
+):
+    """Four independent post-phase rows, shared by both resource layouts."""
     t0 = pl.make_tile_group(
         type=pl.TileType(
             shape=[1, VECTOR_BASEN],
@@ -1645,8 +1321,8 @@ def make_sink_row_post_ub(v1w):
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
         ),
-        addrs=[mem.UB_SINK_ROW_POST_A[v1w][0]],
-        mutex_ids=[mem.MTX_UB_SINK_ROW_POST[0]],
+        addrs=[addr0],
+        mutex_ids=[mutex0],
     )
     t1 = pl.make_tile_group(
         type=pl.TileType(
@@ -1655,8 +1331,8 @@ def make_sink_row_post_ub(v1w):
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
         ),
-        addrs=[mem.UB_SINK_ROW_POST_A[v1w][1]],
-        mutex_ids=[mem.MTX_UB_SINK_ROW_POST[1]],
+        addrs=[addr1],
+        mutex_ids=[mutex1],
     )
     t2 = pl.make_tile_group(
         type=pl.TileType(
@@ -1665,8 +1341,8 @@ def make_sink_row_post_ub(v1w):
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
         ),
-        addrs=[mem.UB_SINK_ROW_POST_A[v1w][2]],
-        mutex_ids=[mem.MTX_UB_SINK_ROW_POST[2]],
+        addrs=[addr2],
+        mutex_ids=[mutex2],
     )
     t3 = pl.make_tile_group(
         type=pl.TileType(
@@ -1676,93 +1352,899 @@ def make_sink_row_post_ub(v1w):
             valid_shape=[-1, -1],
             compact=0,
         ),
-        addrs=[mem.UB_SINK_ROW_POST_A[v1w][3]],
-        mutex_ids=[mem.MTX_UB_SINK_ROW_POST[3]],
+        addrs=[addr3],
+        mutex_ids=[mutex3],
     )
     return t0, t1, t2, t3
 
 
-def make_sink_red_post_ub(v1w):
+def make_sink_row_post_ub(v1w, resource_bn2s2=False):
+    return make_sink_row_post_tiles(
+        mem.UB_SINK_ROW_POST_A_bn2s2[v1w][0]
+        if resource_bn2s2
+        else mem.UB_SINK_ROW_POST_A[v1w][0],
+        mem.UB_SINK_ROW_POST_A_bn2s2[v1w][1]
+        if resource_bn2s2
+        else mem.UB_SINK_ROW_POST_A[v1w][1],
+        mem.UB_SINK_ROW_POST_A_bn2s2[v1w][2]
+        if resource_bn2s2
+        else mem.UB_SINK_ROW_POST_A[v1w][2],
+        mem.UB_SINK_ROW_POST_A_bn2s2[v1w][3]
+        if resource_bn2s2
+        else mem.UB_SINK_ROW_POST_A[v1w][3],
+        mem.MTX_UB_SINK_ROW_POST_bn2s2[0]
+        if resource_bn2s2
+        else mem.MTX_UB_SINK_ROW_POST[0],
+        mem.MTX_UB_SINK_ROW_POST_bn2s2[1]
+        if resource_bn2s2
+        else mem.MTX_UB_SINK_ROW_POST[1],
+        mem.MTX_UB_SINK_ROW_POST_bn2s2[2]
+        if resource_bn2s2
+        else mem.MTX_UB_SINK_ROW_POST[2],
+        mem.MTX_UB_SINK_ROW_POST_bn2s2[3]
+        if resource_bn2s2
+        else mem.MTX_UB_SINK_ROW_POST[3],
+    )
+
+
+def make_sink_red_post_ub(v1w, resource_bn2s2=False):
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, VECTOR_BASEN],
+            shape=[1, VECTOR_BASEN_bn2s2] if resource_bn2s2 else [1, VECTOR_BASEN],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             compact=0,
         ),
-        addrs=[mem.UB_SINK_RED_POST_A[v1w]],
-        mutex_ids=mem.MTX_UB_SINK_RED_POST,
+        addrs=[mem.UB_SINK_RED_POST_A_bn2s2[v1w]]
+        if resource_bn2s2
+        else [mem.UB_SINK_RED_POST_A[v1w]],
+        mutex_ids=mem.MTX_UB_SINK_RED_POST_bn2s2
+        if resource_bn2s2
+        else mem.MTX_UB_SINK_RED_POST,
     )
 
 
 # ==================================================================
 #  pre / post —— 与主循环被 sync_all 完全隔开，故可整块借用 UB
 # ==================================================================
-def make_pre_zero_buffer_f32():
+def _make_pre_zero_buffer(resource_bn2s2=False, output_dtype=False):
+    """Compile-time resource policy; each call keeps its own view and cursor."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[1, mem.PRE_ELEMS_bn2s2[d_align]]
+            if resource_bn2s2
+            else [1, mem.PRE_ELEMS[d_align]],
+            dtype=input_dtype if output_dtype else pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_PRE_ZERO_bn2s2] if resource_bn2s2 else [mem.UB_PRE_ZERO],
+        mutex_ids=mem.MTX_UB_ZERO_bn2s2 if resource_bn2s2 else mem.MTX_UB_ZERO,
+    )
+
+
+def make_pre_zero_buffer_f32(resource_bn2s2=False):
     """BN2GS1S2 的清零缓冲（清 fp32 workspace）。单槽位。
 
     mutex_ids 复用主循环的 id：pre 与主循环被 sync_all 完全隔开，不会同时
-    活跃。列宽/行数按 d_align 查表。
-    """
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[1, mem.PRE_ELEMS[d_align]],
-            dtype=pl.DT_FP32,
-            target_memory=pl.MemorySpace.Vec,
-            valid_shape=[-1, -1],
-            compact=0,
-        ),
-        addrs=[mem.UB_PRE_ZERO],
-        mutex_ids=mem.MTX_UB_ZERO,
-    )
+    活跃。列宽/行数按 d_align 查表。"""
+    return _make_pre_zero_buffer(resource_bn2s2, False)
 
 
-def make_pre_zero_buffer_f16():
+def make_pre_zero_buffer_f16(resource_bn2s2=False):
     """BN2 ``bn2_need_zero`` 支的清零缓冲（直接清 16-bit out，无 workspace）。"""
-    return pl.make_tile_group(
-        type=pl.TileType(
-            shape=[1, mem.PRE_ELEMS[d_align]],
-            dtype=input_dtype,
-            target_memory=pl.MemorySpace.Vec,
-            valid_shape=[-1, -1],
-            compact=0,
-        ),
-        addrs=[mem.UB_PRE_ZERO],
-        mutex_ids=mem.MTX_UB_ZERO,
-    )
+    return _make_pre_zero_buffer(resource_bn2s2, True)
 
 
-def make_post_f32_buffer():
+def make_post_f32_buffer(resource_bn2s2=False):
     """post 的 fp32 输入缓冲，depth 2。
 
     与 :func:`make_post_f16_buffer` 各用一套 mutex_ids，框架据此判定「下一块
     的 load」与「本块的 cast/store」无冲突，从而让 MTE2 / V / MTE3 三条流水
-    重叠。
-    """
+    重叠。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, mem.POST_ELEMS[d_align]],
+            shape=[1, mem.POST_ELEMS_bn2s2[d_align]]
+            if resource_bn2s2
+            else [1, mem.POST_ELEMS[d_align]],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             compact=0,
         ),
-        addrs=mem.POST_F32_ADDRS[d_align],
-        mutex_ids=mem.MTX_UB_POST_F32,
+        addrs=mem.POST_F32_ADDRS_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.POST_F32_ADDRS[d_align],
+        mutex_ids=mem.MTX_UB_POST_F32_bn2s2 if resource_bn2s2 else mem.MTX_UB_POST_F32,
     )
 
 
-def make_post_f16_buffer():
+def make_post_f16_buffer(resource_bn2s2=False):
     """post 的 16-bit 输出缓冲，depth 2。见 :func:`make_post_f32_buffer`。"""
     return pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, mem.POST_ELEMS[d_align]],
+            shape=[1, mem.POST_ELEMS_bn2s2[d_align]]
+            if resource_bn2s2
+            else [1, mem.POST_ELEMS[d_align]],
             dtype=input_dtype,
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             compact=0,
         ),
-        addrs=mem.POST_F16_ADDRS[d_align],
-        mutex_ids=mem.MTX_UB_POST_F16,
+        addrs=mem.POST_F16_ADDRS_bn2s2[d_align]
+        if resource_bn2s2
+        else mem.POST_F16_ADDRS[d_align],
+        mutex_ids=mem.MTX_UB_POST_F16_bn2s2 if resource_bn2s2 else mem.MTX_UB_POST_F16,
     )
+
+
+# ==================================================================
+# BN2S2-specific implementation: names are isolated; resource policy is retained.
+# ==================================================================
+
+import pypto_pro.language as pl
+
+# 地址 / mutex 走 fag_mem 别名，避免把整张地址表摊在文件头。
+# shape 常量仍 from-import：工厂里到处写 shape=[CUBE_BASEM, ...]，裸名更干净。
+from memory import fag_mem as mem
+from memory.fag_mem import (
+    PLAN_ACC_ADDRS_bn2s2,
+    PLAN_ACC_MUTEX_bn2s2,
+    PLAN_DV0_ADDR_bn2s2,
+    PLAN_DV1_ADDR_bn2s2,
+    PLAN_DV0_MUTEX_bn2s2,
+    PLAN_DV1_MUTEX_bn2s2,
+    PLAN_POST_ROWS_bn2s2,
+    PLAN_PRE_ELEMENTS_bn2s2,
+)
+from fag_common import (
+    CUBE_BASEM_bn2s2,
+    CUBE_BASEN_bn2s2,
+    D_CHUNK_MAXW_bn2s2,
+    D_PHYS_W_bn2s2,
+    HEAD_DIM_ALIGN_bn2s2,
+    NZP_ROWS_bn2s2,
+    VECTOR_BASEM_bn2s2,
+    VECTOR_BASEN_bn2s2,
+)
+
+
+# ==================================================================
+#  CV 共享区 —— 必须声明在两个 section 之外
+# ==================================================================
+
+
+def make_mm2_lag_view_bn2s2():
+    """BN2S2 deter dK 直出 flush 用：mm2 结果 UB 的**延后游标视图**。
+
+    地址与 mutex 和 :func:`make_mm2_res` 完全相同（共享同一 UB 槽位与同一
+    套同步跟踪），但游标独立：fix 段每次列末 flush 调一次 ``next()``，恰好
+    指向 fix 任务自己的 mm2 槽位。语义同 :func:`make_q_lag_view` —— vector
+    的 v2/v3 读完该槽（cube 已等过 V3_TO_C3）后，cube 才把 dK 的 fp32 覆写
+    进去并 set C4_TO_V6，v6 再 Muls(scale)+Cast 直出 dK GM。
+    mutex_ids 必须与 writer 视图完全相同，靠同一套 id 排序同槽访问。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, VECTOR_BASEN_bn2s2],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+        ),
+        addrs=[mem.UB_MM2_0_bn2s2, mem.UB_MM2_1_bn2s2],
+        mutex_ids=mem.MTX_MM2_RES_bn2s2,
+    )
+
+
+def make_ds_l1_bn2s2():
+    return make_ds_l1(True)
+
+
+def make_p_l1_bn2s2():
+    return make_p_l1(True)
+
+
+def make_ds_t_l1_bn2s2():
+    return make_ds_t_l1(True)
+
+
+def make_p_t_l1_bn2s2():
+    return make_p_t_l1(True)
+
+
+# ==================================================================
+#  Cube 侧 L1
+# ==================================================================
+
+
+def make_normal_384_k_bn2s2(transpose, reader):
+    """Two 96 KiB K generations shared by current score and delayed dQ."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[384, 128] if transpose else [128, 384],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            layout=pl.ZN if transpose else pl.NZ,
+            compact=1,
+        ),
+        addrs=[mem.L1_Q_ADDRS_bn2s2[512][0], mem.L1_Q_ADDRS_bn2s2[512][1] + 32 * 1024],
+        mutex_ids=None if reader else mem.L1_Q_MUTEX_bn2s2[512],
+        depth=2,
+    )
+
+
+def make_normal_384_operand_bn2s2(value, reader):
+    """Q/dY scratch at 192 KiB and persistent transposed V at 320 KiB."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[384, 128] if value else [128, 384],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            layout=pl.ZN if value else pl.NZ,
+            compact=1,
+        ),
+        addrs=[mem.L1_KND_ADDR_bn2s2[512] if value else mem.L1_DO_ADDRS_bn2s2[512][1]],
+        mutex_ids=None
+        if reader
+        else [
+            mem.MTX_L1_K_ND_bn2s2[512][0] if value else mem.L1_DO_MUTEX_bn2s2[512][1]
+        ],
+        depth=1,
+    )
+
+
+def make_normal_384_grad_acc_bn2s2():
+    """L0C [64,256) KiB for gradients. Scores use [0,64) KiB."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, 384],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=[mem.L0C_ACC_ADDRS_bn2s2[512][1]],
+        mutex_ids=[mem.L0C_ACC_MUTEX_bn2s2[512][1]],
+        depth=1,
+    )
+
+
+def make_plan_common_l1_bn2s2():
+    """Wide plan's two common banks, normal NZ view; cursor owned by AIC loop."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, 768],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            compact=1,
+        ),
+        addrs=[mem.L1_Q_ADDRS_bn2s2[d_align][0], mem.L1_K_ADDR_bn2s2[d_align]],
+        mutex_ids=[mem.L1_Q_MUTEX_bn2s2[d_align][0], mem.MTX_L1_K_bn2s2[d_align][0]],
+    )
+
+
+def make_plan_common_zn_l1_bn2s2():
+    """Same banks and IDs, transposed score operand views."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[768, 128],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            layout=pl.ZN,
+            compact=1,
+        ),
+        addrs=[mem.L1_Q_ADDRS_bn2s2[d_align][0], mem.L1_K_ADDR_bn2s2[d_align]],
+        mutex_ids=[mem.L1_Q_MUTEX_bn2s2[d_align][0], mem.MTX_L1_K_bn2s2[d_align][0]],
+    )
+
+
+def make_k_l1_bn2s2():
+    return make_k_l1(True)
+
+
+def make_k_nd_l1_bn2s2():
+    return make_k_nd_l1(True)
+
+
+def make_plan_k_l1_bn2s2():
+    """D192 score K writer; two physical slots reused by delayed dQ."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[D_PHYS_W_bn2s2[d_align], CUBE_BASEN_bn2s2],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            layout=pl.ZN,
+            compact=1,
+        ),
+        addrs=[mem.L1_K_ADDR_bn2s2[d_align], mem.L1_KND_ADDR_bn2s2[d_align]],
+        mutex_ids=[mem.MTX_L1_K_bn2s2[d_align][0], mem.MTX_L1_K_ND_bn2s2[d_align][0]],
+    )
+
+
+def make_plan_k_normal_l1_bn2s2():
+    """D192 dQ view: same physical NZ bytes and mutexes as score K."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[CUBE_BASEN_bn2s2, D_PHYS_W_bn2s2[d_align]],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Mat,
+            compact=1,
+        ),
+        addrs=[mem.L1_K_ADDR_bn2s2[d_align], mem.L1_KND_ADDR_bn2s2[d_align]],
+        mutex_ids=[mem.MTX_L1_K_bn2s2[d_align][0], mem.MTX_L1_K_ND_bn2s2[d_align][0]],
+    )
+
+
+# ==================================================================
+#  Cube 侧 L0 —— 五个 matmul 共用的工作集
+# ==================================================================
+# L0A/L0B 一律按「最宽的一个 D 分块」声明：192 档是 96 列而不是 192，于是每块
+# 24KB、双缓冲 2x24=48KB<=64KB 得以保留 —— 这正是切 D 轴的首要目的。
+# 列宽取 mem.ACC_COLS = max(CUBE_BASEN, 分块宽)：MM2/MM1 的左矩阵是 Q/dO 的 D
+# 分块，MM3/MM4/MM5 的左矩阵是 dS/P([M,N])。
+
+
+def make_wide_l0a_reader_bn2s2():
+    """Unmanaged read aliases; caller holds the original L0A M token across N strips."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[CUBE_BASEM_bn2s2, mem.ACC_COLS_bn2s2[d_align]],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Left,
+            compact=1,
+        ),
+        addrs=mem.L0AB_ADDRS_bn2s2[d_align],
+        mutex_ids=None,
+        depth=2,
+    )
+
+
+def make_l0b_bn2s2():
+    """L0B（右矩阵），双缓冲。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[mem.ACC_COLS_bn2s2[d_align], CUBE_BASEN_bn2s2],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Right,
+            compact=1,
+        ),
+        addrs=mem.L0AB_ADDRS_bn2s2[d_align],
+        mutex_ids=mem.MTX_L0B_bn2s2[d_align],
+    )
+
+
+def make_l0c_acc_bn2s2():
+    return make_l0c_acc(True)
+
+
+# ==================================================================
+#  dK / dV 的常驻 L0C（IS_DKV_RESIDENT_L0C）
+# ==================================================================
+# 这些累加器要在同一 s2 块内跨 s1 轮次持续存在，访问方式是 current() 而非
+# next()，故每个 D 分块**各建一个独立的 tile_group**，不做成多槽位 group。
+def make_dk_l0c_chunk0_bn2s2():
+    return make_dk_l0c_chunk0(True)
+
+
+def make_dk_l0c_chunk1_bn2s2():
+    return make_dk_l0c_chunk1(True)
+
+
+# BN2 不切 D，直接用上面的 chunk0：它只编 d_align 64/128 两档，那两档
+# D_CHUNK_MAXW 与 D_PHYS_W 同为 128、D_NCHUNKS 为 1，与 chunk0 完全一致。
+
+
+# ==================================================================
+#  Vector 侧 UB（BN2GS1S2）
+# ==================================================================
+# `v1w` 是 V1 的列宽：一般等于 `dv_align`，768 档为 256。
+def make_wide_column_src_bn2s2(v1w):
+    # Reuse the retired Y/mask tile and its mutex. The wide Y slot is 32 KiB.
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[64, 128],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_Y_A_bn2s2[v1w]],
+        mutex_ids=mem.MTX_UB_Y_bn2s2,
+    )
+
+
+def make_y_ub_bn2s2(v1w):
+    """前向输出 y 的 UB（V1 的输入之一）。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, v1w],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_Y_A_bn2s2[v1w]],
+        mutex_ids=mem.MTX_UB_Y_bn2s2,
+    )
+
+
+def make_dy_ub_bn2s2(v1w):
+    """上游梯度 dO 的 UB（V1 的输入之一）。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, v1w],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_DY_A_bn2s2[v1w]],
+        mutex_ids=mem.MTX_UB_DY_bn2s2,
+    )
+
+
+def make_sfmg_ub_bn2s2(v1w, double_buffer=False):
+    """V3 的行输入；无 sink 的预取路径借用 sink_part 作为第二槽。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, 1],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            layout=pl.DN,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_SFMG_A_bn2s2[v1w], mem.UB_SINK_PART_A_bn2s2[v1w]]
+        if double_buffer
+        else [mem.UB_SFMG_A_bn2s2[v1w]],
+        mutex_ids=[mem.MTX_UB_SFMG_bn2s2[0], mem.MTX_UB_SINK_PART_bn2s2[0]]
+        if double_buffer
+        else mem.MTX_UB_SFMG_bn2s2,
+    )
+
+
+def make_lse_ub_bn2s2(v1w):
+    return make_lse_ub(v1w, True)
+
+
+def make_mask_view_bn2s2(v1w):
+    return make_mask_view(v1w, True)
+
+
+def make_mask_pre_view_bn2s2(v1w):
+    return make_mask_pre_view(v1w, True)
+
+
+# （曾有 make_ws_cast_f32_view / make_ws_cast_f16_view 为 d>=192 的"列末直出"
+# 消费提供借 y/dy 地址的别名 tile——随消费端撤回 post 全三段整体删除：
+# 跨核事件不保证 FIX 写 GM 对对端 MTE2 读的可见性（写穿透竞态），勿再引入。）
+
+
+# ==================================================================
+#  Vector 侧 UB（BN2）
+# ==================================================================
+# 与上面一组的差别只在**地址图**：BN2 没有 pre/post，整块 UB 可以另铺一套
+# (``BN2_UB_*``)；另外多一块 cast_ub 供 v5/v6 的 Muls+Cast 直出 GM。
+
+
+def make_cast_ub_bn2s2():
+    """换列写出的 16-bit 缓冲。地址跟当前 d_align 的主图，不借用 128 档的别名。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, mem.BN2_CAST_W_bn2s2],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+        ),
+        addrs=[mem.UB_CAST_A_bn2s2[d_align]],
+        mutex_ids=mem.MTX_UB_CAST_bn2s2,
+    )
+
+
+def make_sink_part_ub_bn2s2(v1w):
+    """dsink 单任务部分和：[1, VECTOR_BASEN] fp32，只写 lane 0。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[1, VECTOR_BASEN_bn2s2],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_SINK_PART_A_bn2s2[v1w]],
+        mutex_ids=mem.MTX_UB_SINK_PART_bn2s2,
+    )
+
+
+# ==================================================================
+#  pre / post —— 与主循环被 sync_all 完全隔开，故可整块借用 UB
+# ==================================================================
+
+
+# ==================================================================
+#  BN2S2 TND metadata 确定性：片上 buffer 声明
+# ==================================================================
+# 地址与 mutex 统一来自 fag_mem；保持普通列 UB 复用的原生命周期。
+
+
+def make_plan_zero_bn2s2(dtype):
+    # Static pre-enabled variants use32 KiB; their six pre DB slots start
+    # immediately above it. A full C/V barrier still separates the main loop.
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[1, mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg]],
+            dtype=dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[mem.UB_PRE_ZERO_bn2s2],
+        mutex_ids=mem.MTX_UB_ZERO_bn2s2,
+    )
+
+
+def _make_plan_post_column_bn2s2(cast_output=False):
+    """Compile-time resource policy; each call keeps its own view and cursor."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[
+                mem.PLAN_COLUMN_POST_ROWS_bn2s2[d_align * 1024 + dv_align],
+                mem.PLAN_COLUMN_WIDTH_bn2s2[d_align * 1024 + dv_align],
+            ],
+            dtype=input_dtype if cast_output else pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[
+            mem.POST_F16_ADDRS_bn2s2[d_align][0]
+            if cast_output
+            else mem.POST_F32_ADDRS_bn2s2[d_align][0]
+        ],
+        mutex_ids=[
+            mem.MTX_UB_POST_F16_bn2s2[0]
+            if cast_output
+            else mem.MTX_UB_POST_F32_bn2s2[0]
+        ],
+    )
+
+
+def make_plan_post_column_bn2s2():
+    return _make_plan_post_column_bn2s2(False)
+
+
+def make_plan_post_cast_bn2s2():
+    return _make_plan_post_column_bn2s2(True)
+
+
+def make_plan_column_f32_bn2s2(v1w):
+    column_mutex = mem.MTX_UB_Y_bn2s2
+    if d_align == 192 and dv_align == 128:
+        column_mutex = mem.PLAN_COLUMN_FULL_MUTEX_bn2s2
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[
+                mem.PLAN_COLUMN_ROWS_bn2s2[d_align * 1024 + dv_align],
+                mem.PLAN_COLUMN_WIDTH_bn2s2[d_align * 1024 + dv_align],
+            ],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[
+            mem.PLAN_COLUMN_MAIN_ADDR_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+        ],
+        mutex_ids=column_mutex,
+    )
+
+
+def make_plan_cast_bn2s2(v1w):
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[
+                mem.PLAN_COLUMN_CAST_ROWS_bn2s2[d_align * 1024 + dv_align],
+                mem.PLAN_COLUMN_WIDTH_bn2s2[d_align * 1024 + dv_align],
+            ],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[
+            mem.PLAN_MAIN_CAST_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+        ],
+        mutex_ids=mem.MTX_UB_CAST_bn2s2,
+    )
+
+
+def _make_plan_nzp_bn2s2(v1w, probability=False):
+    """Compile-time resource policy; each call keeps its own view and cursor."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[65, 128],
+            dtype=input_dtype,
+            layout=pl.NZ,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[
+            mem.PLAN_P_NZP_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+            if probability
+            else mem.PLAN_MAIN_NZP_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+        ],
+        mutex_ids=mem.PLAN_P_NZP_MUTEX_bn2s2[v1w]
+        if probability
+        else mem.MTX_UB_NZP_bn2s2,
+    )
+
+
+def make_plan_nzp_bn2s2(v1w):
+    # The VF uses a fixed 65-row fractal pitch. CompactMode::Null preserves
+    # that pitch when TINSERT copies fewer than 64 tail rows; RowPlusOne would
+    # incorrectly recompute it from ceil16(validRows)+1.
+    return _make_plan_nzp_bn2s2(v1w, False)
+
+
+def make_plan_acc_bn2s2():
+    # One unconditional declaration: branch-local tile returns cannot merge in
+    # the deployed parser, even when the predicate contains tiling-key fields.
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, mem.PLAN_ACC_WIDTH_bn2s2[d_align * 1024 + dv_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=PLAN_ACC_ADDRS_bn2s2[d_align * 1024 + dv_align],
+        mutex_ids=PLAN_ACC_MUTEX_bn2s2[d_align * 1024 + dv_align],
+    )
+
+
+def make_plan_dk0_bn2s2():
+    # Only the <=128 or 192/128 resident specialization consumes these groups.
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, mem.PLAN_DK0_WIDTH_bn2s2[d_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=[mem.PLAN_DK0_ADDR_bn2s2[d_align]],
+        mutex_ids=[mem.MTX_L0C_DK0_bn2s2[d_align]],
+    )
+
+
+def make_plan_dk1_bn2s2():
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, D_CHUNK_MAXW_bn2s2[d_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=[mem.L0C_DK1_ADDR_bn2s2[d_align]],
+        mutex_ids=[mem.MTX_L0C_DK1_bn2s2[d_align]],
+    )
+
+
+def make_plan_dv0_bn2s2():
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, mem.PLAN_DV0_WIDTH_bn2s2[d_align * 1024 + dv_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=[PLAN_DV0_ADDR_bn2s2[d_align * 1024 + dv_align]],
+        mutex_ids=[PLAN_DV0_MUTEX_bn2s2[d_align * 1024 + dv_align]],
+    )
+
+
+def make_plan_dv1_bn2s2():
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[128, D_CHUNK_MAXW_bn2s2[d_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=[PLAN_DV1_ADDR_bn2s2[d_align * 1024 + dv_align]],
+        mutex_ids=[PLAN_DV1_MUTEX_bn2s2[d_align * 1024 + dv_align]],
+    )
+
+
+def make_plan_presfmg_y_bn2s2():
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[
+                mem.PLAN_SFMG_PHYSICAL_ROWS_bn2s2[dv_align],
+                mem.PLAN_SFMG_WIDTH_bn2s2[dv_align],
+            ],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=mem.PLAN_SFMG_Y_ADDRS_bn2s2[dv_align],
+        mutex_ids=mem.PLAN_SFMG_Y_MUTEX_bn2s2,
+    )
+
+
+def make_plan_presfmg_dy_bn2s2():
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[
+                mem.PLAN_SFMG_PHYSICAL_ROWS_bn2s2[dv_align],
+                mem.PLAN_SFMG_WIDTH_bn2s2[dv_align],
+            ],
+            dtype=input_dtype,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=mem.PLAN_SFMG_DY_ADDRS_bn2s2[dv_align],
+        mutex_ids=mem.PLAN_SFMG_DY_MUTEX_bn2s2,
+    )
+
+
+def make_plan_presfmg_out_bn2s2():
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[mem.PLAN_SFMG_ROWS_bn2s2[dv_align], 1],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            layout=pl.DN,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=mem.PLAN_SFMG_OUT_ADDRS_bn2s2[dv_align],
+        mutex_ids=mem.PLAN_SFMG_OUT_MUTEX_bn2s2,
+    )
+
+
+def make_plan_presfmg_flat_bn2s2():
+    # Same physical bytes and IDs as DN output; both cursors must .next()
+    # together. Flat GM store uses [0, head * totalQ + token], without order.
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[1, mem.PLAN_SFMG_ROWS_bn2s2[dv_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=mem.PLAN_SFMG_OUT_ADDRS_bn2s2[dv_align],
+        mutex_ids=mem.PLAN_SFMG_OUT_MUTEX_bn2s2,
+    )
+
+
+def make_plan_sfmg_ub_bn2s2(v1w):
+    """softmaxGradFront 的按行结果 sfmg（V1 出、V3 入）。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, 1],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            layout=pl.DN,
+            compact=0,
+        ),
+        addrs=[
+            mem.PLAN_MAIN_SFMG_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+        ],
+        mutex_ids=mem.MTX_UB_SFMG_bn2s2,
+    )
+
+
+def make_plan_lse_ub_bn2s2(v1w):
+    """softmax_lse 的 UB，双槽 ping-pong。"""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, 1],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            layout=pl.DN,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[
+            mem.PLAN_MAIN_LSE0_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ],
+            mem.PLAN_MAIN_LSE1_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ],
+        ],
+        mutex_ids=mem.MTX_UB_LSE_bn2s2,
+    )
+
+
+def _make_plan_mask_view_bn2s2(v1w, forward_window=False):
+    """Compile-time resource policy; each call keeps its own view and cursor."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[VECTOR_BASEM_bn2s2, VECTOR_BASEN_bn2s2],
+            dtype=pl.DT_UINT8,
+            target_memory=pl.MemorySpace.Vec,
+            valid_shape=[-1, -1],
+            compact=0,
+        ),
+        addrs=[
+            mem.PLAN_MAIN_DY_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+            if forward_window
+            else mem.PLAN_MAIN_Y_bn2s2[
+                pre_sfmg * 16777216 + mask_mode * 1048576 + d_align * 1024 + dv_align
+            ]
+        ],
+        mutex_ids=mem.MTX_UB_DY_bn2s2 if forward_window else mem.MTX_UB_Y_bn2s2,
+    )
+
+
+def make_plan_mask_view_bn2s2(v1w):
+    """attenmask 的 UB 视图 —— **故意**与 y_ub 同址同 mutex。
+
+    v1 用完 y 之后 v2 才搬 mask，两者复用同一块 UB。"""
+    return _make_plan_mask_view_bn2s2(v1w, False)
+
+
+def make_plan_mask_pre_view_bn2s2(v1w):
+    """band mask 的第二块（前向窗口），与 dy_ub 同址同 mutex。"""
+    return _make_plan_mask_view_bn2s2(v1w, True)
+
+
+def make_plan_p_nzp_bn2s2(v1w):
+    # Match dS's fixed 65-row pitch, with an independent producer/last-reader ID.
+    return _make_plan_nzp_bn2s2(v1w, True)
+
+
+# Only ordinary BN2S2 calls these views; plan factories remain unchanged.
+def _make_normal_dv_l0c_bn2s2(second_chunk=False):
+    """Compile-time resource policy; every call creates its own original view."""
+    return pl.make_tile_group(
+        type=pl.TileType(
+            shape=[CUBE_BASEN_bn2s2, D_CHUNK_MAXW_bn2s2[d_align]],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Acc,
+            compact=1,
+        ),
+        addrs=[
+            mem.NORM_DV1_ADDR_bn2s2[d_align]
+            if second_chunk
+            else mem.NORM_DV0_ADDR_bn2s2[d_align]
+        ],
+        mutex_ids=[
+            mem.NORM_DV1_MUTEX_bn2s2[d_align]
+            if second_chunk
+            else mem.NORM_DV0_MUTEX_bn2s2[d_align]
+        ],
+    )
+
+
+def make_bn2s2_norm_dv_l0c_chunk0_bn2s2():
+    """dV 第 0 个 D 分块的常驻 L0C。"""
+    return _make_normal_dv_l0c_bn2s2(False)
+
+
+def make_bn2s2_norm_dv_l0c_chunk1_bn2s2():
+    """dV 第 1 个 D 分块的常驻 L0C。见 :func:`make_dk_l0c_chunk1`。"""
+    return _make_normal_dv_l0c_bn2s2(True)
+
+
+def make_normal_nzp_bn2s2(v1w):
+    return _make_score_nzp(v1w, False, True)
+
+
+def make_normal_p_nzp_bn2s2(v1w):
+    return _make_score_nzp(v1w, True, True)

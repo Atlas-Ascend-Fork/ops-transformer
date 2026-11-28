@@ -17,6 +17,7 @@
 #include "flash_attn_grad_tiling_swizzle.h"
 #include "flash_attn_grad_tiling_workspace.h"
 #include "log/log.h"
+#include <limits>
 
 namespace optiling {
 namespace {
@@ -33,8 +34,8 @@ constexpr int64_t FAG_PRESFMG_MIN_BLOCK_NUM = 1024;
 //
 // FAG 的映射与差异（均为输入域差异，不是判据放宽）：
 //   * 只有 fp16/bf16，没有 fp8 分支；也没有 dropout 输入，dropout 子句恒真。
-//   * splitAxis：FAG 只有 BN2GS1S2 对应 fasg 的 BN2GS1S2；BN2/BN2MultiBlk 对应
-//     fasg 的 BN2，不启用（FAG 无 BN2S2 路径）。
+//   * splitAxis: BN2GS1S2 and ordinary BN2S2 share this runtime gate;
+//     metadata-backed deterministic BN2S2 retains its WJF static-key gate.
 //   * d 用 Dv：sfmg 的归约宽度是 value dim；fasg 的判据用 d 是以 d==d1 为前提，
 //     而 FAG 允许 D=192/Dv=128，故取实际 Dv。
 //   * sValueZeroUnderTND：fasg 用于保护其按 (b,n,s) 逐批推进的索引；FAG 的 pre
@@ -45,7 +46,7 @@ constexpr int64_t FAG_PRESFMG_MIN_BLOCK_NUM = 1024;
 //     小 S2 且块数多时前移收益不抵开销，改回主循环内联重算。
 bool DecidePreSfmg(const FagParsedInfo& info, const FagKernelPlan& kernel, const FagSchedulePlan& schedule)
 {
-    if (kernel.tmpl != TMPL_BN2GS1S2) {
+    if (kernel.tmpl != TMPL_BN2GS1S2 && kernel.tmpl != TMPL_BN2S2) {
         return false;
     }
     if (info.hasSinks) {
@@ -54,8 +55,10 @@ bool DecidePreSfmg(const FagParsedInfo& info, const FagKernelPlan& kernel, const
     if (info.dv <= 64 || info.dv > MAX_HEAD_DIM || kernel.dvAlign < 128) {
         return false;
     }
+    const int64_t smallWorkWidth =
+        kernel.tmpl == TMPL_BN2S2 ? fag_deter::PreSfmgSmallWorkWidth(info.deterConfig.schedule.route) : info.dv;
     const bool smallShapeNotWorth =
-        info.dv <= 128 && info.s2 <= 256 && info.b * info.n1 * schedule.s1Outer >= FAG_PRESFMG_MIN_BLOCK_NUM;
+        smallWorkWidth <= 128 && info.s2 <= 256 && info.b * info.n1 * schedule.s1Outer >= FAG_PRESFMG_MIN_BLOCK_NUM;
     return !smallShapeNotWorth;
 }
 
@@ -77,16 +80,28 @@ ge::graphStatus BuildTilingPlan(gert::TilingContext* context, const FagParsedInf
         return ret;
     }
 
-    DecideSwizzle(info, plan.kernel, plan.schedule, trace);
-
-    // sfmg 前移门（对齐 fasg enablePreSfmg）：与 swizzle 无关，只依赖
-    // 已完成的路由（template/isBn2MultiBlk）与 schedule（s1Outer）。
-    plan.kernel.enablePreSfmg = DecidePreSfmg(info, plan.kernel, plan.schedule) ? 1 : 0;
-
-    DecideNzOut(info, plan.kernel, trace);
-    OP_CHECK_IF(!BuildWorkspacePlan(info, plan.kernel, plan.workspace),
-                OP_LOGE(context->GetNodeName(), "workspace dimensions exceed the addressable range."),
-                return ge::GRAPH_PARAM_INVALID);
+    if (info.useDeterPlan) {
+        const auto userBytes = info.deterWorkspaceBytes;
+        OP_CHECK_IF(plan.kernel.tmpl != TMPL_BN2S2 || userBytes <= 0 ||
+                        info.libapiWorkspaceSize > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) ||
+                        static_cast<uint64_t>(userBytes) >
+                            static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) - info.libapiWorkspaceSize,
+                    OP_LOGE(context->GetNodeName(), "Invalid deterministic plan family/workspace."),
+                    return ge::GRAPH_PARAM_INVALID);
+        // ASC chooses its final swizzle on device lengths. This stays runtime
+        // plan data inside the single compiled BN2S2+deter family.
+        plan.schedule.swizzle = 0;
+        trace.swizzleReject = "runtime-plan";
+        plan.workspace.libapiSize = info.libapiWorkspaceSize;
+        plan.workspace.totalSize = static_cast<size_t>(userBytes) + info.libapiWorkspaceSize;
+    } else {
+        DecideSwizzle(info, plan.kernel, plan.schedule, trace);
+        plan.kernel.enablePreSfmg = DecidePreSfmg(info, plan.kernel, plan.schedule) ? 1 : 0;
+        DecideNzOut(info, plan.kernel, trace);
+        OP_CHECK_IF(!BuildWorkspacePlan(info, plan.kernel, plan.workspace),
+                    OP_LOGE(context->GetNodeName(), "workspace dimensions exceed the addressable range."),
+                    return ge::GRAPH_PARAM_INVALID);
+    }
     plan.tilingKey = EncodeTilingKey(info, plan.kernel, plan.schedule);
     return ge::GRAPH_SUCCESS;
 }

@@ -17,6 +17,9 @@
 #include <set>
 #include <vector>
 
+#include "flash_attn_grad_block_outer.h"
+#include "flash_attn_grad_sparse.h"
+
 namespace optiling {
 namespace {
 constexpr int64_t CUBE_BASE = 128;
@@ -124,6 +127,13 @@ void DecideSwizzle(const FagParsedInfo& info, const FagKernelPlan& kernel, FagSc
         }
         return;
     }
+    if (kernel.tmpl == TMPL_BN2S2 && info.isTnd) {
+        // Runtime metadata knows the final split, actual lengths and load. A
+        // swizzle-capable key still checks every ASC admission predicate there.
+        schedule.swizzle = info.l2CacheSize > 0 && info.b > 0 && info.b < 129 ? 1 : 0;
+        trace.swizzleReject = schedule.swizzle ? "runtime-tnd-bn2s2" : "tnd-bn2s2-bound";
+        return;
+    }
     if (kernel.tmpl != TMPL_BN2GS1S2) {
         trace.swizzleReject = "not-bn2gs1s2";
         return;
@@ -175,7 +185,7 @@ void DecideSwizzle(const FagParsedInfo& info, const FagKernelPlan& kernel, FagSc
     // Equal-length TND only uses the ordinary mapping; storage/LSE stay TND.
     if (!info.isTnd && normalDense && info.s1 >= 32768 && info.s2 >= 32768) {
         schedule.normalSwizzleKind = 1;
-    } else if (!info.isTnd && info.sparseType == FAG_SPARSE_TYPE_CASUAL && info.s1 == info.s2 && info.s1 >= 32768) {
+    } else if (!info.isTnd && info.sparseType == FAG_SPARSE_TYPE_CAUSAL && info.s1 == info.s2 && info.s1 >= 32768) {
         schedule.normalSwizzleKind = 2;
     }
     if (schedule.usedCube != info.aicNum || schedule.normalBlockOuter != cores) {

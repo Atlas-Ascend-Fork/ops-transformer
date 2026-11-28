@@ -16,7 +16,8 @@
 namespace optiling {
 
 // Selection happens after the existing route. NZ output never reroutes BN2.
-// It is independent of swizzle and preserves the deterministic schedule.
+// Fixed-length deterministic GS requires the original swizzle admission.
+// The selected deterministic schedule itself is preserved.
 bool NzOutFeasible(const FagParsedInfo& info, const FagKernelPlan& kernel);
 bool PreferNzOut(const FagParsedInfo& info);
 void DecideNzOut(const FagParsedInfo& info, FagKernelPlan& kernel, FagRouteTrace& trace);

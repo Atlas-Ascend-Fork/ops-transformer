@@ -12,7 +12,7 @@ preload3 / preload2 GS1S2 normal，以及隔离后的 BN2。循环里不再判�
 ``taskId`` / ``denseCursor`` / drain 仍是循环本地标量。
 """
 
-import inspect
+from pipeline.fag_bindings import bind_codegen_helpers as _bind_codegen_helpers
 import os
 
 import pypto_pro.language as pl
@@ -37,25 +37,25 @@ _PINGPONG_LISTS = frozenset(
         "SYNC_C2_TO_V2_FLAG",
         "SYNC_V2_TO_C1_FLAG",
         "SYNC_V2_TO_C2_FLAG",
+        "SYNC_C1_TO_V2_FLAG_bn2s2",
+        "SYNC_C2_TO_V2_FLAG_bn2s2",
+        "SYNC_V2_TO_C1_FLAG_bn2s2",
+        "SYNC_V2_TO_C2_FLAG_bn2s2",
+        "SYNC_C4_TO_V6_PP_FLAG_bn2s2",
+        "SYNC_DKV_RELEASE_PP_FLAG_bn2s2",
+        "WIDE_DK_READY_bn2s2",
+        "WIDE_DV_READY_bn2s2",
+        "WIDE_KV_READ_DONE_bn2s2",
     }
 )
 
 
 def _bind_helpers():
-    g = globals()
-    for mod in (
-        fag_block_cube,
-        fag_block_vec,
-        fag_buffers,
-        fag_common,
-        fag_schedule,
-    ):
-        for name, val in vars(mod).items():
-            if name.startswith("_") or inspect.ismodule(val):
-                continue
-            if isinstance(val, list) and name not in _PINGPONG_LISTS:
-                continue
-            g[name] = val
+    _bind_codegen_helpers(
+        globals(),
+        (fag_block_cube, fag_block_vec, fag_buffers, fag_common, fag_schedule),
+        _PINGPONG_LISTS,
+    )
 
 
 _bind_helpers()
@@ -2491,7 +2491,7 @@ def _run_preload2_vector_bn2(
                         ws_load_ub.current(),
                         ws_cast_ub.current(),
                         vecInfo.idx0Q,
-                        vecInfo.queryOffset + subIdx * VECTOR_BASEM,
+                        vecInfo.queryOffset + subIdx * vecInfo.firstHalfS1RealSize,
                         vecInfo.idx2Q,
                         vecInfo.halfS1RealSize,
                         constInfo.scaleValue,
@@ -2545,18 +2545,31 @@ def _run_preload2_vector_bn2(
                         pl.system.wait_cross_core(
                             pipe=pl.PipeType.MTE2, event_id=SYNC_C4_TO_V6_FLAG
                         )
+                        kvHalf = VECTOR_BASEM
+                        if (
+                            template == Tmpl.BN2
+                            and d_align == 256
+                            and dv_align == 256
+                            and is_bn2_multiblk == 0
+                            and deter == 0
+                            and mask_mode == 0
+                            and sink == 0
+                            and swizzle == 0
+                            and nz_out == 0
+                        ):
+                            kvHalf = vecInfo.firstHalfS2RealSize
                         muls_cast_ws_out(
                             tensor_dk_out,
                             tensor_dk_ws,
                             ws_load_ub.current(),
                             ws_cast_ub.current(),
                             vecInfo.idx0KV,
-                            vecInfo.keyOffset + subIdx * VECTOR_BASEM,
+                            vecInfo.keyOffset + subIdx * kvHalf,
                             vecInfo.idx2KV,
                             pl.max(
                                 pl.min(
-                                    vecInfo.s2RealSize - subIdx * VECTOR_BASEM,
-                                    VECTOR_BASEM,
+                                    vecInfo.s2RealSize - subIdx * kvHalf,
+                                    kvHalf,
                                 ),
                                 0,
                             ),
@@ -2836,6 +2849,1666 @@ def _run_preload2_vector_gs_normal(
                     )
                     pl.system.wait_cross_core(
                         pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG
+                    )
+                break
+        if gIdx >= 0:
+            taskId = taskId + 1
+            localIdx = localIdx + 1
+        else:
+            if isLastLoop == 1:
+                taskId = taskId + 1
+                localIdx = localIdx + 1
+
+
+# BN2S2 entry/pipeline: separate resource and synchronization semantics.
+
+
+def normal_score_pair_bn2s2(
+    constInfo,
+    curInfo,
+    gm,
+    q_cur,
+    do_cur,
+    k_l1,
+    v_l1,
+    left,
+    right,
+    acc,
+    mm1_cur,
+    mm2_cur,
+    taskId,
+    qdo_preloaded=False,
+):
+    """Shared actual-M score/preload chain; C1=dYV and C2=QK.
+
+    D192/Dv128 callers must pair the phased scores with plan L0C resources
+    and normal_full_dq_bn2s2. K writer/reader rings advance separately.
+    """
+    if d_align < 512:
+        if curInfo.loadKV == 1:
+            k_l1.next()
+        if qdo_preloaded:
+            # The reader view shares storage and mutexes, but has its own valid shape.
+            pl.set_validshape(q_cur, [curInfo.s1RealSize, constInfo.dSize])
+            pl.set_validshape(do_cur, [curInfo.s1RealSize, constInfo.dvSize])
+        else:
+            prefetch_qdo_l1(
+                constInfo, curInfo, gm.tensor_q, gm.tensor_dy, q_cur, do_cur
+            )
+        prefetch_normal_kv_bn2s2(
+            constInfo, curInfo, gm.tensor_k, gm.tensor_v, k_l1.current(), v_l1.current()
+        )
+    iterate_normal_score_qk_bn2s2(
+        constInfo,
+        curInfo,
+        gm.tensor_q,
+        gm.tensor_k,
+        q_cur,
+        k_l1,
+        left,
+        right,
+        acc,
+        mm2_cur,
+        curInfo.loadKV,
+    )
+    pl.system.set_cross_core(
+        pipe=pl.PipeType.FIX, event_id=SYNC_C2_TO_V2_FLAG_bn2s2[taskId % 2]
+    )
+    iterate_normal_score_dyv_bn2s2(
+        constInfo,
+        curInfo,
+        gm.tensor_dy,
+        gm.tensor_v,
+        do_cur,
+        v_l1,
+        left,
+        right,
+        acc,
+        mm1_cur,
+        curInfo.loadKV,
+    )
+    pl.system.set_cross_core(
+        pipe=pl.PipeType.FIX, event_id=SYNC_C1_TO_V2_FLAG_bn2s2[taskId % 2]
+    )
+
+
+def next_normal_score_bn2s2(ci, sched, sw, cursor, batch_cursor):
+    if sw.active == 1:
+        index = next_normal_swizzle_bn2s2(
+            sched.meta, ci, sw, sched.cBlockIdx, sched.cuQ, sched.cuKv
+        )
+        next_cursor = sw.loop
+    else:
+        index, next_cursor = bn2s2_next_bn2s2(
+            ci,
+            cursor,
+            sched.blockEnd,
+            sched.cuQ,
+            sched.cuKv,
+            sched.usedQ,
+            sched.usedKv,
+            batch_cursor,
+        )
+    return index, next_cursor
+
+
+def next_fallback_score_bn2s2(ci, sched, cursor, batch_cursor, task):
+    return fetch_work_gidx_bn2s2(
+        ci,
+        sched.meta,
+        sched.fagOff,
+        sched.cBlockIdx,
+        sched.coreNum,
+        sched.blockStart,
+        sched.blockEnd,
+        task,
+        cursor,
+        sched.numBlocks,
+        0,
+        sched.cuQ,
+        sched.cuKv,
+        sched.usedQ,
+        sched.usedKv,
+        batch_cursor,
+    )
+
+
+def prefetch_normal_task_bn2s2(
+    ci, sched, gm, infos, task, index, batch_cursor, qw, dyw
+):
+    if index >= 0:
+        info = infos[task % 3]
+        set_normal_bn2s2_run_info_bn2s2(
+            ci,
+            info,
+            task,
+            index,
+            0,
+            task,
+            sched.cuQ,
+            sched.cuKv,
+            sched.usedQ,
+            sched.usedKv,
+            batch_cursor,
+        )
+        apply_l0c_s2_bn2s2(ci, infos, info, task, 3)
+        prefetch_qdo_l1(ci, info, gm.tensor_q, gm.tensor_dy, qw.next(), dyw.next())
+
+
+def _run_preload2_cube_bn2s2(constInfo, sched, gm, buf, runInfos):
+    if (
+        d_align == 512
+        and dv_align == 512
+        and layout == 1
+        and deter == 0
+        and mask_mode == 3
+    ):
+        if (
+            constInfo.wideKvSlots == 1
+            and constInfo.dSize > 256
+            and constInfo.dSize <= 384
+            and constInfo.dvSize > 256
+            and constInfo.dvSize <= 384
+        ):
+            run_normal_cube_body_bn2s2(constInfo, sched, gm, buf, runInfos, True)
+        else:
+            run_normal_cube_body_bn2s2(constInfo, sched, gm, buf, runInfos, False)
+    else:
+        run_normal_cube_body_bn2s2(constInfo, sched, gm, buf, runInfos, False)
+
+
+def run_normal_cube_body_bn2s2(constInfo, sched, gm, buf, runInfos, full_width):
+    cBlockIdx = sched.cBlockIdx
+    coreNum = sched.coreNum
+    blockStart = sched.blockStart
+    blockEnd = sched.blockEnd
+    cuQ = sched.cuQ
+    cuKv = sched.cuKv
+    usedQ = sched.usedQ
+    usedKv = sched.usedKv
+    tensor_q = gm.tensor_q
+    tensor_k = gm.tensor_k
+    tensor_k_nt = gm.tensor_k_nt
+    tensor_dy = gm.tensor_dy
+    tensor_v = gm.tensor_v
+    tensor_dq_ws = gm.tensor_dq_ws
+    tensor_dv_out = gm.tensor_dv_out
+    # 192/256 档的 dk/dv ws 段（仅 TND 二进制消费；dense/直出档由派发段的
+    # 哑元占位，未走分支不 trace）。
+    tensor_dk_ws = gm.tensor_dk_ws
+    tensor_dv_ws = gm.tensor_dv_ws
+    mm1_res = buf.mm1_res
+    mm2_res = buf.mm2_res
+    q_l1 = buf.q_l1
+    k_l1 = buf.k_l1
+    k_l1_n = buf.k_l1_n
+    if d_align < 512:
+        k_l1 = make_plan_k_l1_bn2s2()
+        k_l1_n = make_plan_k_normal_l1_bn2s2()
+    v_l1 = buf.v_l1
+    do_l1 = buf.do_l1
+    left = buf.left
+    right = buf.right
+    acc = buf.acc
+    dk_acc = buf.dk_acc
+    dv_acc = buf.dv_acc
+    left_read = left
+    if d_align == 64 and dv_align == 64:
+        acc = make_plan_acc_bn2s2()
+        dk_acc = make_plan_dk0_bn2s2()
+        dv_acc = make_plan_dv0_bn2s2()
+    if d_align == 192 and dv_align == 128:
+        acc = make_plan_acc_bn2s2()
+        dk_acc = make_plan_dk0_bn2s2()
+        dv_acc = make_plan_dv0_bn2s2()
+        left_read = make_wide_l0a_reader_bn2s2()
+    if d_align >= 256:
+        left_read = make_wide_l0a_reader_bn2s2()
+    if full_width:
+        scratch = make_normal_384_operand_bn2s2(False, False)
+        scratch_read = make_normal_384_operand_bn2s2(False, True)
+        v_write = make_normal_384_operand_bn2s2(True, False)
+        v_read = make_normal_384_operand_bn2s2(True, True)
+        k_write = make_normal_384_k_bn2s2(True, False)
+        k_score = make_normal_384_k_bn2s2(True, True)
+        k_grad = make_normal_384_k_bn2s2(False, True)
+        grad_acc = make_normal_384_grad_acc_bn2s2()
+        score_k_slot = pl.astype(1, pl.DT_INT64)
+        grad_k_slot = pl.astype(1, pl.DT_INT64)
+    # 192 档真两块；64/128 档 chunk1 同址别名 chunk0，未用即剪。
+    dk_acc1 = buf.dk_acc1
+    dv_acc1 = buf.dv_acc1
+    ds_l1 = buf.ds_l1
+    ds_t_l1 = buf.ds_t_l1
+    p_t_l1 = buf.p_t_l1
+    taskId = 0
+    localIdx = 0
+    cursor = blockStart
+    isLastLoop = 0
+    drainDone = 0
+    needSync = 0
+    slotInUse = 0
+    if full_width:
+        columnBank = pl.astype(0, pl.DT_INT64)
+        closedColumns = pl.astype(0, pl.DT_INT64)
+    # TND 复用：非确定变长解码需要 per-core batch cursor（dense 二进制不消费）。
+    batchCursor = init_tnd_batch_cursor()
+    normalSwizzle = make_normal_swizzle_bn2s2(sched.meta, constInfo)
+    currentIndex = pl.const(-1, pl.DT_INT64)
+    if d_align <= 192:
+        # Q/dY has at least three L1 slots: one for the next score, one for
+        # the current score and one for the preceding task's gradients.
+        q_writer = make_q_l1(True)
+        dy_writer = make_do_l1(True)
+        currentIndex, cursor = next_normal_score_bn2s2(
+            constInfo, sched, normalSwizzle, cursor, batchCursor
+        )
+        prefetch_normal_task_bn2s2(
+            constInfo,
+            sched,
+            gm,
+            runInfos,
+            0,
+            currentIndex,
+            batchCursor,
+            q_writer,
+            dy_writer,
+        )
+    while True:
+        gIdx = pl.const(-1, pl.DT_INT64)
+        if d_align <= 192:
+            gIdx = currentIndex
+            if gIdx >= 0:
+                currentIndex, cursor = next_normal_score_bn2s2(
+                    constInfo, sched, normalSwizzle, cursor, batchCursor
+                )
+                prefetch_normal_task_bn2s2(
+                    constInfo,
+                    sched,
+                    gm,
+                    runInfos,
+                    taskId + 1,
+                    currentIndex,
+                    batchCursor,
+                    q_writer,
+                    dy_writer,
+                )
+            else:
+                isLastLoop = 1
+        else:
+            gIdx, cursor = next_normal_score_bn2s2(
+                constInfo, sched, normalSwizzle, cursor, batchCursor
+            )
+            if gIdx < 0:
+                isLastLoop = 1
+        mm2_cur = mm2_res.next()
+        mm1_cur = mm1_res.next()
+        q_cur = q_l1.next()
+        do_cur = do_l1.next()
+        if gIdx >= 0:
+            if needSync == 1:
+                pl.system.wait_cross_core(
+                    pipe=pl.PipeType.FIX, event_id=SYNC_DETER_FIX_FLAG_bn2s2
+                )
+                needSync = 0
+            if d_align <= 192:
+                curInfo = runInfos[taskId % 3]
+            else:
+                curInfo = runInfos[taskId % 2]
+                set_normal_bn2s2_run_info_bn2s2(
+                    constInfo,
+                    curInfo,
+                    taskId,
+                    gIdx,
+                    0,
+                    localIdx,
+                    cuQ,
+                    cuKv,
+                    usedQ,
+                    usedKv,
+                    batchCursor,
+                )
+                apply_l0c_s2_bn2s2(constInfo, runInfos, curInfo, taskId, 2)
+            if full_width:
+                if curInfo.loadKV == 1:
+                    score_k_slot = 1 - score_k_slot
+                normal_384_score_pair_bn2s2(
+                    constInfo,
+                    curInfo,
+                    gm,
+                    scratch,
+                    scratch_read,
+                    k_write,
+                    k_score,
+                    v_write,
+                    v_read,
+                    score_k_slot,
+                    left,
+                    right,
+                    acc[0],
+                    mm1_cur,
+                    mm2_cur,
+                    taskId,
+                )
+            else:
+                normal_score_pair_bn2s2(
+                    constInfo,
+                    curInfo,
+                    gm,
+                    q_cur,
+                    do_cur,
+                    k_l1,
+                    v_l1,
+                    left,
+                    right,
+                    acc,
+                    mm1_cur,
+                    mm2_cur,
+                    taskId,
+                    d_align <= 192,
+                )
+        doFix = 0
+        fixInfo = runInfos[0]
+        q_fix = q_cur
+        do_fix = do_cur
+        if taskId > 0:
+            doFix = 1
+            if d_align <= 192:
+                fixInfo = runInfos[(taskId + 2) % 3]
+            else:
+                fixInfo = runInfos[(taskId + 1) % 2]
+            q_fix = q_l1.previous()
+            do_fix = do_l1.previous()
+        if doFix == 1:
+            mm1_prev = mm1_res.previous()
+            mm2_prev = mm2_res.previous()
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_V4_TO_C5_FLAG_bn2s2
+            )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_V3_TO_C3_FLAG_bn2s2
+            )
+            if d_align < 512:
+                if fixInfo.loadKV == 1:
+                    k_l1_n.next()
+            if full_width:
+                if fixInfo.loadKV == 1:
+                    grad_k_slot = 1 - grad_k_slot
+                normal_384_dq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    ds_l1.current(),
+                    k_grad,
+                    grad_k_slot,
+                    tensor_dq_ws,
+                    left,
+                    left_read,
+                    right,
+                    grad_acc[0],
+                )
+            elif d_align == 192 and dv_align == 128:
+                normal_full_dq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    tensor_dq_ws,
+                    ds_l1.current(),
+                    k_l1_n,
+                    left,
+                    right,
+                    acc,
+                    left_read,
+                )
+            else:
+                iterate_mm_dsk_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    tensor_k_nt,
+                    tensor_dq_ws,
+                    fixInfo.loadKV,
+                    ds_l1.current(),
+                    k_l1_n,
+                    left,
+                    right,
+                    acc,
+                    mm1_prev,
+                    cBlockIdx,
+                    d_align < 512,
+                    left_read,
+                )
+            # C4 dK / C5 dV：列内 L0C 累加（dkvAcc），列末按 d_align 分档写出，
+            # C4/C5 分档写出：
+            #   <=128 直出（dK 经 mm2 槽走 v6 Muls+Cast、dV 直接 store）；
+            #   ==192 双列末 flush 进 dk/dv ws 段（AtomicAdd）；==256 dV 驻留
+            #   列末 flush 而 dK 逐 task 原子进 ws；==512/768 双逐 task 原子进
+            #   ws——>=192 档的消费端统一为 post 全三段（对齐老仓的 sync_all
+            #   后收尾；列末事件粒度的跨核 GM 读有写穿透竞态，已撤回，
+            #   详见 fag_kernel.py 的 doKvPost）。
+            # 192+ 仅 TND 可达（dense 无 dk/dv ws 段、is_valid 限 64/128），
+            # 未走分支不 trace，ws 张量名字在 dense 二进制里由哑元占位解析。
+            if d_align <= 128:
+                iterate_mm_dsq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    dk_acc,
+                    dk_acc,
+                    fixInfo.dkvAcc,
+                )
+                iterate_mm_pdy_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    dv_acc,
+                    dv_acc,
+                    fixInfo.dkvAcc,
+                )
+                if fixInfo.flushDkv == 1:
+                    pl.set_validshape(
+                        mm2_prev, [VECTOR_BASEM_bn2s2, VECTOR_BASEN_bn2s2]
+                    )
+                    pl.move(
+                        mm2_prev,
+                        dk_acc.current(),
+                        acc_to_vec_mode=pl.AccToVecMode.DualModeSplitM,
+                        phase=pl.STPhase.Final,
+                    )
+                    pl.system.set_cross_core(
+                        pipe=pl.PipeType.FIX, event_id=SYNC_C4_TO_V6_FLAG_bn2s2
+                    )
+                    pl.store(
+                        tensor_dv_out,
+                        dv_acc.current(),
+                        [fixInfo.idx0KV, fixInfo.keyOffset, fixInfo.idx2KV, 0],
+                        order=[1, 3],
+                        atomic=pl.AtomicType.AtomicNone,
+                        phase=pl.STPhase.Final,
+                    )
+                    needSync = 1
+            elif d_align == 192 and dv_align == 128:
+                normal_resident_full_held_bn2s2(
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    dk_acc.current(),
+                    tensor_dk_ws,
+                    constInfo.dSize,
+                    192,
+                    left_read,
+                    constInfo.completeKvOwner,
+                    tensor_dk_ws,
+                    True,
+                )
+                normal_resident_full_held_bn2s2(
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    dv_acc.current(),
+                    tensor_dv_ws,
+                    constInfo.dvSize,
+                    128,
+                    left_read,
+                    constInfo.completeKvOwner,
+                    tensor_dv_out,
+                    True,
+                )
+            elif d_align == 192:
+                iterate_mm_dsq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    dk_acc,
+                    dk_acc1,
+                    fixInfo.dkvAcc,
+                )
+                iterate_mm_pdy_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    dv_acc,
+                    dv_acc1,
+                    fixInfo.dkvAcc,
+                )
+                if fixInfo.flushDkv == 1:
+                    flush_owned_dk_bn2s2(
+                        constInfo,
+                        fixInfo,
+                        tensor_dk_ws,
+                        dk_acc,
+                        dk_acc1,
+                        constInfo.completeKvOwner,
+                        tensor_dk_ws,
+                        True,
+                    )
+                    flush_owned_dv_bn2s2(
+                        constInfo,
+                        fixInfo,
+                        tensor_dv_ws,
+                        dv_acc,
+                        dv_acc1,
+                        constInfo.completeKvOwner,
+                        tensor_dv_out,
+                        True,
+                    )
+            elif full_width or (d_align >= 256 and constInfo.wideKvSlots == 1):
+                offset = cBlockIdx * 128 * d_align
+                if full_width:
+                    # A column can span several tasks. Acquire its bank once,
+                    # before the first non-atomic write, never during accumulation.
+                    if (
+                        fixInfo.dkvAcc == 0
+                        and closedColumns >= 1 + constInfo.wideKvDoubleBuffer
+                    ):
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.FIX,
+                            event_id=WIDE_KV_READ_DONE_bn2s2[columnBank],
+                        )
+                    offset = offset + columnBank * coreNum * 128 * d_align
+                else:
+                    if slotInUse == 1:
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.FIX, event_id=SYNC_DETER_FIX_FLAG_bn2s2
+                        )
+                        slotInUse = 0
+                strideK = (constInfo.dSize + 15) // 16 * 16
+                strideV = (constInfo.dvSize + 15) // 16 * 16
+                sk = pl.make_tensor(
+                    pl.addptr(gm.dk_slot_base, offset),
+                    [1, 128, 1, constInfo.dSize],
+                    [128 * strideK, strideK, strideK, 1],
+                    dtype=pl.DT_FP32,
+                )
+                sv = pl.make_tensor(
+                    pl.addptr(gm.dv_slot_base, offset),
+                    [1, 128, 1, constInfo.dvSize],
+                    [128 * strideV, strideV, strideV, 1],
+                    dtype=pl.DT_FP32,
+                )
+                qIdx = [fixInfo.idx0Q, fixInfo.queryOffset, fixInfo.idx2Q]
+                if full_width:
+                    normal_384_slot_gradient_bn2s2(
+                        fixInfo,
+                        ds_t_l1.current(),
+                        tensor_q,
+                        constInfo.dSize,
+                        scratch[0],
+                        scratch_read[0],
+                        sk,
+                        left,
+                        left_read,
+                        right,
+                        grad_acc[0],
+                    )
+                    # dQ and dK have copied dS to L0A. Vec3 can refill its L1 slot during dV.
+                    pl.system.set_cross_core(
+                        pipe=pl.PipeType.MTE1, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+                    )
+                else:
+                    iterate_normal_n_left_reuse_bn2s2(
+                        ds_t_l1.current(),
+                        q_fix,
+                        left,
+                        left_read,
+                        right,
+                        acc,
+                        sk,
+                        [0, 0, 0],
+                        fixInfo.s2RealSize,
+                        fixInfo.s1RealSize,
+                        constInfo.dSize,
+                        tensor_q,
+                        qIdx,
+                        fixInfo.dkvAcc == 0,
+                    )
+                if fixInfo.flushDkv == 1:
+                    if full_width:
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.FIX,
+                            event_id=WIDE_DK_READY_bn2s2[columnBank],
+                        )
+                    else:
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.FIX, event_id=SYNC_C4_TO_V6_FLAG_bn2s2
+                        )
+                if full_width:
+                    normal_384_slot_gradient_bn2s2(
+                        fixInfo,
+                        p_t_l1.current(),
+                        tensor_dy,
+                        constInfo.dvSize,
+                        scratch[0],
+                        scratch_read[0],
+                        sv,
+                        left,
+                        left_read,
+                        right,
+                        grad_acc[0],
+                    )
+                elif d_align == 256:
+                    iterate_normal_n_left_reuse_l0c_bn2s2(
+                        p_t_l1.current(),
+                        do_fix,
+                        left,
+                        left_read,
+                        right,
+                        dv_acc,
+                        dv_acc1,
+                        fixInfo.dkvAcc,
+                        fixInfo.s2RealSize,
+                        fixInfo.s1RealSize,
+                        constInfo.dvSize,
+                        fixInfo.flushDkv,
+                    )
+                    if fixInfo.flushDkv == 1:
+                        pl.store(
+                            sv,
+                            dv_acc.current(),
+                            [0, 0, 0, 0],
+                            order=[1, 3],
+                            atomic=pl.AtomicType.AtomicNone,
+                            phase=pl.STPhase.Final,
+                        )
+                        if dv_chunk_valid(constInfo, 1, True) > 0:
+                            pl.store(
+                                sv,
+                                dv_acc1.current(),
+                                [0, 0, 0, D_CHUNK_OFF1_bn2s2[d_align]],
+                                order=[1, 3],
+                                atomic=pl.AtomicType.AtomicNone,
+                                phase=pl.STPhase.Final,
+                            )
+                else:
+                    iterate_normal_n_left_reuse_bn2s2(
+                        p_t_l1.current(),
+                        do_fix,
+                        left,
+                        left_read,
+                        right,
+                        acc,
+                        sv,
+                        [0, 0, 0],
+                        fixInfo.s2RealSize,
+                        fixInfo.s1RealSize,
+                        constInfo.dvSize,
+                        tensor_dy,
+                        qIdx,
+                        fixInfo.dkvAcc == 0,
+                    )
+                if fixInfo.flushDkv == 1:
+                    if full_width:
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.FIX,
+                            event_id=WIDE_DV_READY_bn2s2[columnBank],
+                        )
+                        columnBank = (1 - columnBank) * constInfo.wideKvDoubleBuffer
+                        closedColumns = closedColumns + 1
+                    else:
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.FIX, event_id=SYNC_C3_TO_V5_FLAG_bn2s2
+                        )
+                        slotInUse = 1
+            elif d_align == 256:
+                # 256：dK 逐 task 原子进 ws（不驻留）；dV L0C 双分块驻留、列内
+                # 累加、列末 flush 进 ws（老仓 isDvL0CResidentForD192ToD256 的
+                # 移植——dV 的 atomic 次数从每 task 2 次降到每列 2 次）。
+                # dV 驻留块是 dv 专用 L0C（fag_mem 256 档 dv 双块），与 mm 的
+                # acc 双缓冲无涉；flush 用 AtomicAdd 与 192 档同款（BN2S2 列单
+                # owner，实际单写者）。回退 GS 不走本分支（gs_normal 的 256 档
+                # 仍走 C4/C5 双 atomic，行为不变）。
+                iterate_normal_n_left_reuse_bn2s2(
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    left_read,
+                    right,
+                    acc,
+                    tensor_dk_ws,
+                    [fixInfo.idx0KV, fixInfo.keyOffset, fixInfo.idx2KV],
+                    fixInfo.s2RealSize,
+                    fixInfo.s1RealSize,
+                    constInfo.dSize,
+                )
+                iterate_normal_n_left_reuse_l0c_bn2s2(
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    left_read,
+                    right,
+                    dv_acc,
+                    dv_acc1,
+                    fixInfo.dkvAcc,
+                    fixInfo.s2RealSize,
+                    fixInfo.s1RealSize,
+                    constInfo.dvSize,
+                    fixInfo.flushDkv,
+                )
+                if fixInfo.flushDkv == 1:
+                    flush_dv_bn2s2(constInfo, fixInfo, tensor_dv_ws, dv_acc, dv_acc1)
+            else:
+                # 512/768：C4/C5 双逐 task 原子进 ws，L0C 不驻留，列首列末无
+                # 额外动作。
+                iterate_mm_dsq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    acc,
+                    acc,
+                    0,
+                    tensor_dk_ws,
+                    tensor_q,
+                    left_read,
+                )
+                iterate_mm_pdy_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    acc,
+                    acc,
+                    0,
+                    tensor_dv_ws,
+                    tensor_dy,
+                    left_read,
+                )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+            )
+            if not full_width:
+                pl.system.set_cross_core(
+                    pipe=pl.PipeType.MTE1, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+                )
+        if isLastLoop == 1:
+            drainDone = drainDone + 1
+            if drainDone >= 1:
+                break
+        if gIdx >= 0:
+            taskId = taskId + 1
+            localIdx = localIdx + 1
+        else:
+            if isLastLoop == 1:
+                taskId = taskId + 1
+                localIdx = localIdx + 1
+    if full_width:
+        # Retire outstanding reads in issue order, including a final column
+        # with a single useful half-row. Both AIVs send a credit for it.
+        if constInfo.wideKvDoubleBuffer == 1 and closedColumns >= 2:
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.FIX, event_id=WIDE_KV_READ_DONE_bn2s2[columnBank]
+            )
+        if closedColumns > 0:
+            lastBank = (1 - columnBank) * constInfo.wideKvDoubleBuffer
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.FIX, event_id=WIDE_KV_READ_DONE_bn2s2[lastBank]
+            )
+    elif d_align >= 256 and slotInUse == 1:
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.FIX, event_id=SYNC_DETER_FIX_FLAG_bn2s2
+        )
+    if needSync == 1:
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.FIX, event_id=SYNC_DETER_FIX_FLAG_bn2s2
+        )
+
+
+def _run_preload2_cube_gs_normal_bn2s2(
+    constInfo,
+    sched,
+    gm,
+    buf,
+    runInfos,
+):
+    meta = sched.meta
+    fagOff = sched.fagOff
+    cBlockIdx = sched.cBlockIdx
+    coreNum = sched.coreNum
+    blockStart = sched.blockStart
+    blockEnd = sched.blockEnd
+    numBlocks = sched.numBlocks
+    cuQ = sched.cuQ
+    cuKv = sched.cuKv
+    usedQ = sched.usedQ
+    usedKv = sched.usedKv
+    batchCursor = init_tnd_batch_cursor()
+    tensor_q = gm.tensor_q
+    tensor_k = gm.tensor_k
+    tensor_k_nt = gm.tensor_k_nt
+    tensor_dy = gm.tensor_dy
+    tensor_v = gm.tensor_v
+    tensor_dq_ws = gm.tensor_dq_ws
+    tensor_dk_ws = gm.tensor_dk_ws
+    tensor_dv_ws = gm.tensor_dv_ws
+    mm1_res = buf.mm1_res
+    mm2_res = buf.mm2_res
+    q_l1 = buf.q_l1
+    k_l1 = buf.k_l1
+    k_l1_n = buf.k_l1_n
+    if d_align < 512:
+        # Same physical K slots and mutexes; delayed dQ advances its own view.
+        k_l1 = make_plan_k_l1_bn2s2()
+        k_l1_n = make_plan_k_normal_l1_bn2s2()
+    v_l1 = buf.v_l1
+    do_l1 = buf.do_l1
+    left = buf.left
+    right = buf.right
+    acc = buf.acc
+    left_read = left
+    if d_align >= 256 or (d_align == 192 and dv_align == 128):
+        left_read = make_wide_l0a_reader_bn2s2()
+    if d_align <= 192:
+        """
+           门控 d_align<=192：GS 原生 preload2 二进制只有 256/512/768 档、其 buf
+           无这些字段（分支剪枝后不解析属性访问）；BN2S2 回退二进制 d<=192 时
+           bundle 必带（fag_kernel.py make_tuple 的 dk_acc/dv_acc 段）。
+        """
+        dk_acc0 = buf.dk_acc
+        dk_acc1 = buf.dk_acc1
+        dv_acc0 = buf.dv_acc
+        dv_acc1 = buf.dv_acc1
+    if d_align == 192 and dv_align == 128:
+        # Shared C1/C2/dQ phases and disjoint full-width dK/dV residents.
+        acc = make_plan_acc_bn2s2()
+        dk_acc0 = make_plan_dk0_bn2s2()
+        dv_acc0 = make_plan_dv0_bn2s2()
+    ds_l1 = buf.ds_l1
+    ds_t_l1 = buf.ds_t_l1
+    p_t_l1 = buf.p_t_l1
+    taskId = 0
+    localIdx = 0
+    denseCursor = blockStart
+    isLastLoop = 0
+    drainDone = 0
+    currentIndex = pl.const(-1, pl.DT_INT64)
+    if d_align <= 192:
+        q_writer = make_q_l1(True)
+        dy_writer = make_do_l1(True)
+        currentIndex, denseCursor = next_fallback_score_bn2s2(
+            constInfo, sched, denseCursor, batchCursor, 0
+        )
+        prefetch_normal_task_bn2s2(
+            constInfo,
+            sched,
+            gm,
+            runInfos,
+            0,
+            currentIndex,
+            batchCursor,
+            q_writer,
+            dy_writer,
+        )
+    while True:
+        gIdx = pl.const(-1, pl.DT_INT64)
+        if d_align <= 192:
+            gIdx = currentIndex
+            if gIdx >= 0:
+                currentIndex, denseCursor = next_fallback_score_bn2s2(
+                    constInfo, sched, denseCursor, batchCursor, taskId + 1
+                )
+                prefetch_normal_task_bn2s2(
+                    constInfo,
+                    sched,
+                    gm,
+                    runInfos,
+                    taskId + 1,
+                    currentIndex,
+                    batchCursor,
+                    q_writer,
+                    dy_writer,
+                )
+            else:
+                isLastLoop = 1
+        else:
+            gIdx, denseCursor = next_fallback_score_bn2s2(
+                constInfo, sched, denseCursor, batchCursor, taskId
+            )
+            if gIdx < 0:
+                isLastLoop = 1
+        doFix = 0
+        mm2_cur = mm2_res.next()
+        mm1_cur = mm1_res.next()
+        q_cur = q_l1.next()
+        do_cur = do_l1.next()
+        curInfo = runInfos[0]
+        if gIdx >= 0:
+            if d_align <= 192:
+                curInfo = runInfos[taskId % 3]
+            else:
+                curInfo = runInfos[taskId % 2]
+                set_normal_bn2s2_run_info_bn2s2(
+                    constInfo,
+                    curInfo,
+                    taskId,
+                    gIdx,
+                    0,
+                    localIdx,
+                    cuQ,
+                    cuKv,
+                    usedQ,
+                    usedKv,
+                    batchCursor,
+                )
+                apply_l0c_s2_bn2s2(constInfo, runInfos, curInfo, taskId, 2)
+            normal_score_pair_bn2s2(
+                constInfo,
+                curInfo,
+                gm,
+                q_cur,
+                do_cur,
+                k_l1,
+                v_l1,
+                left,
+                right,
+                acc,
+                mm1_cur,
+                mm2_cur,
+                taskId,
+                d_align <= 192,
+            )
+        fixInfo = runInfos[0]
+        q_fix = q_cur
+        do_fix = do_cur
+        if taskId > 0:
+            doFix = 1
+            if d_align <= 192:
+                fixInfo = runInfos[(taskId + 2) % 3]
+            else:
+                fixInfo = runInfos[(taskId + 1) % 2]
+            q_fix = q_l1.previous()
+            do_fix = do_l1.previous()
+        if doFix == 1:
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_V4_TO_C5_FLAG_bn2s2
+            )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_V3_TO_C3_FLAG_bn2s2
+            )
+            # Preserve GS order and metadata owners: dV -> dQ -> dK.
+            # Each resident uses dkvAcc and flushDkv from apply_l0c_s2;
+            # the new full-width D192/Dv128 helper performs its own final FIX.
+            if d_align == 192 and dv_align == 128:
+                normal_resident_full_held_bn2s2(
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    dv_acc0.current(),
+                    tensor_dv_ws,
+                    constInfo.dvSize,
+                    128,
+                    left_read,
+                    0,
+                    tensor_dv_ws,
+                    False,
+                )
+            elif d_align <= 192:
+                iterate_mm_pdy_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    dv_acc0,
+                    dv_acc1,
+                    fixInfo.dkvAcc,
+                )
+            elif d_align == 256:
+                iterate_normal_n_left_reuse_bn2s2(
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    left_read,
+                    right,
+                    acc,
+                    tensor_dv_ws,
+                    [fixInfo.idx0KV, fixInfo.keyOffset, fixInfo.idx2KV],
+                    fixInfo.s2RealSize,
+                    fixInfo.s1RealSize,
+                    constInfo.dvSize,
+                )
+            else:
+                iterate_mm_pdy_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    p_t_l1.current(),
+                    do_fix,
+                    left,
+                    right,
+                    acc,
+                    acc,
+                    0,
+                    tensor_dv_ws,
+                    tensor_dy,
+                    left_read,
+                )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+            )
+            if d_align < 512:
+                if fixInfo.loadKV == 1:
+                    k_l1_n.next()
+            if d_align == 192 and dv_align == 128:
+                normal_full_dq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    tensor_dq_ws,
+                    ds_l1.current(),
+                    k_l1_n,
+                    left,
+                    right,
+                    acc,
+                    left_read,
+                )
+            else:
+                iterate_mm_dsk_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    tensor_k_nt,
+                    tensor_dq_ws,
+                    fixInfo.loadKV,
+                    ds_l1.current(),
+                    k_l1_n,
+                    left,
+                    right,
+                    acc,
+                    mm1_cur,
+                    cBlockIdx,
+                    d_align < 512,
+                    left_read,
+                )
+            if d_align == 192 and dv_align == 128:
+                normal_resident_full_held_bn2s2(
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    dk_acc0.current(),
+                    tensor_dk_ws,
+                    constInfo.dSize,
+                    192,
+                    left_read,
+                    0,
+                    tensor_dk_ws,
+                    False,
+                )
+            elif d_align <= 192:
+                iterate_mm_dsq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    dk_acc0,
+                    dk_acc1,
+                    fixInfo.dkvAcc,
+                )
+            elif d_align == 256:
+                iterate_normal_n_left_reuse_bn2s2(
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    left_read,
+                    right,
+                    acc,
+                    tensor_dk_ws,
+                    [fixInfo.idx0KV, fixInfo.keyOffset, fixInfo.idx2KV],
+                    fixInfo.s2RealSize,
+                    fixInfo.s1RealSize,
+                    constInfo.dSize,
+                )
+            else:
+                iterate_mm_dsq_bn2s2(
+                    constInfo,
+                    fixInfo,
+                    ds_t_l1.current(),
+                    q_fix,
+                    left,
+                    right,
+                    acc,
+                    acc,
+                    0,
+                    tensor_dk_ws,
+                    tensor_q,
+                    left_read,
+                )
+            # 驻留三件套的第三件：列末把 L0C 上累加完的 dK/dV 写回 ws 段，
+            # post 三段（回退时 doKvPost=标记判定）统一 ws->out cast。
+            if d_align <= 192 and not (d_align == 192 and dv_align == 128):
+                if fixInfo.flushDkv == 1:
+                    flush_dkv_bn2s2(
+                        constInfo,
+                        fixInfo,
+                        tensor_dk_ws,
+                        tensor_dv_ws,
+                        dk_acc0,
+                        dk_acc1,
+                        dv_acc0,
+                        dv_acc1,
+                    )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+            )
+        if isLastLoop == 1:
+            drainDone = drainDone + 1
+            if drainDone >= 1:
+                break
+        if gIdx >= 0:
+            taskId = taskId + 1
+            localIdx = localIdx + 1
+        else:
+            if isLastLoop == 1:
+                taskId = taskId + 1
+                localIdx = localIdx + 1
+
+
+def normal_vector_retire_bn2s2(
+    constInfo,
+    sched,
+    gm,
+    buf,
+    vecInfo,
+    mm1_t,
+    mm2_t,
+    lse_t,
+    c2ev,
+    needSyncDkMM,
+    sink,
+    sfmg_t,
+    prefetched_sfmg,
+):
+    """Shared actual-M Vec chain; preserve both mm2/LSE sink readers.
+
+    Zero-row subcores still execute the same cross-core event sequence.
+    P uses its own NZ buffer; dS and sink retain the established consume order.
+    """
+    if not prefetched_sfmg:
+        if dv_align >= 128 and sink == 0 and constInfo.enablePreSfmg == 1:
+            load_precomputed_sfmg(constInfo, vecInfo, gm.tensor_sfmg_ws, sfmg_t)
+        else:
+            process_vec1_bn2s2(
+                constInfo,
+                vecInfo,
+                sched.subIdx,
+                gm.tensor_y,
+                gm.tensor_dy,
+                buf.y_ub.current(),
+                buf.dy_ub.current(),
+                sfmg_t,
+                sched.v1w,
+            )
+    pl.system.wait_cross_core(
+        pipe=pl.PipeType.V, event_id=SYNC_C2_TO_V2_FLAG_bn2s2[c2ev]
+    )
+    if mask_mode != 0:
+        process_normal_vec2_bn2s2(
+            constInfo,
+            vecInfo,
+            sched.subIdx,
+            gm.tensor_lse,
+            mm2_t,
+            lse_t,
+            gm.tensor_mask,
+            buf.mask_ub.current(),
+            buf.mask_pre_ub.current(),
+        )
+    else:
+        process_normal_vec2_bn2s2(
+            constInfo,
+            vecInfo,
+            sched.subIdx,
+            gm.tensor_lse,
+            mm2_t,
+            lse_t,
+            gm.tensor_lse,
+            buf.mask_ub.current(),
+            buf.mask_pre_ub.current(),
+        )
+    pl.system.wait_cross_core(
+        pipe=pl.PipeType.V, event_id=SYNC_C1_TO_V2_FLAG_bn2s2[c2ev]
+    )
+    if needSyncDkMM == 1:
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+        )
+    process_normal_vec3_bn2s2(
+        constInfo,
+        vecInfo,
+        sched.subIdx,
+        buf.ds_l1.current(),
+        mm1_t,
+        mm2_t,
+        sfmg_t,
+        buf.nzp_ub.current(),
+    )
+    if sink == 1:
+        headQ = vecInfo.n2oIdx * constInfo.gSize + vecInfo.goIdx
+        sink_val = pl.getval(gm.tensor_sinks, headQ)
+        process_sink_partial_bn2s2(
+            constInfo,
+            vecInfo,
+            gm.tensor_dsink_ws,
+            pl.get_block_idx(),
+            mm2_t,
+            mm1_t,
+            lse_t,
+            buf.sink_part_ub.current(),
+            sink_val,
+        )
+    if needSyncDkMM == 1:
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.MTE3, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+        )
+    process_normal_vec4_bn2s2(
+        constInfo,
+        vecInfo,
+        sched.subIdx,
+        buf.p_l1.current(),
+        mm2_t,
+        buf.p_nzp_ub.current(),
+    )
+    pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=SYNC_V3_TO_C3_FLAG_bn2s2)
+    pl.system.set_cross_core(pipe=pl.PipeType.MTE3, event_id=SYNC_V4_TO_C5_FLAG_bn2s2)
+
+
+def _run_preload2_vector_bn2s2(constInfo, sched, gm, buf, runInfos, sink):
+    normalSwizzle = make_normal_swizzle_bn2s2(sched.meta, constInfo)
+    if (
+        d_align == 512
+        and dv_align == 512
+        and layout == 1
+        and deter == 0
+        and mask_mode == 3
+        and sink == 0
+    ):
+        if (
+            normalSwizzle.active == 0
+            and constInfo.wideKvSlots == 1
+            and constInfo.enablePreSfmg == 1
+            and constInfo.dSize > 256
+            and constInfo.dSize <= 384
+            and constInfo.dvSize > 256
+            and constInfo.dvSize <= 384
+        ):
+            run_normal_vector_body_bn2s2(
+                constInfo, sched, gm, buf, runInfos, sink, normalSwizzle, True
+            )
+        else:
+            run_normal_vector_body_bn2s2(
+                constInfo, sched, gm, buf, runInfos, sink, normalSwizzle, False
+            )
+    else:
+        run_normal_vector_body_bn2s2(
+            constInfo, sched, gm, buf, runInfos, sink, normalSwizzle, False
+        )
+
+
+def run_normal_vector_body_bn2s2(
+    constInfo, sched, gm, buf, runInfos, sink, normalSwizzle, prefetched_sfmg
+):
+    blockStart = sched.blockStart
+    blockEnd = sched.blockEnd
+    cuQ = sched.cuQ
+    cuKv = sched.cuKv
+    usedQ = sched.usedQ
+    usedKv = sched.usedKv
+    subIdx = sched.subIdx
+    tensor_lse = gm.tensor_lse
+    tensor_dk_out = gm.tensor_dk_out
+    mm1_res = buf.mm1_res
+    mm2_res = buf.mm2_res
+    lse_ub = buf.lse_ub
+    cast_ub = buf.cast_ub
+    if prefetched_sfmg:
+        sfmg_inputs = make_sfmg_ub_bn2s2(256, True)
+        columnBank = pl.astype(0, pl.DT_INT64)
+    if d_align >= 256:
+        column_src = make_wide_column_src_bn2s2(256)
+    aivIdx = pl.get_block_idx()
+    taskId = 0
+    localIdx = 0
+    cursor = blockStart
+    isLastLoop = 0
+    drainDone = 0
+    nFetched = 0
+    # TND 复用：非确定变长解码需要 per-core batch cursor（dense 二进制不消费）。
+    batchCursor = init_tnd_batch_cursor()
+    while True:
+        gIdx = pl.const(-1, pl.DT_INT64)
+        if normalSwizzle.active == 1:
+            fetchedGIdx = next_normal_swizzle_bn2s2(
+                sched.meta, constInfo, normalSwizzle, sched.cBlockIdx, cuQ, cuKv
+            )
+            fetchedCursor = normalSwizzle.loop
+        else:
+            fetchedGIdx, fetchedCursor = bn2s2_next_bn2s2(
+                constInfo, cursor, blockEnd, cuQ, cuKv, usedQ, usedKv, batchCursor
+            )
+        if isLastLoop == 0:
+            gIdx = fetchedGIdx
+            cursor = fetchedCursor
+            if gIdx < 0:
+                isLastLoop = 1
+        mm2_res.next()
+        mm1_res.next()
+        if gIdx >= 0:
+            curInfo = runInfos[taskId % 2]
+            set_normal_bn2s2_run_info_bn2s2(
+                constInfo,
+                curInfo,
+                taskId,
+                gIdx,
+                subIdx,
+                localIdx,
+                cuQ,
+                cuKv,
+                usedQ,
+                usedKv,
+                batchCursor,
+            )
+            nFetched = nFetched + 1
+            apply_l0c_s2_bn2s2(constInfo, runInfos, curInfo, taskId, 2)
+            lse_ub.next()
+            # ASC CopyMaxSum: prepare task N while Vec retires task N-1.
+            # Keep the original LSE slots/mutexes and both Vec2/dsink readers.
+            load_normal_lse_bn2s2(constInfo, curInfo, tensor_lse, lse_ub.current())
+            if prefetched_sfmg:
+                load_precomputed_sfmg(
+                    constInfo, curInfo, gm.tensor_sfmg_ws, sfmg_inputs[taskId % 2]
+                )
+        doVec = 0
+        vecInfo = runInfos[0]
+        mm1_t = mm1_res.current()
+        mm2_t = mm2_res.current()
+        lse_t = lse_ub.current()
+        c2ev = 0
+        needSyncDkMM = 0
+        if taskId > 0:
+            doVec = 1
+            vecInfo = runInfos[(taskId + 1) % 2]
+            mm1_t = mm1_res.previous()
+            mm2_t = mm2_res.previous()
+            lse_t = lse_ub.previous()
+            if gIdx < 0:
+                # Drain advances mm1/mm2, but does not advance the LSE ring.
+                # The final prefetched task therefore still owns current().
+                lse_t = lse_ub.current()
+            c2ev = (taskId + 1) % 2
+            if taskId > 1:
+                needSyncDkMM = 1
+        if doVec == 1:
+            sfmg_t = buf.sfmg_ub.current()
+            if prefetched_sfmg:
+                # RunInfo taskId-1 is retired on normal iterations and on the final drain.
+                sfmg_t = sfmg_inputs[(taskId + 1) % 2]
+            normal_vector_retire_bn2s2(
+                constInfo,
+                sched,
+                gm,
+                buf,
+                vecInfo,
+                mm1_t,
+                mm2_t,
+                lse_t,
+                c2ev,
+                needSyncDkMM,
+                sink,
+                sfmg_t,
+                prefetched_sfmg,
+            )
+            if d_align <= 128:
+                # 直出档列末 dK：cube 已把 fp32 覆写进本 task 的 mm2 槽
+                # （单事件 + DETER_FIX 释放纪律，任务身份由 needSync 时序携带）。
+                # d>=192 档无列末消费——dK/dV 由 post 全三段统一收尾（对齐
+                # 老仓 DqkvMulsAndCastFromGM 的时机；列末事件粒度的跨核 GM
+                # 读有写穿透竞态，已撤回，详见 fag_kernel.py 的 doKvPost）。
+                if vecInfo.flushDkv == 1:
+                    pl.system.wait_cross_core(
+                        pipe=pl.PipeType.V, event_id=SYNC_C4_TO_V6_FLAG_bn2s2
+                    )
+                    process_muls_cast_dk_bn2_bn2s2(
+                        tensor_dk_out,
+                        mm2_t,
+                        cast_ub.current(),
+                        constInfo,
+                        vecInfo,
+                        subIdx,
+                    )
+                    pl.system.set_cross_core(
+                        pipe=pl.PipeType.V, event_id=SYNC_DETER_FIX_FLAG_bn2s2
+                    )
+            elif d_align >= 256 and constInfo.wideKvSlots == 1:
+                if vecInfo.flushDkv == 1:
+                    offset = sched.cBlockIdx * 128 * d_align
+                    if prefetched_sfmg:
+                        offset = offset + columnBank * sched.coreNum * 128 * d_align
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.MTE2,
+                            event_id=WIDE_DK_READY_bn2s2[columnBank],
+                        )
+                    else:
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.MTE2, event_id=SYNC_C4_TO_V6_FLAG_bn2s2
+                        )
+                    normal_wide_slot_read_bn2s2(
+                        gm.dk_slot_base,
+                        offset,
+                        (constInfo.dSize + 15) // 16 * 16,
+                        gm.tensor_dk_out,
+                        column_src.current(),
+                        cast_ub.current(),
+                        vecInfo.keyOffset,
+                        vecInfo.idx2KV,
+                        vecInfo.s2RealSize,
+                        subIdx,
+                        constInfo.dSize,
+                        constInfo.scaleValue,
+                        False,
+                        normalSwizzle.active,
+                        constInfo.wideKvDoubleBuffer == 1,
+                    )
+                    if prefetched_sfmg:
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.MTE2,
+                            event_id=WIDE_DV_READY_bn2s2[columnBank],
+                        )
+                    else:
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.MTE2, event_id=SYNC_C3_TO_V5_FLAG_bn2s2
+                        )
+                    normal_wide_slot_read_bn2s2(
+                        gm.dv_slot_base,
+                        offset,
+                        (constInfo.dvSize + 15) // 16 * 16,
+                        gm.tensor_dv_out,
+                        column_src.current(),
+                        cast_ub.current(),
+                        vecInfo.keyOffset,
+                        vecInfo.idx2KV,
+                        vecInfo.s2RealSize,
+                        subIdx,
+                        constInfo.dvSize,
+                        constInfo.scaleValue,
+                        True,
+                        normalSwizzle.active,
+                        constInfo.wideKvDoubleBuffer == 1,
+                    )
+                    if prefetched_sfmg:
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.MTE2,
+                            event_id=WIDE_KV_READ_DONE_bn2s2[columnBank],
+                        )
+                        columnBank = (1 - columnBank) * constInfo.wideKvDoubleBuffer
+                    else:
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.MTE2, event_id=SYNC_DETER_FIX_FLAG_bn2s2
+                        )
+        if isLastLoop == 1:
+            drainDone = drainDone + 1
+            if drainDone >= 1:
+                if nFetched > 0:
+                    pl.system.wait_cross_core(
+                        pipe=pl.PipeType.MTE3, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+                    )
+                    pl.system.wait_cross_core(
+                        pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+                    )
+                break
+        if gIdx >= 0:
+            taskId = taskId + 1
+            localIdx = localIdx + 1
+        else:
+            if isLastLoop == 1:
+                taskId = taskId + 1
+                localIdx = localIdx + 1
+
+
+def _run_preload2_vector_gs_normal_bn2s2(
+    constInfo,
+    sched,
+    gm,
+    buf,
+    runInfos,
+    sink,
+):
+    meta = sched.meta
+    fagOff = sched.fagOff
+    cBlockIdx = sched.cBlockIdx
+    coreNum = sched.coreNum
+    blockStart = sched.blockStart
+    blockEnd = sched.blockEnd
+    numBlocks = sched.numBlocks
+    cuQ = sched.cuQ
+    cuKv = sched.cuKv
+    usedQ = sched.usedQ
+    usedKv = sched.usedKv
+    batchCursor = init_tnd_batch_cursor()
+    subIdx = sched.subIdx
+    tensor_lse = gm.tensor_lse
+    mm1_res = buf.mm1_res
+    mm2_res = buf.mm2_res
+    lse_ub = buf.lse_ub
+    aivIdx = pl.get_block_idx()
+    taskId = 0
+    localIdx = 0
+    denseCursor = blockStart
+    isLastLoop = 0
+    drainDone = 0
+    nFetched = 0
+    roundId = pl.const(0, pl.DT_INT64)
+    while True:
+        gIdx = pl.const(-1, pl.DT_INT64)
+        fetchedGIdx, fetchedDenseCursor = fetch_work_gidx_bn2s2(
+            constInfo,
+            meta,
+            fagOff,
+            cBlockIdx,
+            coreNum,
+            blockStart,
+            blockEnd,
+            localIdx,
+            denseCursor,
+            numBlocks,
+            roundId,
+            cuQ,
+            cuKv,
+            usedQ,
+            usedKv,
+            batchCursor,
+        )
+        if isLastLoop == 0:
+            gIdx = fetchedGIdx
+            denseCursor = fetchedDenseCursor
+            if gIdx < 0:
+                isLastLoop = 1
+        mm2_res.next()
+        mm1_res.next()
+        if gIdx >= 0:
+            curInfo = runInfos[taskId % 2]
+            set_normal_bn2s2_run_info_bn2s2(
+                constInfo,
+                curInfo,
+                taskId,
+                gIdx,
+                subIdx,
+                localIdx,
+                cuQ,
+                cuKv,
+                usedQ,
+                usedKv,
+                batchCursor,
+            )
+            nFetched = nFetched + 1
+            apply_l0c_s2_bn2s2(constInfo, runInfos, curInfo, taskId, 2)
+            lse_ub.next()
+            # The same two-slot prefetch contract as the normal BN2S2 path.
+            load_normal_lse_bn2s2(constInfo, curInfo, tensor_lse, lse_ub.current())
+        vecInfo = runInfos[0]
+        mm1_t = mm1_res.current()
+        mm2_t = mm2_res.current()
+        lse_t = lse_ub.current()
+        c2ev = 0
+        needSyncDkMM = 0
+        doVec = 0
+        if taskId > 0:
+            doVec = 1
+            vecInfo = runInfos[(taskId + 1) % 2]
+            mm1_t = mm1_res.previous()
+            mm2_t = mm2_res.previous()
+            lse_t = lse_ub.previous()
+            if gIdx < 0:
+                # LSE does not advance on drain; the last task owns current().
+                lse_t = lse_ub.current()
+            c2ev = (taskId + 1) % 2
+            needSyncDkMM = 0
+            if taskId > 1:
+                needSyncDkMM = 1
+        if doVec == 1:
+            normal_vector_retire_bn2s2(
+                constInfo,
+                sched,
+                gm,
+                buf,
+                vecInfo,
+                mm1_t,
+                mm2_t,
+                lse_t,
+                c2ev,
+                needSyncDkMM,
+                sink,
+                buf.sfmg_ub.current(),
+                False,
+            )
+        if isLastLoop == 1:
+            drainDone = drainDone + 1
+            if drainDone >= 1:
+                if nFetched > 0:
+                    pl.system.wait_cross_core(
+                        pipe=pl.PipeType.MTE3, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+                    )
+                    pl.system.wait_cross_core(
+                        pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
                     )
                 break
         if gIdx >= 0:

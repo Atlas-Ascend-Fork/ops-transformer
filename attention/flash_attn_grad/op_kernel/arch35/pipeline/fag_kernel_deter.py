@@ -12,7 +12,7 @@ preload3 / preload2 GS1S2 deterministic。循环里不再判断 ``deter``。
 ``physicalRound`` / ``readyRound`` / drain 仍是循环本地标量。
 """
 
-import inspect
+from pipeline.fag_bindings import bind_codegen_helpers as _bind_codegen_helpers
 
 import pypto_pro.language as pl
 
@@ -40,36 +40,39 @@ _PINGPONG_LISTS = frozenset(
         "SYNC_C2_TO_V2_FLAG",
         "SYNC_V2_TO_C1_FLAG",
         "SYNC_V2_TO_C2_FLAG",
+        "SYNC_C1_TO_V2_FLAG_bn2s2",
+        "SYNC_C2_TO_V2_FLAG_bn2s2",
+        "SYNC_V2_TO_C1_FLAG_bn2s2",
+        "SYNC_V2_TO_C2_FLAG_bn2s2",
+        "SYNC_C4_TO_V6_PP_FLAG_bn2s2",
+        "SYNC_DKV_RELEASE_PP_FLAG_bn2s2",
     }
 )
 
 
 def _bind_helpers():
-    g = globals()
-    for mod in (
-        fag_block_cube,
-        fag_block_vec,
-        fag_buffers,
-        fag_common,
-        fag_deter_formulas,
-        fag_deter_legacy,
-        fag_deter_state,
-        fag_deter_fixed,
-        fag_deter_baseline,
-        fag_deter_band_owner,
-        fag_deter_band_plan,
-        fag_deter_tnd_dense,
-        fag_deter_tnd_sparse,
-        fag_deter_tnd_plan,
-        fag_deter_tnd_normalized,
-        fag_schedule,
-    ):
-        for name, val in vars(mod).items():
-            if name.startswith("_") or inspect.ismodule(val):
-                continue
-            if isinstance(val, list) and name not in _PINGPONG_LISTS:
-                continue
-            g[name] = val
+    _bind_codegen_helpers(
+        globals(),
+        (
+            fag_block_cube,
+            fag_block_vec,
+            fag_buffers,
+            fag_common,
+            fag_deter_formulas,
+            fag_deter_legacy,
+            fag_deter_state,
+            fag_deter_fixed,
+            fag_deter_baseline,
+            fag_deter_band_owner,
+            fag_deter_band_plan,
+            fag_deter_tnd_dense,
+            fag_deter_tnd_sparse,
+            fag_deter_tnd_plan,
+            fag_deter_tnd_normalized,
+            fag_schedule,
+        ),
+        _PINGPONG_LISTS,
+    )
 
 
 _bind_helpers()
@@ -1783,3 +1786,607 @@ def _run_preload2_vector_gs_deter(
                         pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG
                     )
                 break
+
+
+# BN2S2 entry/pipeline: separate resource and synchronization semantics.
+
+
+def plan_load_next_query_bn2s2(h, cuq, state, tensor_l, l_t, dimSize):
+    """Prefetch one next validated task into the third Q/dY L1 slot."""
+    if mask_mode == 0 and d_align == 192 and dv_align == 192 and h.fixedSq > 0:
+        qb = h.fixedQBase
+        sq = h.fixedSq
+    else:
+        qb = seq_i64_bn2s2(cuq, state.nextBatch)
+        sq = seq_i64_bn2s2(cuq, state.nextBatch + 1) - qb
+    rows = pl.min(128, sq - state.nextRow * 128)
+    pl.set_validshape(l_t, [rows, dimSize])
+    pl.load(
+        l_t, tensor_l, [0, qb + state.nextRow * 128, state.nextHead, 0], order=[1, 3]
+    )
+
+
+def run_plan_cube_bn2s2(ci, words, h, cuq, cuk, core, policy, gm, buf, slots):
+    state = plan_pipeline_state_bn2s2()
+    prefetch_query = d_align <= 192
+    if d_align == 768:
+        # ASC commonL1.Get alternates globally. Each score takes two banks;
+        # dQ and dK together take an even number. Hoist window parity once.
+        common_slot = pl.astype(0, pl.DT_INT64)
+        dq_parity = ((ci.dSize + 511) // 512) & 1
+        dv_parity = ((ci.dvSize + 511) // 512) & 1
+    for physical_round in pl.range(-1, h.maxRound + 1):
+        plan_pipeline_step_bn2s2(
+            words, h, cuq, cuk, core, 0, state, slots, physical_round, mask_mode
+        )
+        current = slots[state.issueSlot]
+        if state.issue != 0:
+            if (d_align == 64 and dv_align == 64) or (
+                d_align == 128 and dv_align == 128
+            ):
+                if current.directPending != 0:
+                    pl.system.wait_cross_core(
+                        pipe=pl.PipeType.FIX,
+                        event_id=SYNC_DKV_RELEASE_PP_FLAG_bn2s2[state.issueSlot],
+                    )
+                    current.directPending = pl.astype(0, pl.DT_INT64)
+            if d_align == 768:
+                iterate_mm_k_bn2s2(
+                    ci,
+                    current,
+                    gm.dy,
+                    gm.v,
+                    buf.q[common_slot],
+                    buf.k,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.mm1.next(),
+                    current.loadKV,
+                    ci.dvSize,
+                    current.s1RealSize,
+                    False,
+                    1 - common_slot,
+                )
+                pl.system.set_cross_core(
+                    pipe=pl.PipeType.FIX,
+                    event_id=SYNC_C1_TO_V2_FLAG_bn2s2[state.issueSlot],
+                )
+                iterate_mm_k_bn2s2(
+                    ci,
+                    current,
+                    gm.q,
+                    gm.k,
+                    buf.q[common_slot],
+                    buf.k,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.mm2.next(),
+                    current.loadKV,
+                    ci.dSize,
+                    current.s1RealSize,
+                    False,
+                    1 - common_slot,
+                )
+                pl.system.set_cross_core(
+                    pipe=pl.PipeType.FIX,
+                    event_id=SYNC_C2_TO_V2_FLAG_bn2s2[state.issueSlot],
+                )
+            else:
+                # Keep DyV then QK compute order, but issue both operand pairs first.
+                dy_current = buf.dy.current()
+                q_current = buf.q.current()
+                if prefetch_query:
+                    if current.taskId == 0:
+                        dy_current = buf.dy.next()
+                        q_current = buf.q.next()
+                        pl.set_validshape(dy_current, [current.s1RealSize, ci.dvSize])
+                        pl.set_validshape(q_current, [current.s1RealSize, ci.dSize])
+                        pl.load(
+                            dy_current,
+                            gm.dy,
+                            [current.idx0Q, current.queryOffset, current.idx2Q, 0],
+                            order=[1, 3],
+                        )
+                        pl.load(
+                            q_current,
+                            gm.q,
+                            [current.idx0Q, current.queryOffset, current.idx2Q, 0],
+                            order=[1, 3],
+                        )
+                    if current.loadKV != 0:
+                        if d_align == 192:
+                            buf.k.next()
+                        v_current = buf.v.current()
+                        k_current = buf.k.current()
+                        pl.set_validshape(v_current, [ci.dvSize, current.s2RealSize])
+                        pl.set_validshape(k_current, [ci.dSize, current.s2RealSize])
+                        pl.load(
+                            v_current,
+                            gm.v,
+                            [current.idx0KV, current.keyOffset, current.idx2KV, 0],
+                            order=[3, 1],
+                        )
+                        pl.load(
+                            k_current,
+                            gm.k,
+                            [current.idx0KV, current.keyOffset, current.idx2KV, 0],
+                            order=[3, 1],
+                        )
+                    # The older generation i-2 has retired before issue i; i+1 uses
+                    # that free third slot while current i and retire i-1 remain live.
+                    if state.nextBatch >= 0:
+                        plan_load_next_query_bn2s2(
+                            h, cuq, state, gm.dy, buf.dy.next(), ci.dvSize
+                        )
+                        plan_load_next_query_bn2s2(
+                            h, cuq, state, gm.q, buf.q.next(), ci.dSize
+                        )
+                else:
+                    dy_current = buf.dy.next()
+                    q_current = buf.q.next()
+                iterate_mm_k_bn2s2(
+                    ci,
+                    current,
+                    gm.dy,
+                    gm.v,
+                    dy_current,
+                    buf.v,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.mm1.next(),
+                    current.loadKV,
+                    ci.dvSize,
+                    current.s1RealSize,
+                    prefetch_query,
+                    0,
+                    (d_align == 192 and dv_align == 128),
+                )
+                pl.system.set_cross_core(
+                    pipe=pl.PipeType.FIX,
+                    event_id=SYNC_C1_TO_V2_FLAG_bn2s2[state.issueSlot],
+                )
+                if d_align == 192 and dv_align != 128 and dv_align != 192:
+                    if current.loadKV != 0:
+                        buf.k.next()
+                iterate_mm_k_bn2s2(
+                    ci,
+                    current,
+                    gm.q,
+                    gm.k,
+                    q_current,
+                    buf.k,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.mm2.next(),
+                    current.loadKV,
+                    ci.dSize,
+                    current.s1RealSize,
+                    prefetch_query,
+                )
+                pl.system.set_cross_core(
+                    pipe=pl.PipeType.FIX,
+                    event_id=SYNC_C2_TO_V2_FLAG_bn2s2[state.issueSlot],
+                )
+        previous = slots[state.retireSlot]
+        if d_align != 768:
+            q_fix = buf.qLag.current()
+            dy_fix = buf.dyLag.current()
+        mm2_fix = buf.mm2Lag.current()
+        if state.retire != 0:
+            if d_align != 768:
+                q_fix = buf.qLag.next()
+                dy_fix = buf.dyLag.next()
+            # Advance every valid retire, not only when a column flushes.
+            mm2_fix = buf.mm2Lag.next()
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_V3_TO_C3_FLAG_bn2s2
+            )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_V4_TO_C5_FLAG_bn2s2
+            )
+        if h.logicalSplit == PlanSplit_bn2s2.GS and physical_round == 0:
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DQ_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DK_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DV_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+        gs_round = h.logicalSplit == PlanSplit_bn2s2.GS and physical_round > 0
+        if gs_round:
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DQ_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+        if state.retire != 0:
+            if d_align == 768:
+                plan_wide_dq_bn2s2(
+                    ci,
+                    previous,
+                    gm.k,
+                    gm.dqWorkspace,
+                    buf.ds.current(),
+                    buf.q,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    common_slot,
+                    True,
+                    buf.leftRead,
+                )
+            else:
+                if d_align == 192:
+                    if previous.loadKV != 0:
+                        buf.kNormal.next()
+                iterate_mm_dsk_bn2s2(
+                    ci,
+                    previous,
+                    gm.k,
+                    gm.dqWorkspace,
+                    previous.loadKV,
+                    buf.ds.current(),
+                    buf.kNormal,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.mm1.current(),
+                    core,
+                    (d_align == 192),
+                    buf.leftRead,
+                )
+        if gs_round:
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DQ_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DK_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+        if state.retire != 0:
+            if d_align == 768:
+                plan_wide_kv_bn2s2(
+                    policy,
+                    previous,
+                    buf.dsT.current(),
+                    buf.q,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    gm.workspace,
+                    gm.dk,
+                    gm.q,
+                    mm2_fix,
+                    ci.dSize,
+                    False,
+                    common_slot ^ dq_parity,
+                    True,
+                    buf.leftRead,
+                )
+            else:
+                iterate_plan_dk_bn2s2(
+                    ci,
+                    policy,
+                    previous,
+                    buf.dsT.current(),
+                    q_fix,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.dk0,
+                    buf.dk1,
+                    gm.workspace,
+                    gm.dk,
+                    gm.q,
+                    mm2_fix,
+                    buf.leftRead,
+                )
+            if (
+                h.logicalSplit == PlanSplit_bn2s2.BN2S2
+                and previous.specialIndex < 0
+                and previous.flushDkv != 0
+            ):
+                if (d_align == 64 and dv_align == 64) or (
+                    d_align == 128 and dv_align == 128
+                ):
+                    previous.directPending = pl.astype(1, pl.DT_INT64)
+                    pl.system.set_cross_core(
+                        pipe=pl.PipeType.FIX,
+                        event_id=SYNC_C4_TO_V6_PP_FLAG_bn2s2[state.retireSlot],
+                    )
+                else:
+                    pl.system.set_cross_core(
+                        pipe=pl.PipeType.FIX, event_id=SYNC_C4_TO_V6_FLAG_bn2s2
+                    )
+        if gs_round:
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DK_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DV_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+        if state.retire != 0:
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+            )
+            if d_align == 768:
+                plan_wide_kv_bn2s2(
+                    policy,
+                    previous,
+                    buf.pT.current(),
+                    buf.q,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    gm.workspace,
+                    gm.dv,
+                    gm.dy,
+                    mm2_fix,
+                    ci.dvSize,
+                    True,
+                    common_slot,
+                    True,
+                    buf.leftRead,
+                )
+                common_slot = common_slot ^ dv_parity
+            else:
+                iterate_plan_dv_bn2s2(
+                    ci,
+                    policy,
+                    previous,
+                    buf.pT.current(),
+                    dy_fix,
+                    buf.left,
+                    buf.right,
+                    buf.acc,
+                    buf.dv0,
+                    buf.dv1,
+                    gm.workspace,
+                    gm.dv,
+                    gm.dy,
+                    mm2_fix,
+                )
+            if (
+                h.logicalSplit == PlanSplit_bn2s2.BN2S2
+                and previous.specialIndex < 0
+                and previous.flushDkv != 0
+            ):
+                if d_align > 128:
+                    pl.system.set_cross_core(
+                        pipe=pl.PipeType.FIX, event_id=SYNC_C3_TO_V5_FLAG_bn2s2
+                    )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE1, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+            )
+            state.retired = state.retired + 1
+        if gs_round:
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.FIX,
+                event_id=SYNC_DV_DETER_FIX_FLAG_bn2s2,
+                sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+            )
+        if h.logicalSplit == PlanSplit_bn2s2.BN2S2 and physical_round > 0:
+            if plan_needs_bn_sync_bn2s2(words, physical_round) != 0:
+                pl.system.set_cross_core(
+                    pipe=pl.PipeType.FIX,
+                    event_id=SYNC_DETER_FIX_FLAG_bn2s2,
+                    sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+                )
+                pl.system.wait_cross_core(
+                    pipe=pl.PipeType.FIX,
+                    event_id=SYNC_DETER_FIX_FLAG_bn2s2,
+                    sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+                )
+    if h.logicalSplit == PlanSplit_bn2s2.GS:
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.FIX,
+            event_id=SYNC_DQ_DETER_FIX_FLAG_bn2s2,
+            sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+        )
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.FIX,
+            event_id=SYNC_DK_DETER_FIX_FLAG_bn2s2,
+            sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+        )
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.FIX,
+            event_id=SYNC_DV_DETER_FIX_FLAG_bn2s2,
+            sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
+        )
+    if (d_align == 64 and dv_align == 64) or (d_align == 128 and dv_align == 128):
+        for slot in pl.range(0, 2):
+            if slots[slot].directPending != 0:
+                pl.system.wait_cross_core(
+                    pipe=pl.PipeType.FIX, event_id=SYNC_DKV_RELEASE_PP_FLAG_bn2s2[slot]
+                )
+                slots[slot].directPending = pl.astype(0, pl.DT_INT64)
+
+
+def run_plan_vector_bn2s2(
+    ci, words, h, cuq, cuk, core, sub, policy, gm, buf, slots, v1w
+):
+    state = plan_pipeline_state_bn2s2()
+    exact_192_rows = (
+        d_align == 192
+        and dv_align == 192
+        and mask_mode == 0
+        and sink != 0
+        and pre_sfmg == 0
+        and input_dtype == pl.DT_BF16
+        and h.fixedSq > 0
+        and h.dimV % 16 == 0
+    )
+    saved = pl.struct(
+        "FagPlanSpecialOwner",
+        rows=pl.astype(0, pl.DT_INT64),
+        keyToken=pl.astype(0, pl.DT_INT64),
+        head=pl.astype(0, pl.DT_INT64),
+    )
+    for physical_round in pl.range(-1, h.maxRound + 1):
+        plan_pipeline_step_bn2s2(
+            words, h, cuq, cuk, core, sub, state, slots, physical_round, mask_mode
+        )
+        if state.issue != 0:
+            issue_info = slots[state.issueSlot]
+            plan_load_lse_bn2s2(h, issue_info, gm.lse, buf.lse[state.issueSlot])
+        if state.retire != 0:
+            info = slots[state.retireSlot]
+            mm1 = buf.mm1.next()
+            mm2 = buf.mm2.next()
+            lse = buf.lse[state.retireSlot]
+            if pre_sfmg != 0:
+                plan_load_sfmg_bn2s2(h, info, gm.sfmg, buf.sfmg.current(), sub)
+            else:
+                if (d_align == 64 and dv_align == 64) or (
+                    d_align == 192 and dv_align == 128
+                ):
+                    process_plan_vec1_bn2s2(
+                        ci,
+                        info,
+                        sub,
+                        gm.y,
+                        gm.dy,
+                        buf.y.current(),
+                        buf.dy.current(),
+                        buf.sfmg.current(),
+                        v1w,
+                    )
+                else:
+                    process_vec1_bn2s2(
+                        ci,
+                        info,
+                        sub,
+                        gm.y,
+                        gm.dy,
+                        buf.y.current(),
+                        buf.dy.current(),
+                        buf.sfmg.current(),
+                        v1w,
+                        exact_192_rows,
+                    )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.V, event_id=SYNC_C1_TO_V2_FLAG_bn2s2[state.retireSlot]
+            )
+            pl.system.wait_cross_core(
+                pipe=pl.PipeType.V, event_id=SYNC_C2_TO_V2_FLAG_bn2s2[state.retireSlot]
+            )
+            plan_vec2_bn2s2(
+                ci,
+                h,
+                info,
+                sub,
+                mm2,
+                lse,
+                gm.mask,
+                buf.mask.current(),
+                buf.maskPre.current(),
+            )
+            if sink != 0:
+                plan_sink_task_bn2s2(
+                    info, gm.sinks, gm.sinkPartial, mm2, mm1, lse, buf.sink.current()
+                )
+            if state.retired > 0:
+                pl.system.wait_cross_core(
+                    pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+                )
+            plan_vec3_bn2s2(
+                ci,
+                info,
+                sub,
+                buf.ds.current(),
+                mm1,
+                mm2,
+                buf.sfmg.current(),
+                buf.nzp.current(),
+            )
+            if state.retired > 0:
+                pl.system.wait_cross_core(
+                    pipe=pl.PipeType.MTE3, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+                )
+            plan_vec4_bn2s2(info, sub, buf.p.current(), mm2, buf.pNzp.current())
+            # ASC waits for both transfers before entering the gradient matmuls.
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE3, event_id=SYNC_V3_TO_C3_FLAG_bn2s2
+            )
+            pl.system.set_cross_core(
+                pipe=pl.PipeType.MTE3, event_id=SYNC_V4_TO_C5_FLAG_bn2s2
+            )
+            if h.logicalSplit == PlanSplit_bn2s2.BN2S2:
+                if info.specialIndex == core:
+                    saved.rows = info.s2RealSize
+                    saved.keyToken = info.keyOffset
+                    saved.head = info.idx2KV
+                if info.specialIndex < 0 and info.flushDkv != 0:
+                    if (d_align == 64 and dv_align == 64) or (
+                        d_align == 128 and dv_align == 128
+                    ):
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.V,
+                            event_id=SYNC_C4_TO_V6_PP_FLAG_bn2s2[state.retireSlot],
+                        )
+                        plan_direct_dk_bn2s2(
+                            ci, info, gm.dk, mm2, buf.cast.current(), sub
+                        )
+                        pl.system.set_cross_core(
+                            pipe=pl.PipeType.MTE3,
+                            event_id=SYNC_DKV_RELEASE_PP_FLAG_bn2s2[state.retireSlot],
+                        )
+                    else:
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.MTE2, event_id=SYNC_C4_TO_V6_FLAG_bn2s2
+                        )
+                        plan_ordinary_column_bn2s2(
+                            ci,
+                            policy,
+                            info,
+                            gm.workspace,
+                            gm.dk,
+                            buf.column.current(),
+                            buf.cast.current(),
+                            sub,
+                            False,
+                            v1w,
+                        )
+                        pl.system.wait_cross_core(
+                            pipe=pl.PipeType.MTE2, event_id=SYNC_C3_TO_V5_FLAG_bn2s2
+                        )
+                        plan_ordinary_column_bn2s2(
+                            ci,
+                            policy,
+                            info,
+                            gm.workspace,
+                            gm.dv,
+                            buf.column.current(),
+                            buf.cast.current(),
+                            sub,
+                            True,
+                            v1w,
+                        )
+            state.retired = state.retired + 1
+    if state.retired > 0:
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.MTE3, event_id=SYNC_C4_TO_V3_FLAG_bn2s2
+        )
+        pl.system.wait_cross_core(
+            pipe=pl.PipeType.MTE3, event_id=SYNC_C5_TO_V4_FLAG_bn2s2
+        )
+    return saved

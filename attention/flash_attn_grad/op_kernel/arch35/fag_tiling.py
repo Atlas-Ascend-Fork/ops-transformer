@@ -32,7 +32,8 @@ class Tmpl:
     BN2GS1S2 = 0
     BN2 = 1
     RESERVED_UNUSED = 2
-    RESERVED_BN2S2 = 3
+    BN2S2 = 3
+    RESERVED_BN2S2 = BN2S2  # Historical name used by older tooling.
 
 
 class DeterFamily:
@@ -217,10 +218,25 @@ class FlashAttnGradTilingData:
     deterL2Bytes: int
     deterCausalGroups: int
 
+    # BN2S2 metadata plan identity, same host/device serialized order.
+    planBytes: int
+    planWorkspaceBytes: int
+    planT1: int
+    planT2: int
+    planDtype: int
+    planAicNum: int
+    planAivNum: int
+    planL2Bytes: int
+    planUbBytes: int
+    planLibapiBytes: int
+    planDeterministicLevel: int
+    planMaskPresent: int
+    planMaskShapeType: int
+
 
 # 与 op_kernel/arch35/flash_attn_grad.py 的 FlashAttnGradTilingKey 一致
 class FlashAttnGradTilingKey:
-    # bit[1:0]：见 :class:`Tmpl`。2/3 保留，本轮不编、不进入口。
+    # bit[1:0]：见 :class:`Tmpl`。2 保留，3 为 BN2S2。
     template = TilingKeyField(
         bits=2,
         values=[Tmpl.BN2GS1S2, Tmpl.BN2, Tmpl.RESERVED_UNUSED, Tmpl.RESERVED_BN2S2],
@@ -242,10 +258,10 @@ class FlashAttnGradTilingKey:
     # 而 pypto 的 tile shape 是 trace 期常量，不是运行期值。
     # 且「一律按最大档分配 + 运行期裁列」并非只是慢：L0C 会超出 256KB
     # 预算，物理上放不下。bit 取值 3=256、4=768（见 docs/D256设计.md）。
-    d_align = TilingKeyField(bits=3, values=[64, 128, 192, 256, 768])
+    d_align = TilingKeyField(bits=3, values=[64, 128, 192, 256, 768, 512])
     # Dv 的**分配**宽度，取值与 d_align 相同。一般 d_align==dv_align；
     # 唯一分叉是 D=192 且 Dv=128 → 128。其余 D!=Dv 由 host 拦截。
-    dv_align = TilingKeyField(bits=3, values=[64, 128, 192, 256, 768])
+    dv_align = TilingKeyField(bits=3, values=[64, 128, 192, 256, 768, 512])
     # BN2 MultiBlk：S 在 (128, 640] 仍走 BN2 函数。bit10。
     is_bn2_multiblk = TilingKeyField(bits=1, values=[0, 1])
     # BN2 MultiBlk 且存在整行或整列无效 tile：pre 把 dq/dk/dv out 清零。
@@ -256,9 +272,10 @@ class FlashAttnGradTilingKey:
     # bit15：1 = 本次带 sinks 输入，kernel 额外算 dsink。编译期常量：非 sink 变体
     # 里 sink 代码被折叠掉，不再走运行期标量分支。两种 template 都放开。
     sink = TilingKeyField(bits=1, values=[0, 1])
-    # Append-only ABI: bits16..20. Existing low 16 bits stay unchanged.
+    # Shared ABI: WJF pre_sfmg bit16, LWY family bits17..21, NZ bit22.
+    pre_sfmg = TilingKeyField(bits=1, values=[0, 1])
     deter_family = TilingKeyField(bits=5, values=list(range(27)))
-    # bit21: append NZ after the deterministic family; ND keys stay unchanged.
+    # bit22: NZ output, after pre_sfmg and deterministic family.
     nz_out = TilingKeyField(bits=1, values=[0, 1])
 
     def is_valid(self, key):
@@ -274,13 +291,22 @@ class FlashAttnGradTilingKey:
             bn2_need_zero,
             deter,
             sink,
+            pre_sfmg,
             deter_family,
             nz_out,
         ) = key
+        if template == Tmpl.BN2S2:
+            if deter_family != DeterFamily.LEGACY or nz_out != 0:
+                return False
+            return _bn2s2_key_valid(key[:11])
+        if pre_sfmg != 0:
+            return False
+        if deter != 0 and (d_align == 512 or dv_align == 512):
+            return False  # Deterministic families retain the 768-column tier.
         if nz_out == 1:
             if template != Tmpl.BN2GS1S2 or d_align != 128 or dv_align != 128:
                 return False
-        # 2/3 保留。不剪会当 GS1S2 多编死二进制。
+        # 2 保留；BN2S2 已在前面按其独立能力契约处理。
         if template != Tmpl.BN2GS1S2 and template != Tmpl.BN2:
             return False
         if deter == 1:
@@ -330,25 +356,28 @@ class FlashAttnGradTilingKey:
                 ):
                     return False
         if template == Tmpl.BN2:
-            # BN2 + TND（layout=1）：host 仅对等长 TND 选 BN2（Bn2FamilyFeasible
-            # 的 tndAllSame 门，由 parser 用 shape 算术判定）——等长 TND 的
-            # GM 排布与 BSND 四维视图逐元素重合，lse 由 TND 2D 视图装载。
-            # 变长 TND 被 host 挡在 GS1S2；is_valid 无从区分等长/变长，契约由
-            # route 保证。0930 bisect-sink 定案移植。
+            # Equal-length TND retains its direct BN2 route. Short variable-length
+            # TND uses the upstream single-block route with bn2_need_zero=1;
+            # host/metadata gate the bounded lengths and exclude real BAND.
             # BN2 禁 swizzle。所有 D 档都编：64/128 走 16-bit 直出（mm1/mm2 UB
             # + v5/v6）；192/256/768 走 BN2 自己的 per-D 分块 workspace + 内联
             # cast（不用 GS1S2 的全局 pre/post）：192 只有 dQ 走 workspace
             # （dK/dV 驻留 L0C），256 走 dQ/dK（dV 驻留 L0C），768 三段全走。
-            # D==Dv 由 host/AICPU 保证。
+            # D192/Dv128 is supported only by non-TND single-block BN2.
             if swizzle != 0:
                 return False
-            if d_align != dv_align:
+            if d_align != dv_align and not (
+                d_align == 192
+                and dv_align == 128
+                and is_bn2_multiblk == 0
+                and layout == 0
+            ):
                 return False
             if bn2_need_zero == 1:
                 if is_bn2_multiblk == 1:
-                    # 稀疏 MultiBlk 的整行/整列无效 tile：固定布局，按 metadata
+                    # Sparse MultiBlk, including equal-length TND, clears
                     # 的 pre 行区间整段清 16-bit out。
-                    return layout == 0 and mask_mode != 0
+                    return mask_mode != 0
                 # 变长 TND 的 BN2 单块：只清“空 batch 对侧”的行（kernel 运行
                 # 期按 cu_seqlens 定位）。等长 TND 不产生这份二进制。
                 return layout == 1
@@ -364,3 +393,88 @@ class FlashAttnGradTilingKey:
         if d_align == 192 or d_align == 256 or d_align == 768:
             return layout == 0 or swizzle == 0 or deter == 0 or deter_family == 12
         return True
+
+
+def _bn2s2_key_valid(key):
+    """剪掉本实现未走到的组合，控制二进制数量。"""
+    (
+        template,
+        layout,
+        mask_mode,
+        swizzle,
+        d_align,
+        dv_align,
+        is_bn2_multiblk,
+        bn2_need_zero,
+        deter,
+        sink,
+        pre_sfmg,
+    ) = key
+    if deter == 1 and (d_align == 512 or dv_align == 512):
+        return False
+    if pre_sfmg != 0:
+        if (
+            template != Tmpl.BN2S2
+            or layout != 1
+            or deter != 1
+            or (sink != 0)
+            or (dv_align < 128)
+        ):
+            return False
+    if template == Tmpl.RESERVED_UNUSED:
+        return False
+    if template == Tmpl.BN2S2:
+        if layout == 0:
+            if deter != 0 or swizzle != 0:
+                return False
+            if is_bn2_multiblk == 1 or bn2_need_zero == 1:
+                return False
+            if d_align != dv_align:
+                return False
+            return d_align == 64 or d_align == 128
+        if deter == 0:
+            if is_bn2_multiblk == 1 or bn2_need_zero == 1:
+                return False
+            if d_align != dv_align and (not (d_align == 192 and dv_align == 128)):
+                return False
+            return (
+                d_align == 64
+                or d_align == 128
+                or d_align == 192
+                or (d_align == 256)
+                or (d_align == 512)
+                or (d_align == 768)
+            )
+    if template != Tmpl.BN2GS1S2 and template != Tmpl.BN2 and (template != Tmpl.BN2S2):
+        return False
+    if deter == 1:
+        if template != Tmpl.BN2GS1S2 and template != Tmpl.BN2S2:
+            return False
+        if swizzle != 0:
+            return False
+        if is_bn2_multiblk == 1 or bn2_need_zero == 1:
+            return False
+        if template == Tmpl.BN2S2:
+            if layout != 1:
+                return False
+    if template == Tmpl.BN2:
+        if (
+            d_align == 192
+            or d_align == 256
+            or d_align == 512
+            or (d_align == 768)
+            or (swizzle != 0)
+        ):
+            return False
+        if d_align != dv_align:
+            return False
+        if bn2_need_zero == 1:
+            return is_bn2_multiblk == 1 and mask_mode != 0
+        return True
+    if is_bn2_multiblk == 1 or bn2_need_zero == 1:
+        return False
+    if d_align != dv_align and (not (d_align == 192 and dv_align == 128)):
+        return False
+    if d_align == 192 or d_align == 256 or d_align == 512 or (d_align == 768):
+        return layout == 0 or swizzle == 0
+    return True

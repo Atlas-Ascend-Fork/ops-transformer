@@ -46,7 +46,7 @@ def _ramp_asc(lo, hi, q):
     return (x + y) * (y - x + 1) // 2
 
 
-def col_prefix_body(m, p, q, c):
+def col_prefix_body(m, p, q, c, cast_int64=True):
     """sum_{j<c} h(j)，h(j) = max(min(j+P, M-1) - max(j-Q, 0) + 1, 0)。O(1)。
 
     统一梯形，两种 mask 共用（mask3 取 P = M-1 即上界恒为 M-1）。
@@ -54,10 +54,11 @@ def col_prefix_body(m, p, q, c):
     调用方保证 c <= N-1。
     """
     # Cast before products, not merely on return: large grids exceed INT32.
-    m = pl.astype(m, pl.DT_INT64)
-    p = pl.astype(p, pl.DT_INT64)
-    q = pl.astype(q, pl.DT_INT64)
-    c = pl.astype(c, pl.DT_INT64)
+    if cast_int64:
+        m = pl.astype(m, pl.DT_INT64)
+        p = pl.astype(p, pl.DT_INT64)
+        q = pl.astype(q, pl.DT_INT64)
+        c = pl.astype(c, pl.DT_INT64)
     live = pl.min(pl.max(p + q + 1, 0), 1)
     lo = pl.max(-p, 0)
     hi = pl.min(m + q - 1, c - 1)
@@ -126,11 +127,14 @@ def col_invert(constInfo, t):
     return s1o, s2o
 
 
-def col_packed_to_dense(constInfo, gidx):
+def col_packed_to_dense(constInfo, gidx, resource_bn2s2=False):
     """全局 packed 下标 -> dense 全局块下标（与 swizzle_idx 同口径）。"""
     head = gidx // constInfo.packedPerHead
     t = gidx % constInfo.packedPerHead
-    s1o, s2o = col_invert(constInfo, t)
+    if resource_bn2s2:
+        s1o, s2o = col_invert_bn2s2(constInfo, t)
+    else:
+        s1o, s2o = col_invert(constInfo, t)
     return head * constInfo.s1oS2o + s2o * constInfo.s1Outer + s1o
 
 
@@ -187,3 +191,94 @@ def causal_swizzle_idx(constInfo, cBlockIdx, coreNum, localIdx):
     col = residue + lo * coreNum
     row = col + tail - causal_tail_prefix(m, residue, coreNum, lo)
     return (heads - 1) * constInfo.s1oS2o + col * m + row
+
+
+# BN2S2 column geometry keeps its original integer widths and task mapping.
+BN2S2_L2_CACHE_BYTES = 134217728  # 128MB，与 host info.l2CacheSize 在 9599 上同值
+
+
+BN2S2_COL_BISECT_STEPS = 10
+
+
+BN2S2_COL_MAX_ROUNDS = 8
+
+
+def col_prefix_body_bn2s2(m, p, q, c):
+    return col_prefix_body(m, p, q, c, False)
+
+
+BN2S2_B_NEIGHBOR = 512
+
+
+BN2S2_STRIDE_MIN = 8
+
+
+def col_wave_tiles_bn2s2(constInfo, coreNum):
+    """窗口 B = min(V, max(C*STRIDE_MIN, B_NEIGHBOR))。"""
+    v = constInfo.packedPerHead
+    b_min = pl.max(coreNum, coreNum * BN2S2_STRIDE_MIN)
+    return pl.min(v, pl.max(b_min, BN2S2_B_NEIGHBOR))
+
+
+def _col_wave_partition_bn2s2(constInfo, cBlockIdx, coreNum):
+    v = constInfo.packedPerHead
+    win = col_wave_tiles_bn2s2(constInfo, coreNum)
+    start = col_part_lo(win, coreNum, cBlockIdx)
+    count_c = col_part_lo(win, coreNum, cBlockIdx + 1) - start
+    waves = (v + win - 1) // pl.max(win, 1)
+    last_len = v - (waves - 1) * win
+    last_count = pl.max(0, pl.min(count_c, last_len - start))
+    tiles = (waves - 1) * count_c + last_count
+    return v, win, start, count_c, waves, tiles
+
+
+def col_core_count_bn2s2(constInfo, cBlockIdx, coreNum):
+    """本核块数 = tiles_per_head * heads。末 wave 按实际剩余，无空槽。"""
+    _v, _win, _start, _count, _waves, tiles = _col_wave_partition_bn2s2(
+        constInfo, cBlockIdx, coreNum
+    )
+    heads = constInfo.bSize * constInfo.n2Size * constInfo.gSize
+    return tiles * heads
+
+
+def col_local_to_global_bn2s2(constInfo, cBlockIdx, coreNum, localIdx):
+    """HeadSliceSplit：先做完本 head 的所有 wave，再换下一个 head。"""
+    v, win, start, count_c, waves, tiles = _col_wave_partition_bn2s2(
+        constInfo, cBlockIdx, coreNum
+    )
+    safe = pl.max(tiles, 1)
+    head = localIdx // safe
+    inner = localIdx % safe
+    full = (waves - 1) * count_c
+    in_full = pl.min(pl.max(full - inner, 0), 1)
+    wave = in_full * (inner // pl.max(count_c, 1)) + (1 - in_full) * (waves - 1)
+    off = in_full * (inner % pl.max(count_c, 1)) + (1 - in_full) * (inner - full)
+    t = wave * win + start + off
+    return head * v + t
+
+
+def col_invert_bn2s2(constInfo, t):
+    """head 内 packed 下标 t -> (s1o, s2o)。定长二分，自动跳过零高列。
+
+    判据必须是「最小的 c 使 P(c+1) > t」。零高列满足 P(c) == P(c+1)，该判据
+    自动跳过；若写成「P(c) <= t 的最大 c」会停在零高列上并算出越界 s1o。
+    二分只会问到 c = mid+1 <= N-1，故这里用不上末列特例。
+    """
+    m = constInfo.s1Outer
+    p = constInfo.colP
+    q = constInfo.colQ
+    lo = 0
+    hi = constInfo.s2Outer - 1
+    for _ in pl.range(0, BN2S2_COL_BISECT_STEPS):
+        mid = (lo + hi) // 2
+        gt = pl.min(pl.max(col_prefix_body_bn2s2(m, p, q, mid + 1) - t, 0), 1)
+        act = pl.min(pl.max(hi - lo, 0), 1)
+        hi = hi - act * gt * (hi - mid)
+        lo = lo + act * (1 - gt) * (mid + 1 - lo)
+    s2o = lo
+    s1o = pl.max(s2o - q, 0) + (t - col_prefix_body_bn2s2(m, p, q, s2o))
+    return s1o, s2o
+
+
+def col_packed_to_dense_bn2s2(constInfo, gidx):
+    return col_packed_to_dense(constInfo, gidx, True)

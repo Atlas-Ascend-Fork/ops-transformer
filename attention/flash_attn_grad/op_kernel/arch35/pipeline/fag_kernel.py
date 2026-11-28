@@ -40,13 +40,23 @@ L0C 累加，不每轮 ``sync_all``。BN2 支持 mask，禁止 BN2+swizzle，且
 GS1S2 deterministic 完全隔离。
 """
 
-import inspect
+from pipeline.fag_bindings import bind_codegen_helpers as _bind_codegen_helpers
+from pipeline.fag_kernel_deter import run_plan_cube_bn2s2, run_plan_vector_bn2s2
+from pipeline.fag_kernel_norm import (
+    normal_score_pair_bn2s2,
+    normal_vector_retire_bn2s2,
+    _run_preload2_cube_bn2s2,
+    _run_preload2_vector_bn2s2,
+    _run_preload2_cube_gs_normal_bn2s2,
+    _run_preload2_vector_gs_normal_bn2s2,
+)
 
 import pypto_pro.language as pl
 
 from compute import fag_block_cube
 from compute import fag_block_vec
 from memory import fag_buffers
+from memory.fag_mem import PLAN_HAS_P_NZP_bn2s2
 import fag_common
 import fag_nzout
 from schedule.deterministic import fag_deter_formulas, fag_deter_legacy, fag_deter_state
@@ -84,37 +94,43 @@ _PINGPONG_LISTS = frozenset(
         "SYNC_C2_TO_V2_FLAG",
         "SYNC_V2_TO_C1_FLAG",
         "SYNC_V2_TO_C2_FLAG",
+        "SYNC_C1_TO_V2_FLAG_bn2s2",
+        "SYNC_C2_TO_V2_FLAG_bn2s2",
+        "SYNC_V2_TO_C1_FLAG_bn2s2",
+        "SYNC_V2_TO_C2_FLAG_bn2s2",
+        "SYNC_C4_TO_V6_PP_FLAG_bn2s2",
+        "SYNC_DKV_RELEASE_PP_FLAG_bn2s2",
+        "WIDE_DK_READY_bn2s2",
+        "WIDE_DV_READY_bn2s2",
+        "WIDE_KV_READ_DONE_bn2s2",
     }
 )
 
 
 def _bind_helpers():
-    g = globals()
-    for mod in (
-        fag_block_cube,
-        fag_block_vec,
-        fag_buffers,
-        fag_common,
-        fag_deter_formulas,
-        fag_deter_legacy,
-        fag_deter_state,
-        fag_deter_fixed,
-        fag_deter_baseline,
-        fag_deter_band_owner,
-        fag_deter_band_plan,
-        fag_deter_tnd_dense,
-        fag_deter_tnd_sparse,
-        fag_deter_tnd_plan,
-        fag_deter_tnd_normalized,
-        fag_schedule,
-        fag_nzout,
-    ):
-        for name, val in vars(mod).items():
-            if name.startswith("_") or inspect.ismodule(val):
-                continue
-            if isinstance(val, list) and name not in _PINGPONG_LISTS:
-                continue
-            g[name] = val
+    _bind_codegen_helpers(
+        globals(),
+        (
+            fag_block_cube,
+            fag_block_vec,
+            fag_buffers,
+            fag_common,
+            fag_deter_formulas,
+            fag_deter_legacy,
+            fag_deter_state,
+            fag_deter_fixed,
+            fag_deter_baseline,
+            fag_deter_band_owner,
+            fag_deter_band_plan,
+            fag_deter_tnd_dense,
+            fag_deter_tnd_sparse,
+            fag_deter_tnd_plan,
+            fag_deter_tnd_normalized,
+            fag_schedule,
+            fag_nzout,
+        ),
+        _PINGPONG_LISTS,
+    )
 
 
 _bind_helpers()
@@ -876,8 +892,8 @@ def flash_attn_grad_preload2(
     d2dQ = viewD2Q * dQ
     s1ndQ = constInfo.s1ViewSize * d2dQ
     if template == Tmpl.BN2:
-        # BN2 无 GQA，KV 与 Q 同轴；V/dO 仍按 dSize 建，与现网 BN2 一致。
-        dV = constInfo.dSize
+        # BN2 has no GQA; Q/K share head axes, but V/dY/dV use the actual Dv.
+        dV = constInfo.dvSize
         viewD0KV = constInfo.viewD0Q
         viewD2KV = constInfo.viewD2Q
     else:
@@ -998,7 +1014,9 @@ def flash_attn_grad_preload2(
                 [s2ndKVv, d2dKVv, dV, 1],
                 dtype=pl.DT_FP32,
             )
-            v1w = 256 if dv_align == 768 else dv_align
+            # Keep one D-based UB layout for the wide BN2 main/scratch aliases.
+            # D192/Dv128 loads 128 valid columns into 192-column physical rows.
+            v1w = 256 if d_align >= 512 else d_align
         else:
             # 单块 BN2 的 C3 被 tilingkey 剪掉 store，不能把 UB
             # 或 16-bit out 冒充成 fp32 GM 参数。dQ 用 per-core 条带。
@@ -1051,7 +1069,7 @@ def flash_attn_grad_preload2(
             dv, [1, dvElems], [dvElems, 1], dtype=input_dtype
         )
         # V1 列宽：768 档工作 tile 仍是 256，其余等于 dv_align。
-        v1w = 256 if dv_align == 768 else dv_align
+        v1w = 256 if dv_align >= 512 else dv_align
 
     if mask_mode != 0:
         tensor_mask = pl.make_tensor(
@@ -1142,7 +1160,7 @@ def flash_attn_grad_preload2(
                     dv, [1, dvElems], [dvElems, 1], dtype=input_dtype
                 )
                 zero_ub = make_pre_zero_buffer_f16()
-                if layout == 1:
+                if layout == 1 and is_bn2_multiblk == 0:
                     # 变长 TND：只清“空 batch 对侧”的行，运行期按 cu_seqlens 定位。
                     zero_tnd_empty_batch(
                         constInfo,
@@ -1755,4 +1773,1409 @@ def flash_attn_grad_preload2(
                         sink_red_ub.current(),
                         sink_row_ub,
                         constInfo.aivCount,
+                    )
+
+
+# BN2S2 entry/pipeline: separate resource and synchronization semantics.
+
+
+def process_bn2s2(
+    q: pl.Ptr[pl.DT_UINT8],
+    k: pl.Ptr[pl.DT_UINT8],
+    v: pl.Ptr[pl.DT_UINT8],
+    dout: pl.Ptr[pl.DT_UINT8],
+    attn_out: pl.Ptr[pl.DT_UINT8],
+    softmax_lse: pl.Ptr[pl.DT_UINT8],
+    # TND 变长：与 preload3 同款，循环外创建视图，非 TND 时为 null（不读）。
+    cu_seqlens_q: pl.Ptr[pl.DT_UINT8],
+    cu_seqlens_kv: pl.Ptr[pl.DT_UINT8],
+    seqused_q: pl.Ptr[pl.DT_UINT8],
+    seqused_kv: pl.Ptr[pl.DT_UINT8],
+    attn_mask: pl.Ptr[pl.DT_UINT8],
+    metadata: pl.Ptr[pl.DT_UINT8],
+    sinks: pl.Ptr[pl.DT_UINT8],
+    dq: pl.Ptr[pl.DT_UINT8],
+    dk: pl.Ptr[pl.DT_UINT8],
+    dv: pl.Ptr[pl.DT_UINT8],
+    dsink: pl.Ptr[pl.DT_UINT8],
+    workspace: pl.Ptr[pl.DT_UINT8],
+    tiling: FlashAttnGradTilingData,
+    d_align,
+    dv_align,
+    swizzle,
+    deter,
+    sink,
+):
+    """1-ahead 入口：建视图、pre/post，并按 template/deter 分发主循环。
+
+    cube/vector 主循环已拆成 BN2、GS normal、GS deterministic、BN2S2 deterministic 四套。
+    路径按编译期 template/deter 分发。
+
+    BN2：一个核独占整个 (b, n2) head；不跑 ws pre/post（仅 ``bn2_need_zero`` 清 16-bit out）。
+
+    GS1S2 / BN2S2：dq 走三段 fp32 ws 累加区，进循环前清 ws，循环后 post scale+cast。
+
+    当前 BN2S2 + deter 在主入口优先进入 process_deter_plan，保留独立的
+    metadata 计划、同步和片上资源。此处留存旧分支，不替代该确定性实现。
+
+    BN2S2 + 非deter 复用 fag_kernel_norm 列步进主循环：d<=128 列末直出；
+    d==192 列末 flush ws；d==256 的 dV 驻留而 dK 逐 task 原子写 ws；
+    宽 D 双逐 task 原子写 ws。d>=192 在 sync_all 后 post 三段收尾，
+    不使用曾撤回的列末事件+GM读取直出机制。
+
+    MultiBlk（is_bn2_multiblk）：dQ 首有效 s2 覆盖 workspace，其余 AtomicAdd，
+    vector 只在 isLastS1Outer 从 GM Muls+Cast；dK/dV 在 L0C 累加到换 s2 再写回。
+    """
+    coreNum = pl.get_block_num()
+    # swizzle 来自 tilingkey。BN2 is_valid 保证为 0，与原先写死 0 等价。
+    cu_q_tensor = pl.make_tensor(cu_seqlens_q, [tiling.b + 1], [1], dtype=pl.DT_INT32)
+    cu_kv_tensor = pl.make_tensor(cu_seqlens_kv, [tiling.b + 1], [1], dtype=pl.DT_INT32)
+    used_q_tensor = pl.make_tensor(seqused_q, [tiling.b], [1], dtype=pl.DT_INT32)
+    used_kv_tensor = pl.make_tensor(seqused_kv, [tiling.b], [1], dtype=pl.DT_INT32)
+    # 与 preload3 共用逻辑长度 / GM 视图长度的初始化约定。
+    constInfo = set_const_info_bn2s2(tiling, coreNum, cu_q_tensor, cu_kv_tensor)
+
+    dQ = constInfo.dSize
+    viewD2Q = constInfo.viewD2Q
+    d2dQ = viewD2Q * dQ
+    s1ndQ = constInfo.s1ViewSize * d2dQ
+    dV = constInfo.dvSize
+    viewD0KV = constInfo.viewD0KV
+    viewD2KV = constInfo.viewD2KV
+    d2dKV = viewD2KV * dQ
+    s2ndKV = constInfo.s2ViewSize * d2dKV
+    d2dQv = viewD2Q * dV
+    s1ndQv = constInfo.s1ViewSize * d2dQv
+    d2dKVv = viewD2KV * dV
+    s2ndKVv = constInfo.s2ViewSize * d2dKVv
+
+    tensor_q = pl.make_tensor(
+        q,
+        [constInfo.viewD0Q, constInfo.s1ViewSize, viewD2Q, dQ],
+        [s1ndQ, d2dQ, dQ, 1],
+        dtype=input_dtype,
+    )
+    tensor_k = pl.make_tensor(
+        k,
+        [viewD0KV, constInfo.s2ViewSize, viewD2KV, dQ],
+        [s2ndKV, d2dKV, dQ, 1],
+        dtype=input_dtype,
+    )
+    # MM3 需要未转置的 K，必须与 MM2 的 K^T 视图分开(layout 各自推导)
+    tensor_k_nt = pl.make_tensor(
+        k,
+        [viewD0KV, constInfo.s2ViewSize, viewD2KV, dQ],
+        [s2ndKV, d2dKV, dQ, 1],
+        dtype=input_dtype,
+    )
+    tensor_v = pl.make_tensor(
+        v,
+        [viewD0KV, constInfo.s2ViewSize, viewD2KV, dV],
+        [s2ndKVv, d2dKVv, dV, 1],
+        dtype=input_dtype,
+    )
+    tensor_dy = pl.make_tensor(
+        dout,
+        [constInfo.viewD0Q, constInfo.s1ViewSize, viewD2Q, dV],
+        [s1ndQv, d2dQv, dV, 1],
+        dtype=input_dtype,
+    )
+    tensor_y = pl.make_tensor(
+        attn_out,
+        [constInfo.viewD0Q, constInfo.s1ViewSize, viewD2Q, dV],
+        [s1ndQv, d2dQv, dV, 1],
+        dtype=input_dtype,
+    )
+    # BN2 无 GQA（g=1），n1==n2，与原先 [B,n2,S1] 等价。
+    n1Size = constInfo.n2Size * constInfo.gSize
+    if layout == 1:
+        # TND：LSE 为 [N1,T1]，head stride 必须是实际 token 总数。
+        tensor_lse = pl.make_tensor(
+            softmax_lse,
+            [n1Size, constInfo.t1Size],
+            [constInfo.t1Size, 1],
+            dtype=pl.DT_FP32,
+        )
+    else:
+        tensor_lse = pl.make_tensor(
+            softmax_lse,
+            [constInfo.bSize, n1Size, constInfo.s1Size],
+            [n1Size * constInfo.s1Size, constInfo.s1Size, 1],
+            dtype=pl.DT_FP32,
+        )
+
+    ws_ptr = pl.make_ptr(workspace, dtype=pl.DT_FP32)
+    # 与 preload3 / host 共用物理 token 口径；BN2 也用它定位 dsink 槽位。
+    wsRowsQ = constInfo.t1Size * constInfo.n1Size
+    wsRowsKV = constInfo.t2Size * constInfo.n2Size
+    pass
+    dq_workspace = ws_ptr
+    tensor_dq_ws = pl.make_tensor(
+        dq_workspace,
+        [constInfo.viewD0Q, constInfo.s1ViewSize, viewD2Q, dQ],
+        [s1ndQ, d2dQ, dQ, 1],
+        dtype=pl.DT_FP32,
+    )
+    dqElems = constInfo.t1Size * n1Size * dQ
+    tensor_dq_ws_flat = pl.make_tensor(
+        dq_workspace, [1, dqElems], [dqElems, 1], dtype=pl.DT_FP32
+    )
+    tensor_dq_out = pl.make_tensor(dq, [1, dqElems], [dqElems, 1], dtype=input_dtype)
+    tensor_dk_out4d = pl.make_tensor(
+        dk,
+        [viewD0KV, constInfo.s2ViewSize, viewD2KV, dQ],
+        [s2ndKV, d2dKV, dQ, 1],
+        dtype=input_dtype,
+    )
+    tensor_dv_out4d = pl.make_tensor(
+        dv,
+        [viewD0KV, constInfo.s2ViewSize, viewD2KV, dV],
+        [s2ndKVv, d2dKVv, dV, 1],
+        dtype=input_dtype,
+    )
+    if layout == 1:
+        # TND 专属：dk/dv ws 段视图 + flats（deter 分档的 flush/atomic
+        # 目标、post 的 ws→输出 cast）+ 输出 flats。非确定场景不消费。
+        dk_workspace = pl.addptr(dq_workspace, wsRowsQ * tiling.d)
+        dv_workspace = pl.addptr(dk_workspace, wsRowsKV * tiling.d)
+        tensor_dk_ws = pl.make_tensor(
+            dk_workspace,
+            [viewD0KV, constInfo.s2ViewSize, viewD2KV, dQ],
+            [s2ndKV, d2dKV, dQ, 1],
+            dtype=pl.DT_FP32,
+        )
+        tensor_dv_ws = pl.make_tensor(
+            dv_workspace,
+            [viewD0KV, constInfo.s2ViewSize, viewD2KV, dV],
+            [s2ndKVv, d2dKVv, dV, 1],
+            dtype=pl.DT_FP32,
+        )
+        dkElems = constInfo.t2Size * constInfo.n2Size * dQ
+        dvElems = constInfo.t2Size * constInfo.n2Size * dV
+        tensor_dk_ws_flat = pl.make_tensor(
+            dk_workspace, [1, dkElems], [dkElems, 1], dtype=pl.DT_FP32
+        )
+        tensor_dv_ws_flat = pl.make_tensor(
+            dv_workspace, [1, dvElems], [dvElems, 1], dtype=pl.DT_FP32
+        )
+        tensor_dk_out = pl.make_tensor(
+            dk, [1, dkElems], [dkElems, 1], dtype=input_dtype
+        )
+        tensor_dv_out = pl.make_tensor(
+            dv, [1, dvElems], [dvElems, 1], dtype=input_dtype
+        )
+    # v1w：BN2S2 各场景 dv_align ∈ {64,128,192,256,512,768}（512/768 仅
+    # TND d>256 可达且 D==Dv），dense 门保证 D==Dv，故与原 dense 专用的
+    # d_align 取值恒等。512/768 档 y/dy 按 256 列窗分配，V1 按窗多趟。
+    v1w = 256 if dv_align >= 512 else dv_align
+
+    if mask_mode != 0:
+        tensor_mask = pl.make_tensor(
+            attn_mask,
+            [ATTEN_MASK_COMPRESS_bn2s2, ATTEN_MASK_COMPRESS_bn2s2],
+            [ATTEN_MASK_COMPRESS_bn2s2, 1],
+            dtype=pl.DT_UINT8,
+        )
+    else:
+        tensor_mask = tensor_lse
+
+    if template == Tmpl.BN2S2 and layout == 0:
+        # 与 host BuildWorkspacePlan 的段布局逐字镜像（tmpl==BN2S2 && !isTnd →
+        # 单段）。deter 不参与判断：dense+BN2S2+deter 不可达（路由 bn2S2NotTndLimit
+        # 要求非确定 + is_valid 剪掉该组合键），故无需显式排除。
+        dsinkOffset = wsRowsQ * tiling.d + 128 * pl.max(tiling.d, tiling.dv)
+    else:
+        dsinkOffset = (
+            wsRowsQ * tiling.d
+            + wsRowsKV * tiling.d
+            + wsRowsKV * tiling.dv
+            + 128 * pl.max(tiling.d, tiling.dv)
+        )
+    dsink_workspace = pl.addptr(ws_ptr, dsinkOffset)
+    tensor_sinks = pl.make_tensor(sinks, [constInfo.n1Size], [1], dtype=pl.DT_FP32)
+    dsinkElems = constInfo.aivCount * constInfo.n1Size
+    tensor_dsink_ws = pl.make_tensor(
+        dsink_workspace, [1, dsinkElems], [dsinkElems, 1], dtype=pl.DT_FP32
+    )
+    sfmgElems = constInfo.n1Size * constInfo.t1Size
+    tensor_sfmg_ws = pl.make_tensor(
+        pl.addptr(dsink_workspace, dsinkElems),
+        [1, sfmgElems],
+        [sfmgElems, 1],
+        dtype=pl.DT_FP32,
+    )
+    tensor_dsink_out = pl.make_tensor(
+        dsink, [1, constInfo.n1Size], [constInfo.n1Size, 1], dtype=pl.DT_FP32
+    )
+
+    # AIV get_block_idx 按 vector 子核计数，必须换算成物理核，否则
+    # cube/vector 的 numBlocks 不一致，set/wait 配不上。
+    cBlockIdx = pl.get_block_idx() // pl.get_subblock_num()
+    coreNum = constInfo.coreNum
+    meta = pl.make_tensor(metadata, [META_VIEW_LEN_bn2s2], [1], dtype=pl.DT_INT32)
+    one64 = pl.const(1, pl.DT_INT64)
+    fagOff = pl.getval(meta, META_HEAD_FAG_START_INDEX_bn2s2) * one64
+    blockStart = (
+        pl.getval(meta, fagOff + META_FAG_BLOCK_STARTS_OFFSET_bn2s2 + cBlockIdx) * one64
+    )
+    blockEnd = (
+        pl.getval(meta, fagOff + META_FAG_BLOCK_ENDS_OFFSET_bn2s2 + cBlockIdx) * one64
+    )
+    numBlocks = block_range_of_bn2s2(
+        constInfo, cBlockIdx, coreNum, blockStart, blockEnd
+    )
+    if (
+        layout == 1
+        and deter == 0
+        and d_align == 192
+        and (mask_mode == 0 or mask_mode == 3)
+    ):
+        if pl.getval(meta, fagOff + fag_schedule.META_FAG_FIXED_GS_MODE_bn2s2) == -1:
+            constInfo.completeKvOwner = 1
+    if (
+        layout == 1
+        and deter == 0
+        and swizzle == 1
+        and (
+            (mask_mode == 0 and d_align == 256)
+            or (mask_mode == 3 and d_align != 256)
+            or (mask_mode == 4 and d_align != 192 and d_align != 256)
+        )
+    ):
+        set_fixed_gs_schedule_bn2s2(constInfo, meta, fagOff)
+        if constInfo.normalSwizzleEnabled == 1:
+            numBlocks = block_range_of(
+                constInfo, cBlockIdx, coreNum, blockStart, blockEnd
+            )
+
+    if layout == 1 and deter == 0 and d_align >= 256:
+        sw = make_normal_swizzle_bn2s2(meta, constInfo)
+        ownsColumn = pl.const(1, pl.DT_INT64)
+        if sw.active == 1 and sw.kind != 0:
+            ownsColumn = 0
+            if sw.kind == 2 and sw.pre >= 0 and sw.nxt >= 0:
+                ownsColumn = 1
+                for batch in pl.range(0, constInfo.bSize):
+                    qBlocks = (
+                        normal_meta_i64_bn2s2(meta, sw.tail + 122 + 32 * batch) + 127
+                    ) // 128
+                    kBlocks = (
+                        normal_meta_i64_bn2s2(meta, sw.tail + 124 + 32 * batch) + 127
+                    ) // 128
+                    if qBlocks != kBlocks or qBlocks == 0:
+                        ownsColumn = 0
+        if (
+            pl.getval(meta, fagOff + META_FAG_FALLBACK_TO_GS_bn2s2) == 0
+            and ownsColumn == 1
+            and constInfo.gSize == 1
+            and (dQ + 15) // 16 * 16 <= d_align
+            and (dV + 15) // 16 * 16 <= d_align
+            and wsRowsKV * dQ >= coreNum * 128 * d_align
+            and wsRowsKV * dV >= coreNum * 128 * d_align
+        ):
+            constInfo.wideKvSlots = 1
+            if d_align == 512 and dv_align == 512 and mask_mode == 3 and sink == 0:
+                if (
+                    sw.active == 0
+                    and constInfo.enablePreSfmg == 1
+                    and dQ > 256
+                    and dQ <= 384
+                    and dV > 256
+                    and dV <= 384
+                    and wsRowsKV * dQ >= 2 * coreNum * 128 * d_align
+                    and wsRowsKV * dV >= 2 * coreNum * 128 * d_align
+                ):
+                    constInfo.wideKvDoubleBuffer = 1
+
+    mm1_res = make_mm1_res(True)
+    mm2_res = make_mm2_res(True)
+    ds_l1 = make_ds_l1_bn2s2()
+    p_l1 = make_p_l1_bn2s2()
+    ds_t_l1 = make_ds_t_l1_bn2s2()
+    p_t_l1 = make_p_t_l1_bn2s2()
+
+    pass
+    if layout == 1:
+        # Wide D and the internal GS fallback accumulate K/V in FP32 workspace.
+        # Their post covers every physical output row, including empty batches.
+        with pl.section_vector():
+            zero_ub = make_pre_zero_buffer_f32(True)
+            if d_align <= 128:
+                clearKvWs = pl.getval(meta, fagOff + META_FAG_FALLBACK_TO_GS_bn2s2)
+            elif deter == 0 and d_align >= 256:
+                clearKvWs = 1 - constInfo.wideKvSlots
+            elif deter == 0 and d_align == 192 and (mask_mode == 0 or mask_mode == 3):
+                clearKvWs = 1 - constInfo.completeKvOwner
+            else:
+                clearKvWs = 1
+            isolatedDense = False
+            if (
+                template == Tmpl.BN2S2
+                and deter == 0
+                and d_align == 128
+                and mask_mode == 0
+            ):
+                isolatedDense = (
+                    clearKvWs == 0
+                    and constInfo.sequsedQOptional + constInfo.sequsedKvOptional == 0
+                    and dQ % 16 == 0
+                    and dV % 16 == 0
+                )
+            if isolatedDense:
+                dense_zero16 = make_pre_zero_buffer_f16(True)
+                pre_dense_tnd_bn2s2(
+                    constInfo,
+                    cu_q_tensor,
+                    cu_kv_tensor,
+                    meta,
+                    fagOff,
+                    tensor_dq_ws_flat,
+                    tensor_dq_out,
+                    tensor_dk_out,
+                    tensor_dv_out,
+                    zero_ub.current(),
+                    dense_zero16.current(),
+                )
+            else:
+                process_pre_from_meta_bn2s2(
+                    meta,
+                    fagOff,
+                    tensor_dq_ws_flat,
+                    tensor_dk_ws_flat,
+                    tensor_dv_ws_flat,
+                    dQ,
+                    dV,
+                    zero_ub.current(),
+                    clearKvWs,
+                )
+            if d_align <= 128 or (deter == 0 and d_align >= 256):
+                zero16_ub = make_pre_zero_buffer_f16(True)
+                if clearKvWs == 0 and isolatedDense == 0:
+                    # Non-sparse direct stores cover all K/V columns of a
+                    # nonempty query batch when no seqused truncates it.
+                    if (
+                        mask_mode == 0
+                        and constInfo.sequsedQOptional + constInfo.sequsedKvOptional
+                        == 0
+                    ):
+                        zero_tnd_empty_batch(
+                            constInfo,
+                            cu_q_tensor,
+                            cu_kv_tensor,
+                            tensor_dq_out,
+                            tensor_dk_out,
+                            tensor_dv_out,
+                            zero16_ub.current(),
+                            False,
+                        )
+                    else:
+                        covered = pl.const(0, pl.DT_INT64)
+                        if (
+                            deter == 0
+                            and mask_mode == 3
+                            and d_align == 512
+                            and dv_align == 512
+                        ):
+                            covered = normal_causal_kv_covered_bn2s2(
+                                constInfo, cu_q_tensor, cu_kv_tensor, sw.active
+                            )
+                        if covered == 0:
+                            process_pre_kv_out_zero_bn2s2(
+                                meta,
+                                fagOff,
+                                tensor_dk_out,
+                                tensor_dv_out,
+                                dQ,
+                                dV,
+                                zero16_ub.current(),
+                                1,
+                            )
+            if sink == 1:
+                process_sink_zero_bn2s2(
+                    tensor_dsink_ws,
+                    constInfo,
+                    zero_ub.current(),
+                    pl.get_block_idx(),
+                )
+    else:
+        # dense（仅非确定可达）：host 只有 dq 段，仅清 dq ws。dk/dv 直出档
+        # 补一条按需清零：零 Q 任务（s1==0，metadata fagS1Outer_==0 早退
+        # 回退 GS 零块）与 seqused 有效长度外的列不会被主循环写，16-bit
+        # 输出必须 pre 兜底；s1>0 且无 seqused 时列必写（非稀疏 + 饱和），
+        # need=0 把清零行程折叠为空，保住主路径整份 kv 输出的写带宽。
+        with pl.section_vector():
+            zero_ub = make_pre_zero_buffer_f32(True)
+            zt = zero_ub.current()
+            dqElems = constInfo.t1Size * constInfo.n1Size * dQ
+            aivIdx = pl.get_block_idx()
+            aivCount = constInfo.aivCount
+            share = (dqElems + aivCount - 1) // aivCount
+            elemStart = aivIdx * share
+            nElems = pl.max(pl.min(share, dqElems - elemStart), 0)
+            preElems = pl.min(PRE_ELEMS_bn2s2[d_align], pl.max(nElems, 1))
+            pl.set_validshape(zt, [1, PRE_ELEMS_bn2s2[d_align]])
+            fill_zero_vf(zt, (preElems + VF_LANES_bn2s2 - 1) // VF_LANES_bn2s2)
+            process_pre_bn2s2(tensor_dq_ws_flat, zt, elemStart, nElems)
+            # 需要 dk/dv 输出清零兜底的两类输入：零 Q 任务、seqused 变长。
+            s1Empty = 1 - pl.min(pl.max(constInfo.s1Size, 0), 1)
+            hasUsed = pl.min(
+                constInfo.sequsedQOptional + constInfo.sequsedKvOptional, 1
+            )
+            needKvZero = pl.min(s1Empty + hasUsed, 1)
+            dkElems = constInfo.t2Size * constInfo.n2Size * dQ
+            dvElems = constInfo.t2Size * constInfo.n2Size * dV
+            tensor_dk_flat = pl.make_tensor(
+                dk, [1, dkElems], [dkElems, 1], dtype=input_dtype
+            )
+            tensor_dv_flat = pl.make_tensor(
+                dv, [1, dvElems], [dvElems, 1], dtype=input_dtype
+            )
+            zero16_ub = make_pre_zero_buffer_f16(True)
+            process_pre_kv_out_zero_bn2s2(
+                meta,
+                fagOff,
+                tensor_dk_flat,
+                tensor_dv_flat,
+                dQ,
+                dV,
+                zero16_ub.current(),
+                needKvZero,
+            )
+            if sink == 1:
+                process_sink_zero_bn2s2(tensor_dsink_ws, constInfo, zt, aivIdx)
+
+    if dv_align >= 128 and sink == 0:
+        with pl.section_vector():
+            if constInfo.enablePreSfmg == 1:
+                # The previous zero-fill uses this AIV's full UB. Drain its stores
+                # before reusing that space for the double-buffered row producer.
+                pl.system.bar_all()
+                sp_y = make_sp_y_ub(v1w)
+                sp_dy = make_sp_dy_ub(v1w)
+                sp_out = make_sp_out_ub(v1w)
+                sp_flat = make_sp_out_flat(v1w)
+                if (
+                    layout == 1
+                    and deter == 0
+                    and mask_mode == 3
+                    and d_align == 512
+                    and dv_align == 512
+                ):
+                    normal_wide_tnd_presfmg_bn2s2(
+                        constInfo,
+                        tensor_y,
+                        tensor_dy,
+                        tensor_sfmg_ws,
+                        sp_y,
+                        sp_dy,
+                        sp_out,
+                        sp_flat,
+                        fag_common.SP_WORK_W[v1w],
+                        dsinkOffset + dsinkElems,
+                    )
+                else:
+                    zero = make_pre_zero_buffer_f32()
+                    process_presfmg(
+                        constInfo,
+                        tensor_y,
+                        tensor_dy,
+                        tensor_sfmg_ws,
+                        sp_y,
+                        sp_dy,
+                        sp_out,
+                        sp_flat,
+                        fag_common.SP_WORK_W[v1w],
+                        zero.current(),
+                        tensor_dq_ws_flat,
+                        tensor_dq_ws_flat,
+                        tensor_dq_ws_flat,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    )
+    # All cores publish zero fills and completed per-row scalars before Vec1.
+    pl.system.sync_all()
+
+    with pl.section_cube():
+        q_l1 = make_q_l1(True)
+        k_l1 = make_k_l1_bn2s2()
+        k_l1_n = make_k_nd_l1_bn2s2()
+        v_l1 = make_v_l1(True)
+        do_l1 = make_do_l1(True)
+        left = make_l0a(True)
+        right = make_l0b_bn2s2()
+        acc = make_l0c_acc_bn2s2()
+        dk_acc = make_dk_l0c_chunk0_bn2s2()
+        dv_acc = make_bn2s2_norm_dv_l0c_chunk0_bn2s2()
+        # 192/256 档真两块（192=dk/dv 各 96 宽、256=dv 双 128 宽而 dk
+        # 哑元别名 dv）；64/128 档 chunk1 同址别名 chunk0，未用即剪。
+        dk_acc1 = make_dk_l0c_chunk1_bn2s2()
+        dv_acc1 = make_bn2s2_norm_dv_l0c_chunk1_bn2s2()
+        runInfos = make_normal_run_infos_bn2s2()
+        sched = pl.make_tuple(
+            meta=meta,
+            cBlockIdx=cBlockIdx,
+            coreNum=coreNum,
+            cuQ=cu_q_tensor,
+            cuKv=cu_kv_tensor,
+            usedQ=used_q_tensor,
+            usedKv=used_kv_tensor,
+            blockStart=blockStart,
+            blockEnd=blockEnd,
+        )
+        gm = pl.make_tuple(
+            tensor_q=tensor_q,
+            tensor_k=tensor_k,
+            tensor_k_nt=tensor_k_nt,
+            tensor_dy=tensor_dy,
+            tensor_v=tensor_v,
+            tensor_dq_ws=tensor_dq_ws,
+            tensor_dv_out=tensor_dv_out4d,
+            dk_slot_base=dk_workspace if layout == 1 else dq_workspace,
+            dv_slot_base=dv_workspace if layout == 1 else dq_workspace,
+            # 192/256 档（恒 TND）消费；其余档位哑元占位、不读。
+            tensor_dk_ws=tensor_dk_ws if d_align > 128 else tensor_dv_out4d,
+            tensor_dv_ws=tensor_dv_ws if d_align > 128 else tensor_dv_out4d,
+        )
+        buf = pl.make_tuple(
+            mm1_res=mm1_res,
+            mm2_res=mm2_res,
+            q_l1=q_l1,
+            k_l1=k_l1,
+            k_l1_n=k_l1_n,
+            v_l1=v_l1,
+            do_l1=do_l1,
+            left=left,
+            right=right,
+            acc=acc,
+            dk_acc=dk_acc,
+            dv_acc=dv_acc,
+            dk_acc1=dk_acc1,
+            dv_acc1=dv_acc1,
+            ds_l1=ds_l1,
+            ds_t_l1=ds_t_l1,
+            p_t_l1=p_t_l1,
+        )
+        if layout == 1:
+            # TND：metadata 运行期回退标记（split.h DoFagSparse——老仓
+            # DoSparse 饱和回退的迁移，host 读不到 cu_seqlens 判不了）。
+            # 标记置位时 metadata 已按 GS1S2 口径重切块，此处切 GS 非确定
+            # 主循环：区间解码随 GS 线性化，dK/dV 走 ws 累加（pre 已清三
+            # 段、post 由 doKvPost 补全）。dense 不走此路：host step4 同式
+            # 判饱和，不饱和 shape 本就路由 GS1S2，且 dense 无 dk/dv ws
+            # 视图（引用会在 trace 期 NameError）。
+            fbGs = pl.getval(meta, fagOff + META_FAG_FALLBACK_TO_GS_bn2s2)
+            if fbGs == FAG_FALLBACK_TO_GS_bn2s2:
+                gsSched = pl.make_tuple(
+                    meta=meta,
+                    fagOff=fagOff,
+                    cBlockIdx=cBlockIdx,
+                    coreNum=coreNum,
+                    cuQ=cu_q_tensor,
+                    cuKv=cu_kv_tensor,
+                    usedQ=used_q_tensor,
+                    usedKv=used_kv_tensor,
+                    blockStart=blockStart,
+                    blockEnd=blockEnd,
+                    numBlocks=numBlocks,
+                )
+                gsGm = pl.make_tuple(
+                    tensor_q=tensor_q,
+                    tensor_k=tensor_k,
+                    tensor_k_nt=tensor_k_nt,
+                    tensor_dy=tensor_dy,
+                    tensor_v=tensor_v,
+                    tensor_dq_ws=tensor_dq_ws,
+                    tensor_dk_ws=tensor_dk_ws,
+                    tensor_dv_ws=tensor_dv_ws,
+                )
+                _run_preload2_cube_gs_normal_bn2s2(
+                    constInfo, gsSched, gsGm, buf, runInfos
+                )
+            else:
+                _run_preload2_cube_bn2s2(constInfo, sched, gm, buf, runInfos)
+        else:
+            _run_preload2_cube_bn2s2(constInfo, sched, gm, buf, runInfos)
+
+    with pl.section_vector():
+        subIdx = pl.get_subblock_idx()
+        y_ub = make_y_ub_bn2s2(v1w)
+        dy_ub = make_dy_ub_bn2s2(v1w)
+        nzp_ub = make_normal_nzp_bn2s2(v1w)
+        p_nzp_ub = make_normal_p_nzp_bn2s2(v1w)
+        sfmg_ub = make_sfmg_ub_bn2s2(v1w)
+        lse_ub = make_lse_ub_bn2s2(v1w)
+        sink_part_ub = make_sink_part_ub_bn2s2(v1w)
+        mask_ub = make_mask_view_bn2s2(v1w)
+        mask_pre_ub = make_mask_pre_view_bn2s2(v1w)
+        cast_ub = make_cast_ub_bn2s2()
+        runInfos = make_normal_run_infos_bn2s2()
+        sched = pl.make_tuple(
+            meta=meta,
+            cBlockIdx=cBlockIdx,
+            coreNum=coreNum,
+            cuQ=cu_q_tensor,
+            cuKv=cu_kv_tensor,
+            usedQ=used_q_tensor,
+            usedKv=used_kv_tensor,
+            blockStart=blockStart,
+            blockEnd=blockEnd,
+            subIdx=subIdx,
+            v1w=v1w,
+        )
+        gm = pl.make_tuple(
+            tensor_y=tensor_y,
+            tensor_dy=tensor_dy,
+            tensor_sfmg_ws=tensor_sfmg_ws,
+            tensor_lse=tensor_lse,
+            dk_slot_base=dk_workspace if layout == 1 else dq_workspace,
+            dv_slot_base=dv_workspace if layout == 1 else dq_workspace,
+            tensor_dv_out=tensor_dv_out4d,
+            tensor_mask=tensor_mask,
+            tensor_dk_out=tensor_dk_out4d,
+            tensor_sinks=tensor_sinks,
+            tensor_dsink_ws=tensor_dsink_ws,
+        )
+        buf = pl.make_tuple(
+            mm1_res=mm1_res,
+            mm2_res=mm2_res,
+            y_ub=y_ub,
+            dy_ub=dy_ub,
+            nzp_ub=nzp_ub,
+            p_nzp_ub=p_nzp_ub,
+            sfmg_ub=sfmg_ub,
+            lse_ub=lse_ub,
+            sink_part_ub=sink_part_ub,
+            mask_ub=mask_ub,
+            mask_pre_ub=mask_pre_ub,
+            cast_ub=cast_ub,
+            ds_l1=ds_l1,
+            p_l1=p_l1,
+        )
+        if layout == 1:
+            # TND：同 cube 侧的运行期回退（META_FAG_FALLBACK_TO_GS==1 时
+            # metadata 已按 GS 口径重切，vector 切 GS 主循环；UB 缓冲与
+            # BN2S2 分支同款 v1w 构造，直接复用，buf 为超集）。
+            fbGsV = pl.getval(meta, fagOff + META_FAG_FALLBACK_TO_GS_bn2s2)
+            if fbGsV == FAG_FALLBACK_TO_GS_bn2s2:
+                gsSchedV = pl.make_tuple(
+                    meta=meta,
+                    fagOff=fagOff,
+                    cBlockIdx=cBlockIdx,
+                    coreNum=coreNum,
+                    cuQ=cu_q_tensor,
+                    cuKv=cu_kv_tensor,
+                    usedQ=used_q_tensor,
+                    usedKv=used_kv_tensor,
+                    blockStart=blockStart,
+                    blockEnd=blockEnd,
+                    numBlocks=numBlocks,
+                    subIdx=subIdx,
+                    v1w=v1w,
+                )
+                gsGmV = pl.make_tuple(
+                    tensor_y=tensor_y,
+                    tensor_dy=tensor_dy,
+                    tensor_sfmg_ws=tensor_sfmg_ws,
+                    tensor_lse=tensor_lse,
+                    tensor_mask=tensor_mask,
+                    tensor_sinks=tensor_sinks,
+                    tensor_dsink_ws=tensor_dsink_ws,
+                )
+                _run_preload2_vector_gs_normal_bn2s2(
+                    constInfo, gsSchedV, gsGmV, buf, runInfos, sink
+                )
+            else:
+                _run_preload2_vector_bn2s2(constInfo, sched, gm, buf, runInfos, sink)
+        else:
+            _run_preload2_vector_bn2s2(constInfo, sched, gm, buf, runInfos, sink)
+
+    """ BN2S2 与 GS1S2 共用：meta 行区间 dq 收尾 + 条件 dk/dv + sink。
+        dq 分区统一走 metadata 行区间（AICPU 无条件写入：
+        dense 按 b*s1*n1 行、TND 按物理 token*n1 行，FagSplitRows 均分），
+        BN2S2 非确定原先的 flat 自分区取消——两者覆盖同一元素集合、饱和时
+        worker 数相同，仅切分粒度（行 vs 元素）不同；TND 非确定的 pre 段
+        已在用同一套行区间，改后 pre/post 工人模型对齐。"""
+    pl.system.sync_all()
+    with pl.section_vector():
+        post_f32 = make_post_f32_buffer(True)
+        post_f16 = make_post_f16_buffer(True)
+        vBlockIdxP = pl.get_block_idx()
+        dqRowStartP = (
+            pl.getval(meta, fagOff + META_FAG_DQ_ROW_STARTS_bn2s2 + vBlockIdxP) * one64
+        )
+        dqRowEndP = (
+            pl.getval(meta, fagOff + META_FAG_DQ_ROW_ENDS_bn2s2 + vBlockIdxP) * one64
+        )
+        if (
+            layout == 1
+            and template == Tmpl.BN2S2
+            and deter == 0
+            and d_align == 128
+            and mask_mode == 0
+        ):
+            if isolatedDense == 1:
+                process_dense_dq_rows_bn2s2(
+                    constInfo,
+                    cu_q_tensor,
+                    cu_kv_tensor,
+                    tensor_dq_ws_flat,
+                    tensor_dq_out,
+                    dqRowStartP,
+                    dqRowEndP,
+                    post_f32,
+                    post_f32,
+                    post_f16,
+                    True,
+                )
+            else:
+                process_post(
+                    tensor_dq_ws_flat,
+                    tensor_dq_out,
+                    post_f32,
+                    post_f16,
+                    constInfo.scaleValue,
+                    dqRowStartP * dQ,
+                    (dqRowEndP - dqRowStartP) * dQ,
+                )
+        else:
+            process_post(
+                tensor_dq_ws_flat,
+                tensor_dq_out,
+                post_f32,
+                post_f16,
+                constInfo.scaleValue,
+                dqRowStartP * dQ,
+                (dqRowEndP - dqRowStartP) * dQ,
+            )
+        if template == Tmpl.BN2S2 and layout == 1 and deter == 0 and d_align >= 256:
+            doKvPost = constInfo.wideKvSlots == 0
+        elif template != Tmpl.BN2S2 or d_align > 128:
+            doKvPost = True
+        elif layout == 1 and deter == 0:
+            """
+               BN2S2 直出档（d<=128）TND 非确定：正常路径主循环列末直出，
+               post 只收 dq；运行期回退（FAG_FALLBACK_TO_GS==1）时主循环
+               已切 GS 流程、dK/dV 改 ws 累加，post 补全三段。
+            """
+            doKvPost = (
+                pl.getval(meta, fagOff + fag_schedule.META_FAG_FALLBACK_TO_GS_bn2s2)
+                == fag_schedule.FAG_FALLBACK_TO_GS_bn2s2
+            )
+        else:
+            doKvPost = False
+        if doKvPost:
+            """
+               doKvPost=False 仅剩两种命中：BN2S2 直出档（d<=128）的
+               正常路径（deter 与非确定同判，对齐老算子 SPLIT_AXIS==5
+               的 break）与 BN2S2+d<=128 的 dense（非 TND 不触发 AICPU
+               回退置位，直出恒成立）。其余（GS、BN2S2 的 192/256/512/
+               768 档、TND 运行期回退）一律走 ws + post 全三段——对齐老仓
+               DqkvMulsAndCastFromGM 的时机（sync_all 全局屏障后收尾，
+               GM 写穿透有保证；列末事件粒度的跨核 GM 读已实测存在可见
+               性竞态，撤回）。dK/dV 的写入端（192 驻留+flush / 256 dV
+               单驻留 / 512+768 逐 task atomic / 回退的驻留三件套）保持
+               不变，均为 post 消费服务。
+               d>128 档的判定是 trace 期常量：dk/dv 行区间只在命中的二进
+               制里被 trace。d<=128+TND+非确定档为运行期双路径。
+            """
+            dkvRowStartP = (
+                pl.getval(meta, fagOff + META_FAG_DKV_ROW_STARTS_bn2s2 + vBlockIdxP)
+                * one64
+            )
+            dkvRowEndP = (
+                pl.getval(meta, fagOff + META_FAG_DKV_ROW_ENDS_bn2s2 + vBlockIdxP)
+                * one64
+            )
+            process_post(
+                tensor_dk_ws_flat,
+                tensor_dk_out,
+                post_f32,
+                post_f16,
+                constInfo.scaleValue,
+                dkvRowStartP * dQ,
+                (dkvRowEndP - dkvRowStartP) * dQ,
+            )
+            if (
+                d_align == 192
+                and layout == 1
+                and deter == 0
+                and (mask_mode == 0 or mask_mode == 3)
+            ):
+                doDvPost = constInfo.completeKvOwner == 0
+            else:
+                doDvPost = True
+            if doDvPost:
+                process_post(
+                    tensor_dv_ws_flat,
+                    tensor_dv_out,
+                    post_f32,
+                    post_f16,
+                    1.0,
+                    dkvRowStartP * dV,
+                    (dkvRowEndP - dkvRowStartP) * dV,
+                )
+        if sink == 1:
+            if pl.get_block_idx() == 0:
+                sink_red_ub = make_sink_red_post_ub(v1w, True)
+                sink_row_ub = make_sink_row_post_ub(v1w, True)
+                process_sink_reduce_bn2s2(
+                    constInfo,
+                    tensor_dsink_ws,
+                    tensor_dsink_out,
+                    sink_red_ub.current(),
+                    sink_row_ub,
+                    constInfo.aivCount,
+                )
+
+
+def process_deter_plan_bn2s2(
+    q: pl.Ptr[pl.DT_UINT8],
+    k: pl.Ptr[pl.DT_UINT8],
+    v: pl.Ptr[pl.DT_UINT8],
+    dy: pl.Ptr[pl.DT_UINT8],
+    dk: pl.Ptr[pl.DT_UINT8],
+    dv: pl.Ptr[pl.DT_UINT8],
+    cuq: pl.Ptr[pl.DT_INT32],
+    cuk: pl.Ptr[pl.DT_INT32],
+    metadata: pl.Ptr[pl.DT_INT32],
+    workspace: pl.Ptr[pl.DT_FP32],
+    y: pl.Ptr[pl.DT_UINT8],
+    lse: pl.Ptr[pl.DT_FP32],
+    sinks: pl.Ptr[pl.DT_FP32],
+    mask: pl.Ptr[pl.DT_UINT8],
+    scale: pl.DT_FP32,
+    dq: pl.Ptr[pl.DT_UINT8],
+    dsink: pl.Ptr[pl.DT_FP32],
+    expected,
+    capacity,
+    plan_bytes,
+):
+    if plan_bytes >= (16 + 412 + PM_bn2s2.I32_WORDS) * 4:
+        words = metadata_plan_views_bn2s2(
+            metadata, plan_bytes, expected.maskPresent, sink
+        )
+        valid = plan_header_matches_bn2s2(words, pl.get_block_num(), capacity)
+        if valid:
+            h = plan_execution_header_bn2s2(words)
+            ci = pl.struct(
+                "FagPlanConstInfo",
+                dSize=h.dimQ,
+                dvSize=h.dimV,
+                s1Size=h.maxQ,
+                s2Size=h.maxKv,
+                s1ViewSize=h.totalQ,
+                dvEvenSize=(h.dimV + 1) // 2,
+                dvOddSize=h.dimV // 2,
+                scaleValue=scale,
+            )
+            cu_q = pl.make_tensor(cuq, [h.batch + 1], [1], dtype=pl.DT_INT32)
+            cu_k = pl.make_tensor(cuk, [h.batch + 1], [1], dtype=pl.DT_INT32)
+            if template == Tmpl.BN2S2 and d_align == 192 and dv_align == 192:
+                plan_admit_asc_pair_swizzle_bn2s2(h, cu_q, cu_k)
+            if template == Tmpl.BN2S2 and (
+                (d_align == 192 and mask_mode == 0)
+                or (d_align == 768 and mask_mode == 3)
+            ):
+                reuse_dense = (
+                    mask_mode == 0
+                    and dv_align == 192
+                    and sink != 0
+                    and input_dtype == pl.DT_BF16
+                )
+                plan_admit_fixed_rectangle_bn2s2(h, cu_q, cu_k, mask_mode, reuse_dense)
+            total_kv = plan_i64_bn2s2(words, PF_bn2s2.totalKv)
+            tq = pl.make_tensor(
+                q,
+                [1, h.totalQ, h.heads, h.dimQ],
+                [h.totalQ * h.heads * h.dimQ, h.heads * h.dimQ, h.dimQ, 1],
+                dtype=input_dtype,
+            )
+            tk = pl.make_tensor(
+                k,
+                [1, total_kv, h.heads, h.dimQ],
+                [total_kv * h.heads * h.dimQ, h.heads * h.dimQ, h.dimQ, 1],
+                dtype=input_dtype,
+            )
+            tv = pl.make_tensor(
+                v,
+                [1, total_kv, h.heads, h.dimV],
+                [total_kv * h.heads * h.dimV, h.heads * h.dimV, h.dimV, 1],
+                dtype=input_dtype,
+            )
+            tdy = pl.make_tensor(
+                dy,
+                [1, h.totalQ, h.heads, h.dimV],
+                [h.totalQ * h.heads * h.dimV, h.heads * h.dimV, h.dimV, 1],
+                dtype=input_dtype,
+            )
+            tdk = pl.make_tensor(
+                dk,
+                [1, total_kv, h.heads, h.dimQ],
+                [total_kv * h.heads * h.dimQ, h.heads * h.dimQ, h.dimQ, 1],
+                dtype=input_dtype,
+            )
+            tdv = pl.make_tensor(
+                dv,
+                [1, total_kv, h.heads, h.dimV],
+                [total_kv * h.heads * h.dimV, h.heads * h.dimV, h.dimV, 1],
+                dtype=input_dtype,
+            )
+            tdq = pl.make_tensor(
+                pl.addptr(workspace, plan_i64_bn2s2(words, PF_bn2s2.dqOffset) // 4),
+                [1, h.totalQ, h.heads, h.dimQ],
+                [h.totalQ * h.heads * h.dimQ, h.heads * h.dimQ, h.dimQ, 1],
+                dtype=pl.DT_FP32,
+            )
+            q_count = h.totalQ * h.heads * h.dimQ
+            k_count = total_kv * h.heads * h.dimQ
+            v_count = total_kv * h.heads * h.dimV
+            q_ws_flat = pl.make_tensor(
+                pl.addptr(workspace, plan_i64_bn2s2(words, PF_bn2s2.dqOffset) // 4),
+                [1, q_count],
+                [q_count, 1],
+                dtype=pl.DT_FP32,
+            )
+            k_ws_flat = pl.make_tensor(
+                pl.addptr(workspace, plan_i64_bn2s2(words, PF_bn2s2.dkOffset) // 4),
+                [1, k_count],
+                [k_count, 1],
+                dtype=pl.DT_FP32,
+            )
+            v_ws_flat = pl.make_tensor(
+                pl.addptr(workspace, plan_i64_bn2s2(words, PF_bn2s2.dvOffset) // 4),
+                [1, v_count],
+                [v_count, 1],
+                dtype=pl.DT_FP32,
+            )
+            q_out_flat = pl.make_tensor(
+                dq, [1, q_count], [q_count, 1], dtype=input_dtype
+            )
+            k_out_flat = pl.make_tensor(
+                dk, [1, k_count], [k_count, 1], dtype=input_dtype
+            )
+            v_out_flat = pl.make_tensor(
+                dv, [1, v_count], [v_count, 1], dtype=input_dtype
+            )
+            sink_elements = h.heads * plan_i64_bn2s2(words, PF_bn2s2.sinkReduceAxis)
+            sink_padded = (sink_elements + 512) // 512 * 512
+            sink_pre = pl.make_tensor(
+                pl.addptr(workspace, plan_i64_bn2s2(words, PF_bn2s2.sinkOffset) // 4),
+                [1, sink_padded],
+                [sink_padded, 1],
+                dtype=pl.DT_FP32,
+            )
+            special_elements = plan_i64_bn2s2(words, PF_bn2s2.specialBytes) // 4
+            special = pl.make_tensor(
+                pl.addptr(
+                    workspace, plan_i64_bn2s2(words, PF_bn2s2.specialOffset) // 4
+                ),
+                [1, special_elements],
+                [special_elements, 1],
+                dtype=pl.DT_FP32,
+            )
+            with pl.section_vector():
+                pre_aiv = pl.get_block_idx()
+                q_prefix = pl.const(0, pl.DT_INT64)
+                k_prefix = pl.const(0, pl.DT_INT64)
+                if sink != 0 and (d_align == 192 or d_align == 256):
+                    q_prefix, k_prefix = plan_isolated_prefix_bn2s2(h, cu_q, cu_k)
+                pre_zero = make_plan_zero_bn2s2(pl.DT_FP32)
+                pre_zero16 = make_plan_zero_bn2s2(input_dtype)
+                pre_gm = pl.make_tuple(
+                    qPrefix=q_prefix * h.dimQ,
+                    kPrefix=k_prefix * h.dimQ,
+                    vPrefix=k_prefix * h.dimV,
+                    dqWs=q_ws_flat,
+                    dkWs=k_ws_flat,
+                    dvWs=v_ws_flat,
+                    dkOut=k_out_flat,
+                    dvOut=v_out_flat,
+                    sinkPre=sink_pre,
+                    special=special,
+                )
+                if pre_sfmg != 0:
+                    pre_y = pl.make_tensor(
+                        y,
+                        [1, h.totalQ, h.heads, h.dimV],
+                        [h.totalQ * h.heads * h.dimV, h.heads * h.dimV, h.dimV, 1],
+                        dtype=input_dtype,
+                    )
+                    pre_cache = pl.make_tensor(
+                        pl.addptr(
+                            workspace, plan_i64_bn2s2(words, PF_bn2s2.sfmgOffset) // 4
+                        ),
+                        [1, plan_i64_bn2s2(words, PF_bn2s2.sfmgRows)],
+                        [plan_i64_bn2s2(words, PF_bn2s2.sfmgRows), 1],
+                        dtype=pl.DT_FP32,
+                    )
+                    pre_y_ub = make_plan_presfmg_y_bn2s2()
+                    pre_dy_ub = make_plan_presfmg_dy_bn2s2()
+                    pre_sfmg_ub = make_plan_presfmg_out_bn2s2()
+                    pre_sfmg_flat = make_plan_presfmg_flat_bn2s2()
+                    if d_align == 768 and dv_align == 768 and sink == 0:
+                        if (
+                            h.logicalSplit == PlanSplit_bn2s2.GS
+                            and ci.dvSize > 256
+                            and ci.dvSize <= 320
+                        ):
+                            plan_presfmg_gs_interleaved_bn2s2(
+                                ci,
+                                words,
+                                h,
+                                pre_aiv,
+                                pre_gm,
+                                pre_zero.current(),
+                                pre_y,
+                                tdy,
+                                pre_cache,
+                                pre_y_ub,
+                                pre_dy_ub,
+                                pre_sfmg_ub,
+                                pre_sfmg_flat,
+                            )
+                        else:
+                            plan_clear_pre_bn2s2(
+                                words,
+                                h,
+                                pre_aiv,
+                                pre_gm,
+                                pre_zero.current(),
+                                pre_zero16.current(),
+                            )
+                            plan_compute_presfmg_bn2s2(
+                                ci,
+                                words,
+                                h,
+                                cu_q,
+                                pre_aiv,
+                                pre_y,
+                                tdy,
+                                pre_cache,
+                                pre_y_ub,
+                                pre_dy_ub,
+                                pre_sfmg_ub,
+                                pre_sfmg_flat,
+                                min(dv_align, 256),
+                            )
+                    else:
+                        plan_clear_pre_bn2s2(
+                            words,
+                            h,
+                            pre_aiv,
+                            pre_gm,
+                            pre_zero.current(),
+                            pre_zero16.current(),
+                        )
+                        plan_compute_presfmg_bn2s2(
+                            ci,
+                            words,
+                            h,
+                            cu_q,
+                            pre_aiv,
+                            pre_y,
+                            tdy,
+                            pre_cache,
+                            pre_y_ub,
+                            pre_dy_ub,
+                            pre_sfmg_ub,
+                            pre_sfmg_flat,
+                            min(dv_align, 256),
+                        )
+                else:
+                    plan_clear_pre_bn2s2(
+                        words,
+                        h,
+                        pre_aiv,
+                        pre_gm,
+                        pre_zero.current(),
+                        pre_zero16.current(),
+                    )
+            pl.system.sync_all()
+            mm1 = make_mm1_res(True)
+            mm2 = make_mm2_res(True)
+            ds = make_ds_l1_bn2s2()
+            ds_t = make_ds_t_l1_bn2s2()
+            p_t = make_p_t_l1_bn2s2()
+            p_l1 = make_p_l1_bn2s2()
+            with pl.section_cube():
+                core = pl.get_block_idx()
+                policy = plan_commit_header_bn2s2(words, h, core)
+                slots = plan_run_infos_bn2s2()
+                left = make_l0a(True)
+                if d_align == 768 or (d_align == 192 and dv_align == 128):
+                    left_read = make_wide_l0a_reader_bn2s2()
+                else:
+                    left_read = left
+                right = make_l0b_bn2s2()
+                acc = make_plan_acc_bn2s2()
+                if d_align <= 128 or (d_align == 192 and dv_align <= 128):
+                    dk0 = make_plan_dk0_bn2s2()
+                    if d_align == 192:
+                        dk1 = dk0
+                    else:
+                        dk1 = make_plan_dk1_bn2s2()
+                else:
+                    dk0 = acc
+                    dk1 = acc
+                if d_align <= 256:
+                    dv0 = make_plan_dv0_bn2s2()
+                    if d_align == 192:
+                        dv1 = dv0
+                    else:
+                        dv1 = make_plan_dv1_bn2s2()
+                else:
+                    dv0 = acc
+                    dv1 = acc
+                if d_align == 768:
+                    q_l1 = make_plan_common_l1_bn2s2()
+                    k_l1 = make_plan_common_zn_l1_bn2s2()
+                    k_normal = make_k_nd_l1_bn2s2()
+                else:
+                    q_l1 = make_q_l1(True)
+                    if d_align == 192:
+                        k_l1 = make_plan_k_l1_bn2s2()
+                        k_normal = make_plan_k_normal_l1_bn2s2()
+                    else:
+                        k_l1 = make_k_l1_bn2s2()
+                        k_normal = make_k_nd_l1_bn2s2()
+                dy_l1 = make_do_l1(True)
+                v_l1 = make_v_l1(True)
+                q_lag = make_q_lag_view(True)
+                dy_lag = make_do_lag_view(True)
+                mm2_lag = make_mm2_lag_view_bn2s2()
+                gm = pl.make_tuple(
+                    q=tq,
+                    k=tk,
+                    v=tv,
+                    dy=tdy,
+                    dk=tdk,
+                    dv=tdv,
+                    dqWorkspace=tdq,
+                    workspace=workspace,
+                )
+                buf = pl.make_tuple(
+                    q=q_l1,
+                    dy=dy_l1,
+                    k=k_l1,
+                    v=v_l1,
+                    kNormal=k_normal,
+                    qLag=q_lag,
+                    dyLag=dy_lag,
+                    mm1=mm1,
+                    mm2=mm2,
+                    mm2Lag=mm2_lag,
+                    ds=ds,
+                    dsT=ds_t,
+                    pT=p_t,
+                    left=left,
+                    leftRead=left_read,
+                    right=right,
+                    acc=acc,
+                    dk0=dk0,
+                    dk1=dk1,
+                    dv0=dv0,
+                    dv1=dv1,
+                )
+                run_plan_cube_bn2s2(
+                    ci, words, h, cu_q, cu_k, core, policy, gm, buf, slots
+                )
+            with pl.section_vector():
+                core_v = pl.get_block_idx() // pl.get_subblock_num()
+                sub = pl.get_subblock_idx()
+                v1w = min(dv_align, 256)
+                policy_v = plan_commit_header_bn2s2(words, h, core_v)
+                slots_v = plan_run_infos_bn2s2()
+                ty = pl.make_tensor(
+                    y,
+                    [1, h.totalQ, h.heads, h.dimV],
+                    [h.totalQ * h.heads * h.dimV, h.heads * h.dimV, h.dimV, 1],
+                    dtype=input_dtype,
+                )
+                tlse = pl.make_tensor(
+                    lse, [h.heads, h.totalQ], [h.totalQ, 1], dtype=pl.DT_FP32
+                )
+                tsinks = pl.make_tensor(sinks, [h.heads], [1], dtype=pl.DT_FP32)
+                tmask = pl.make_tensor(mask, [2048, 2048], [2048, 1], dtype=pl.DT_UINT8)
+                sfmg = pl.make_tensor(
+                    pl.addptr(
+                        workspace, plan_i64_bn2s2(words, PF_bn2s2.sfmgOffset) // 4
+                    ),
+                    [1, plan_i64_bn2s2(words, PF_bn2s2.sfmgRows)],
+                    [plan_i64_bn2s2(words, PF_bn2s2.sfmgRows), 1],
+                    dtype=pl.DT_FP32,
+                )
+                sink_count = h.heads * plan_i64_bn2s2(words, PF_bn2s2.sinkReduceAxis)
+                partial = pl.make_tensor(
+                    pl.addptr(
+                        workspace, plan_i64_bn2s2(words, PF_bn2s2.sinkOffset) // 4
+                    ),
+                    [1, sink_count],
+                    [sink_count, 1],
+                    dtype=pl.DT_FP32,
+                )
+                nzp = make_plan_nzp_bn2s2(v1w)
+                if PLAN_HAS_P_NZP_bn2s2[
+                    pre_sfmg * 16777216
+                    + mask_mode * 1048576
+                    + d_align * 1024
+                    + dv_align
+                ]:
+                    p_nzp = make_plan_p_nzp_bn2s2(v1w)
+                else:
+                    p_nzp = nzp
+                sfmg_ub = make_plan_sfmg_ub_bn2s2(v1w)
+                lse_ub = make_plan_lse_ub_bn2s2(v1w)
+                cast = make_plan_cast_bn2s2(v1w)
+                if mask_mode != 0:
+                    mask_ub = make_plan_mask_view_bn2s2(v1w)
+                    mask_pre = make_plan_mask_pre_view_bn2s2(v1w)
+                else:
+                    mask_ub = sfmg_ub
+                    mask_pre = sfmg_ub
+                if pre_sfmg == 0:
+                    y_ub = make_y_ub_bn2s2(v1w)
+                    dy_ub = make_dy_ub_bn2s2(v1w)
+                else:
+                    y_ub = sfmg_ub
+                    dy_ub = sfmg_ub
+                if sink != 0:
+                    sink_ub = make_sink_part_ub_bn2s2(v1w)
+                else:
+                    sink_ub = sfmg_ub
+                if d_align > 128:
+                    column = make_plan_column_f32_bn2s2(v1w)
+                else:
+                    column = cast
+                vgm = pl.make_tuple(
+                    y=ty,
+                    dy=tdy,
+                    dk=tdk,
+                    dv=tdv,
+                    lse=tlse,
+                    mask=tmask,
+                    sinks=tsinks,
+                    sfmg=sfmg,
+                    sinkPartial=partial,
+                    workspace=workspace,
+                )
+                vbuf = pl.make_tuple(
+                    y=y_ub,
+                    dy=dy_ub,
+                    nzp=nzp,
+                    pNzp=p_nzp,
+                    sfmg=sfmg_ub,
+                    lse=lse_ub,
+                    mask=mask_ub,
+                    maskPre=mask_pre,
+                    sink=sink_ub,
+                    column=column,
+                    cast=cast,
+                    ds=ds,
+                    p=p_l1,
+                    mm1=mm1,
+                    mm2=mm2,
+                )
+                saved = run_plan_vector_bn2s2(
+                    ci,
+                    words,
+                    h,
+                    cu_q,
+                    cu_k,
+                    core_v,
+                    sub,
+                    policy_v,
+                    vgm,
+                    vbuf,
+                    slots_v,
+                    v1w,
+                )
+            pl.system.sync_all()
+            with pl.section_vector():
+                post_aiv = pl.get_block_idx()
+                post_f32 = make_post_f32_buffer(True)
+                post_f16 = make_post_f16_buffer(True)
+                special_src = make_plan_post_column_bn2s2()
+                special_dst = make_plan_post_cast_bn2s2()
+                if h.logicalSplit == PlanSplit_bn2s2.BN2S2:
+                    plan_restore_special_owner_bn2s2(words, h, cu_k, core_v, saved)
+                    plan_special_column_post_bn2s2(
+                        ci,
+                        policy_v,
+                        saved,
+                        workspace,
+                        tdk,
+                        special_src.current(),
+                        special_dst.current(),
+                        sub,
+                        False,
+                        v1w,
+                    )
+                    plan_special_column_post_bn2s2(
+                        ci,
+                        policy_v,
+                        saved,
+                        workspace,
+                        tdv,
+                        special_src.current(),
+                        special_dst.current(),
+                        sub,
+                        True,
+                        v1w,
+                    )
+                plan_post_tensor_bn2s2(
+                    words,
+                    post_aiv,
+                    PF_bn2s2.qPostBlockFactor,
+                    PF_bn2s2.qPostBlockTotal,
+                    q_ws_flat,
+                    q_out_flat,
+                    post_f32,
+                    post_f16,
+                    scale,
+                    False,
+                    q_prefix * h.dimQ,
+                )
+                if h.logicalSplit == PlanSplit_bn2s2.GS:
+                    plan_post_tensor_bn2s2(
+                        words,
+                        post_aiv,
+                        PF_bn2s2.kPostBlockFactor,
+                        PF_bn2s2.kPostBlockTotal,
+                        k_ws_flat,
+                        k_out_flat,
+                        post_f32,
+                        post_f16,
+                        scale,
+                        False,
+                        k_prefix * h.dimQ,
+                    )
+                    plan_post_tensor_bn2s2(
+                        words,
+                        post_aiv,
+                        PF_bn2s2.vPostBlockFactor,
+                        PF_bn2s2.vPostBlockTotal,
+                        v_ws_flat,
+                        v_out_flat,
+                        post_f32,
+                        post_f16,
+                        scale,
+                        True,
+                        k_prefix * h.dimV,
+                    )
+                if sink != 0:
+                    sink_total = make_sink_red_post_ub(d_align, True)
+                    sink_out = pl.make_tensor(
+                        dsink, [1, h.heads], [h.heads, 1], dtype=pl.DT_FP32
+                    )
+                    plan_post_sink_bn2s2(
+                        words,
+                        post_aiv,
+                        partial,
+                        sink_out,
+                        post_f32,
+                        sink_total.current(),
                     )

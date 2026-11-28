@@ -24,6 +24,7 @@ from schedule.deterministic.fag_deter_formulas import (
     cal_gqa_dense_precomputed,
     gqa_dense_parameters,
     cal_gqa_causal,
+    cal_gqa_band_precomputed,
     CAUSAL_BOUNDARY_EXACT_INTEGER,
     CAUSAL_BOUNDARY_DEVICE_INTEGER_SQRT,
 )
@@ -84,33 +85,6 @@ def cal_causal_swizzle(k, m, n, b, j, r):
             w = 2 * w - 1
         if w < 1 or w > b or x < 1 or x > m or y < 1 or y > n:
             w = pl.astype(-1, pl.DT_INT64)
-    return w, x, y
-
-
-def cal_gqa_causal_batch_major(k, m, n, b, j, r, g, rounds_per_batch):
-    w = pl.astype(-1, pl.DT_INT64)
-    x = pl.astype(0, pl.DT_INT64)
-    y = pl.astype(0, pl.DT_INT64)
-    if (
-        k > 0
-        and n > 0
-        and m >= n
-        and b > 0
-        and g > 0
-        and j >= 1
-        and j <= k
-        and r >= 1
-        and rounds_per_batch > 0
-    ):
-        batch = (r - 1) // rounds_per_batch
-        if batch < b:
-            local_round = (r - 1) % rounds_per_batch + 1
-            packed = cal_gqa_causal(k, m, n, 1, j, local_round, g, 1)
-            ww, xx, yy = _unpack_wxy(packed, m, n)
-            if ww >= 1 and ww <= g and yy >= 1 and yy <= n and yy <= xx and xx <= m:
-                w = pl.astype(ww + batch * g, pl.DT_INT64)
-                x = pl.astype(xx, pl.DT_INT64)
-                y = pl.astype(yy, pl.DT_INT64)
     return w, x, y
 
 
@@ -338,6 +312,7 @@ def deter_fixed_gidx(
     dense_round=0,
     dense_t1=0,
     dense_t2=0,
+    band_plan=None,
 ):
     """Compile one decoder family and apply the Host's single translation."""
     w = pl.astype(-1, pl.DT_INT64)
@@ -447,17 +422,34 @@ def deter_fixed_gidx(
             physical_round + 1,
         )
     elif deter_family == 24:
-        w, x, y = cal_source_gqa_band(
-            ci.deterBandK,
+        packed = cal_gqa_band_precomputed(
+            band_plan.gqaBandK,
+            band_plan.gqaBandM,
+            band_plan.gqaBandN,
+            band_plan.gqaBandP,
+            band_plan.gqaBandQ,
+            band_plan.gqaBandB,
+            band_plan.gqaBandG,
+            band_plan.gqaBandB1,
+            band_plan.gqaBandB2,
+            band_plan.gqaBandL1,
+            band_plan.gqaBandL2,
+            band_plan.gqaBandL3,
+            band_plan.gqaBandRm,
+            band_plan.gqaBandRm1,
+            band_plan.gqaBandR1,
+            band_plan.gqaBandR2,
             ci.deterM,
             ci.deterN,
-            ci.deterP,
-            ci.deterQ,
-            ci.bSize * ci.n2Size,
-            ci.gSize,
             core + 1,
             physical_round + 1,
+            band_plan.gqaBandDenseK,
+            band_plan.gqaBandDenseRound,
+            band_plan.gqaBandDenseT1,
+            band_plan.gqaBandDenseT2,
+            1,
         )
+        w, x, y = _unpack_wxy(packed, ci.deterM, ci.deterN)
     elif deter_family == 25:
         w, x, y = cal_gqa_causal_grouped(
             cores,

@@ -167,6 +167,19 @@ TILING_DATA_FIELD_DEF(int64_t, deterBandTailPhase4TailRounds)
 TILING_DATA_FIELD_DEF(int64_t, metadataWordCount)
 TILING_DATA_FIELD_DEF(int64_t, deterL2Bytes)
 TILING_DATA_FIELD_DEF(int64_t, deterCausalGroups)
+TILING_DATA_FIELD_DEF(int64_t, planBytes)
+TILING_DATA_FIELD_DEF(int64_t, planWorkspaceBytes)
+TILING_DATA_FIELD_DEF(int64_t, planT1)
+TILING_DATA_FIELD_DEF(int64_t, planT2)
+TILING_DATA_FIELD_DEF(int64_t, planDtype)
+TILING_DATA_FIELD_DEF(int64_t, planAicNum)
+TILING_DATA_FIELD_DEF(int64_t, planAivNum)
+TILING_DATA_FIELD_DEF(int64_t, planL2Bytes)
+TILING_DATA_FIELD_DEF(int64_t, planUbBytes)
+TILING_DATA_FIELD_DEF(int64_t, planLibapiBytes)
+TILING_DATA_FIELD_DEF(int64_t, planDeterministicLevel)
+TILING_DATA_FIELD_DEF(int64_t, planMaskPresent)
+TILING_DATA_FIELD_DEF(int64_t, planMaskShapeType)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(FlashAttnGrad, FlashAttnGradTilingDataTmp)
 
@@ -178,6 +191,7 @@ struct FlashAttnGradCompileInfo {
     uint32_t aivNum = 0;
     uint32_t aicNum = 0;
     uint64_t l2CacheSize = 0;
+    uint64_t ubSize = 0;
     uint64_t libapiWorkspaceSize = 0;
 
     static ge::graphStatus ParamCheck(gert::TilingContext* context)

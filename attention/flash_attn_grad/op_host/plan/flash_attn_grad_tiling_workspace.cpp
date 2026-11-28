@@ -104,6 +104,11 @@ bool BuildWorkspacePlan(const FagParsedInfo& info, const FagKernelPlan& kernel, 
         dv = static_cast<size_t>(kernel.dvAlign);
     }
 
+    // The fixed-layout BN2S2 loop writes complete dK/dV columns directly.
+    // TND still reserves all segments, including its GS fallback.
+    if (kernel.tmpl == TMPL_BN2S2 && !info.isTnd) {
+        kvRows = 0;
+    }
     plan.libapiSize = info.libapiWorkspaceSize;
     size_t cursor = plan.libapiSize;
     if (!AppendSegment(qRows, static_cast<size_t>(info.n1), d, cursor, plan.dq) ||

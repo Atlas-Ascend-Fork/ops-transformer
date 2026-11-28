@@ -27,6 +27,7 @@ from schedule.deterministic.fag_deter_formulas import (
     cal_gqa_band,
     cal_gqa_causal,
     cal_gqa_dense_precomputed,
+    cal_gqa_dense_uncached,
     gqa_dense_parameters,
     pack_fused,
     pl,
@@ -82,15 +83,21 @@ def _causal_max_round(m, n, k, b, g):
     return out
 
 
-def _dense_lin_max_round(k, m, n, bb, g):
+def _dense_lin_max_round(k, m, n, bb, g, branchless=False):
     """核上 dense/GQA 闭式的矩形轮次。"""
     g = pl.max(g, 1)
     out = 0
     if k > 0 and m > 0 and n > 0 and bb > 0:
-        if g <= 1:
-            out = _ceil(n * bb, pl.min(k, m * bb)) * m
+        if branchless:
+            mha_round = _ceil(n * bb, pl.min(k, m * bb)) * m
+            gqa_round = select_gqa_dense_round(k, m, n, bb, g) * m
+            is_mha = _in_range(g, 1, 1)
+            out = mha_round * is_mha + gqa_round * (1 - is_mha)
         else:
-            out = select_gqa_dense_round(k, m, n, bb, g) * m
+            if g <= 1:
+                out = _ceil(n * bb, pl.min(k, m * bb)) * m
+            else:
+                out = select_gqa_dense_round(k, m, n, bb, g) * m
     return out
 
 
@@ -130,7 +137,7 @@ def _band_lin_max_round(k, m, n, bb, g, s1_token, s2_token):
     return out
 
 
-def deter_lin_max_round(constInfo, coreNum):
+def deter_lin_max_round(constInfo, coreNum, branchless_dense=False):
     """非 swizzle 轮次上界，与对应的 AscendC 闭式分核配套。"""
     k = coreNum
     b = constInfo.bSize
@@ -145,7 +152,7 @@ def deter_lin_max_round(constInfo, coreNum):
     if mask_mode == 0:
         dense_grid = 1
     if k > 0 and m > 0 and n > 0 and bb > 0:
-        dense_r = _dense_lin_max_round(k, m, n, bb, g)
+        dense_r = _dense_lin_max_round(k, m, n, bb, g, branchless_dense)
         if dense_grid > 0:
             out = dense_r
         else:
@@ -206,6 +213,7 @@ def _deter_lin_gidx_host(
     dense_round=0,
     dense_t1=0,
     dense_t2=0,
+    uncached_dense=False,
 ):
     """host 对拍：可用运行期 if/return。"""
     k = coreNum
@@ -227,25 +235,29 @@ def _deter_lin_gidx_host(
         if g <= 1:
             w, x, y = cal_dense(k, s1o, s2o, bb, j, r)
         else:
-            active_k = dense_k
-            selected_round = dense_round
-            t1 = dense_t1
-            t2 = dense_t2
-            if selected_round <= 0:
-                selected_round = select_gqa_dense_round(k, s1o, s2o, bb, g)
-                active_k, selected_round, t1, t2 = gqa_dense_parameters(
-                    k, s1o, s2o, bb, g, selected_round
+            if uncached_dense:
+                dense_round = select_gqa_dense_round(k, s1o, s2o, bb, g)
+                w, x, y = cal_gqa_dense_uncached(k, s1o, s2o, bb, j, r, g, dense_round)
+            else:
+                active_k = dense_k
+                selected_round = dense_round
+                t1 = dense_t1
+                t2 = dense_t2
+                if selected_round <= 0:
+                    selected_round = select_gqa_dense_round(k, s1o, s2o, bb, g)
+                    active_k, selected_round, t1, t2 = gqa_dense_parameters(
+                        k, s1o, s2o, bb, g, selected_round
+                    )
+                w, x, y = cal_gqa_dense_precomputed(
+                    active_k, s1o, s2o, bb, j, r, g, selected_round, t1, t2
                 )
-            w, x, y = cal_gqa_dense_precomputed(
-                active_k, s1o, s2o, bb, j, r, g, selected_round, t1, t2
-            )
     elif mask_mode == 3 and constInfo.s1Size >= constInfo.s2Size:
         m = s1o
         n = s2o if s2o <= s1o else s1o
         if g <= 1:
             packed = cal_causal(k, m, n, bb, j, r)
         else:
-            packed = cal_gqa_causal(k, m, n, bb, j, r, g)
+            packed = cal_gqa_causal(k, m, n, bb, j, r, g, 0, uncached_dense)
         w, x, y = _unpack_wxy(packed, m, n)
     else:
         # mask4，以及 mask3 且 S1<S2：矩形 right-down causal 走 band。
@@ -258,7 +270,9 @@ def _deter_lin_gidx_host(
             packed = cal_band(k, actual_m, actual_n, p, q, bb, j, r)
             w, x, y = _unpack_wxy(packed, actual_m, actual_n)
         else:
-            packed = cal_gqa_band(k, actual_m, actual_n, p, q, bb, g, j, r)
+            packed = cal_gqa_band(
+                k, actual_m, actual_n, p, q, bb, g, j, r, uncached_dense
+            )
             w, x, y = _unpack_wxy(packed, actual_m, actual_n)
     fused = pack_fused(w, x, y, b, n2, g, s1o, s2o, moff, noff)
     if fused < 0:
@@ -269,6 +283,48 @@ def _deter_lin_gidx_host(
         if _fused_valid(constInfo, s1_idx, s2_idx) == 0:
             return -1
     return fused
+
+
+def _deter_sparse_coordinates(
+    constInfo, k, j, r, bb, g, s1o, s2o, uncached_dense=False
+):
+    if mask_mode == 3:
+        # S1>=S2 走三角 causal；S1<S2 的矩形 right-down 与 ASC 一样切 band。
+        causal_n = pl.min(s2o, s1o)
+        packed = cal_causal(k, s1o, causal_n, bb, j, r)
+        packed_g = cal_gqa_causal(k, s1o, causal_n, bb, j, r, g, 0, uncached_dense)
+        wc, xc, yc = _unpack_wxy(packed, s1o, causal_n)
+        wcg, xcg, ycg = _unpack_wxy(packed_g, s1o, causal_n)
+        actual_m, actual_n, p, q, moff_b, noff_b = band_pq(
+            s1o, s2o, constInfo.s1Token, constInfo.s2Token
+        )
+        packed_b = cal_band(k, actual_m, actual_n, p, q, bb, j, r)
+        packed_bg = cal_gqa_band(
+            k, actual_m, actual_n, p, q, bb, g, j, r, uncached_dense
+        )
+        wb, xb, yb = _unpack_wxy(packed_b, actual_m, actual_n)
+        wbg, xbg, ybg = _unpack_wxy(packed_bg, actual_m, actual_n)
+        use_band = _lt(constInfo.s1Size, constInfo.s2Size)
+        use_causal = 1 - use_band
+        w = wc * use_causal + wb * use_band
+        x = xc * use_causal + xb * use_band
+        y = yc * use_causal + yb * use_band
+        wg = wcg * use_causal + wbg * use_band
+        xg = xcg * use_causal + xbg * use_band
+        yg = ycg * use_causal + ybg * use_band
+        moff = moff_b * use_band
+        noff = noff_b * use_band
+    else:
+        actual_m, actual_n, p, q, moff, noff = band_pq(
+            s1o, s2o, constInfo.s1Token, constInfo.s2Token
+        )
+        packed = cal_band(k, actual_m, actual_n, p, q, bb, j, r)
+        w, x, y = _unpack_wxy(packed, actual_m, actual_n)
+        packed_g = cal_gqa_band(
+            k, actual_m, actual_n, p, q, bb, g, j, r, uncached_dense
+        )
+        wg, xg, yg = _unpack_wxy(packed_g, actual_m, actual_n)
+    return w, x, y, wg, xg, yg, moff, noff
 
 
 def deter_lin_gidx(
@@ -318,38 +374,9 @@ def deter_lin_gidx(
                 active_k, s1o, s2o, bb, j, r, g, selected_round, t1, t2
             )
     else:
-        if mask_mode == 3:
-            # S1>=S2 走三角 causal；S1<S2 的矩形 right-down 与 ASC 一样切 band。
-            causal_n = pl.min(s2o, s1o)
-            packed = cal_causal(k, s1o, causal_n, bb, j, r)
-            packed_g = cal_gqa_causal(k, s1o, causal_n, bb, j, r, g)
-            wc, xc, yc = _unpack_wxy(packed, s1o, causal_n)
-            wcg, xcg, ycg = _unpack_wxy(packed_g, s1o, causal_n)
-            actual_m, actual_n, p, q, moff_b, noff_b = band_pq(
-                s1o, s2o, constInfo.s1Token, constInfo.s2Token
-            )
-            packed_b = cal_band(k, actual_m, actual_n, p, q, bb, j, r)
-            packed_bg = cal_gqa_band(k, actual_m, actual_n, p, q, bb, g, j, r)
-            wb, xb, yb = _unpack_wxy(packed_b, actual_m, actual_n)
-            wbg, xbg, ybg = _unpack_wxy(packed_bg, actual_m, actual_n)
-            use_band = _lt(constInfo.s1Size, constInfo.s2Size)
-            use_causal = 1 - use_band
-            w = wc * use_causal + wb * use_band
-            x = xc * use_causal + xb * use_band
-            y = yc * use_causal + yb * use_band
-            wg = wcg * use_causal + wbg * use_band
-            xg = xcg * use_causal + xbg * use_band
-            yg = ycg * use_causal + ybg * use_band
-            moff = moff_b * use_band
-            noff = noff_b * use_band
-        else:
-            actual_m, actual_n, p, q, moff, noff = band_pq(
-                s1o, s2o, constInfo.s1Token, constInfo.s2Token
-            )
-            packed = cal_band(k, actual_m, actual_n, p, q, bb, j, r)
-            w, x, y = _unpack_wxy(packed, actual_m, actual_n)
-            packed_g = cal_gqa_band(k, actual_m, actual_n, p, q, bb, g, j, r)
-            wg, xg, yg = _unpack_wxy(packed_g, actual_m, actual_n)
+        w, x, y, wg, xg, yg, moff, noff = _deter_sparse_coordinates(
+            constInfo, k, j, r, bb, g, s1o, s2o
+        )
         is_mha = _in_range(g, 1, 1)
         w = w * is_mha + wg * (1 - is_mha)
         x = x * is_mha + xg * (1 - is_mha)

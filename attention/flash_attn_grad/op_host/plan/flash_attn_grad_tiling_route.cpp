@@ -10,6 +10,7 @@
 
 #include "flash_attn_grad_tiling_route.h"
 
+#include "flash_attn_grad_block_outer.h"
 #include "flash_attn_grad_sparse.h"
 #include "log/log.h"
 
@@ -22,6 +23,9 @@ namespace {
 constexpr int64_t BN2_MAX_S = 128;          // 单块 BN2 的 S 上限
 constexpr int64_t BN2_MAX_D = MAX_HEAD_DIM; // BN2 一系列模板的 D 上限（=768）
 constexpr int64_t BN2_MULTIBLK_SEQ = 640;   // MultiBlk 的 S 上限
+constexpr int64_t BN2S2_MAX_D = 512;        // Ordinary BN2S2 limit; deterministic admission uses useDeterPlan.
+constexpr int64_t BN2S2_MAX_S = 1024;       // BN2S2 的 S2 上限（S1 靠 s1<s2 约束）
+constexpr int64_t BN2S2_WRITE_UB_D = 128;   // BN2S2 的写入 UB D 上限
 
 // ---------------------------------------------------------------------------
 // 偏好门限常量：全部来自上板实测，改这里不影响功能正确性，只影响快慢
@@ -47,8 +51,8 @@ bool TndVarlenBn2SingleFeasible(const FagParsedInfo& p)
     return p.maxSeqlenQ > 0 && p.maxSeqlenKv > 0 && p.maxSeqlenQ <= BN2_MAX_S && p.maxSeqlenKv <= BN2_MAX_S;
 }
 
-// 共同前提：GQA、D!=Dv、D>MAX_HEAD_DIM 不接；且要求 D==Dv
-// （BN2 的 V/dO 固定按 dSize 建视图，只有 GS1S2 处理 D=192/Dv=128）。
+// GQA and D>MAX_HEAD_DIM stay outside BN2. Short variable-length TND
+// keeps the existing single-block route; D/Dv is checked per path.
 bool Bn2FamilyFeasible(const FagParsedInfo& p)
 {
     // 等长 TND（tndAllSame，parser 用 shape 算术判定）的 GM 排布与 BSND
@@ -59,33 +63,82 @@ bool Bn2FamilyFeasible(const FagParsedInfo& p)
     if (p.hasSeqused || (p.isTnd && !p.tndAllSame && !TndVarlenBn2SingleFeasible(p))) {
         return false;
     }
-    // D==Dv 与 AICPU 的 headDimV==headDim 门一一对应，两边必须同为 D 或同为 GS。
+    // Host and AICPU must agree on the single-block D192/Dv128 admission.
     // Zero-task launches still need GS pre/post to clear a nonempty opposite
     // output side. Single-token sequences remain eligible for BN2.
-    return p.s1 > 0 && p.s2 > 0 && p.n1 == p.n2 && p.d == p.dv && p.d <= BN2_MAX_D;
+    return p.s1 > 0 && p.s2 > 0 && p.n1 == p.n2 && p.d <= BN2_MAX_D;
 }
 
 bool Feasible_Bn2Single(const FagParsedInfo& p)
 {
-    return Bn2FamilyFeasible(p) && p.s1 <= BN2_MAX_S && p.s2 <= BN2_MAX_S;
+    // ASC single-block BN2 supports unequal D/Dv; wide TND remains excluded.
+    const bool supportedDims = p.d == p.dv || (!p.isTnd && p.d == 192 && p.dv == 128);
+    return Bn2FamilyFeasible(p) && supportedDims && p.s1 <= BN2_MAX_S && p.s2 <= BN2_MAX_S;
 }
 
 bool Feasible_Bn2MultiBlk(const FagParsedInfo& p)
 {
     // S 落在 (128, 640]：这些都是 MultiBlk kernel 的实现前提。
     // mask 3/4 也可以走 MultiBlk；无效行/列由 bn2NeedZero 另开一份二进制。
-    // D==Dv 已在 Bn2FamilyFeasible 里统一把关。
-    // 变长 TND 只做单块：MultiBlk 的 dQ 回写按 per-core 条带寻址
-    // （cBlockIdx*s1Outer + s1oIdx），依赖固定 s1Outer；等长 TND 的排布与
-    // BSND 一致，不受影响。
-    return !(p.isTnd && !p.tndAllSame) && Bn2FamilyFeasible(p) && (p.s1 > BN2_MAX_S || p.s2 > BN2_MAX_S) &&
-           p.s1 <= BN2_MULTIBLK_SEQ && p.s2 <= BN2_MULTIBLK_SEQ;
+    // Variable-length TND stays single-block; multi-block requires D==Dv.
+    return !(p.isTnd && !p.tndAllSame) && Bn2FamilyFeasible(p) && p.d == p.dv &&
+           (p.s1 > BN2_MAX_S || p.s2 > BN2_MAX_S) && p.s1 <= BN2_MULTIBLK_SEQ && p.s2 <= BN2_MULTIBLK_SEQ;
 }
 
-// D5：BN2S2 是保留位，本轮不实现不编译，host 永不产生 template=3。
-bool Feasible_Never(const FagParsedInfo&)
+// Deterministic BN2S2 uses the existing metadata plan and admission unchanged.
+// The ordinary path below integrates the non-deterministic master routing only.
+bool Feasible_Bn2S2(const FagParsedInfo& p)
 {
-    return false;
+    if (p.isDeterministic) {
+        return p.useDeterPlan;
+    }
+    /* step1：所有场景基础门限 */
+    if (p.d > BN2S2_MAX_D || p.n1 != p.n2) {
+        return false;
+    }
+
+    // A shape-only necessary bound for ordinary TND column packing. Actual
+    // sequence-dependent saturation and GS fallback are resolved by metadata.
+    if (p.layout == LAYOUT_TND) {
+        int64_t s1Outer = 0;
+        int64_t s2Outer = 0;
+        FagS1S2Outer(p.s1, p.s2, s1Outer, s2Outer);
+        return p.b * p.n2 * p.g * s2Outer >= static_cast<int64_t>(p.aicNum);
+    }
+
+    // Effective lengths force metadata to use a TND/GS grid. The non-TND
+    // ordinary BN2S2 binary requires whole-column ownership for direct stores.
+    if (p.hasSeqused) {
+        return false;
+    }
+
+    /*
+       step3：非 TND 场景门限。（老FAG的bn2S2NotTndLimit）
+       sparse 判定用 parser 已按右对齐修正的s1Token/s2Token（FagFillSparseInfo）：mask0 -> (INT32_MAX, INT32_MAX)
+       恒不剪； causal -> (INF, 0) 恒剪；band 用修正窗比 S —— 与老 SetSparseParams 的 !isSparse 逐口径一致（修正窗盖住 S
+       的 band 老算子放行，这里同样放行）。 s1==0 的零 Q 任务必须落 GS：metadata DoFagBn2s2DenseSplit 的 fagS1Outer_==0
+       早退会触发 Scenario 1 回退 GS（零块），且 BN2S2 dense 的 pre/post 只清/收
+       dq 段——dK/dV 直出依赖 s1>0 时每列必写，零 Q 会让 dK/dV 留脏数据。
+       与 Bn2FamilyFeasible 的 s1>0 同口径，零任务一律交 GS 兜底。
+     */
+    if (!(p.s1 > 0 && p.s1 < p.s2 && p.s2 <= BN2S2_MAX_S && p.s2 - p.s1 >= BN2_MAX_S && p.d <= BN2S2_WRITE_UB_D &&
+          p.s1 <= p.s1Token && p.s2 <= p.s2Token && !p.isDeterministic)) {
+        return false;
+    }
+
+    /*
+       step4：“定长+确定性+TND”和“BSND”最后门限
+       本算子特有（非老算子路由条件，不可省）：老算子 BN2S2 切不满片时会回退 GS1S2 并收缩 blockDim；
+       本算子 host tiling 先于 AICPU metadata 运行，
+       tilingkey 已固化为 BN2S2，metadata 回退 GS 口径切块会让 kernel 块语义错配。
+       故定长场景在路由阶段就要求列分核铺满整片，不饱和的 shape 落 GS1S2。
+    */
+    int64_t s1Outer = 0;
+    int64_t s2Outer = 0;
+    FagS1S2Outer(p.s1, p.s2, s1Outer, s2Outer);
+    uint32_t usedCube = static_cast<uint32_t>(
+        FagUsedCubeCores(TMPL_BN2S2, p.b, p.n2, p.g, s1Outer, s2Outer, static_cast<int64_t>(p.aicNum)));
+    return usedCube >= p.aicNum;
 }
 
 bool Feasible_Always(const FagParsedInfo&)
@@ -123,8 +176,8 @@ constexpr FagRoute kRoutes[] = {
     {"BN2_single", TMPL_BN2, 0, Feasible_Bn2Single, Prefer_Always,
      "S<=128 时不存在多核累加，省掉 pre 清零与 post cast"},
     {"BN2_multiblk", TMPL_BN2, 1, Feasible_Bn2MultiBlk, Prefer_Bn2BnGate, "BN>=256，或 BN>=128 且 S1/S2 对齐 128"},
-    {"BN2S2_reserved", TMPL_RESERVED_BN2S2, 0, Feasible_Never, Prefer_Always,
-     "D5 保留位：本轮不实现不编译，勿复用该 template 取值"},
+    {"BN2S2", TMPL_BN2S2, 0, Feasible_Bn2S2, Prefer_Always,
+     "KV 比 Q 长至少一块时按 BNS2 切核，S1 核内串行，省掉 S1 轴分核开销"},
     {"GS1S2", TMPL_BN2GS1S2, 0, Feasible_Always, Prefer_Always, "兜底，恒可行"},
 };
 
@@ -153,6 +206,10 @@ ge::graphStatus SelectDBucket(gert::TilingContext* context, const FagParsedInfo&
         plan.dAlign = 192;
     } else if (p.d <= 256) {
         plan.dAlign = 256;
+    } else if (!p.isDeterministic && p.d <= 512) {
+        // The ordinary 512 bucket must not change the validated deterministic
+        // 768 physical layout, including deterministic GS fallbacks.
+        plan.dAlign = 512;
     } else {
         plan.dAlign = 768;
     }
@@ -165,6 +222,15 @@ ge::graphStatus SelectDBucket(gert::TilingContext* context, const FagParsedInfo&
 ge::graphStatus SelectKernelPlan(gert::TilingContext* context, const FagParsedInfo& info, FagKernelPlan& plan,
                                  FagRouteTrace& trace)
 {
+    // The WJF metadata plan owns its complete deterministic domain, including
+    // the GS runtime fallback. Do not let a mainline family steal that key.
+    if (info.useDeterPlan) {
+        plan.tmpl = TMPL_BN2S2;
+        plan.isBn2MultiBlk = 0;
+        plan.bn2NeedZero = 0;
+        trace.chosen = "bn2s2-deterministic-metadata";
+        return SelectDBucket(context, info, plan);
+    }
     bool matched = false;
     for (size_t i = 0; i < kRouteNum; ++i) {
         const FagRoute& route = kRoutes[i];
@@ -191,11 +257,12 @@ ge::graphStatus SelectKernelPlan(gert::TilingContext* context, const FagParsedIn
     // 末行恒可行，正常不会走到这里；留断言防止有人删掉兜底行。
     OP_CHECK_IF(!matched, OP_LOGE(context->GetNodeName(), "no feasible route found, the fallback route is missing."),
                 return ge::GRAPH_FAILED);
-    // D5 兜底：保留取值绝不能流到 tilingkey。
-    OP_CHECK_IF(plan.tmpl != TMPL_BN2GS1S2 && plan.tmpl != TMPL_BN2,
-                OP_LOGE(context->GetNodeName(), "route produced reserved template %ld, only %ld/%ld are implemented.",
-                        plan.tmpl, TMPL_BN2GS1S2, TMPL_BN2),
-                return ge::GRAPH_FAILED);
+    // D5 兜底：保留取值 2 绝不能流到 tilingkey。
+    OP_CHECK_IF(
+        plan.tmpl != TMPL_BN2GS1S2 && plan.tmpl != TMPL_BN2 && plan.tmpl != TMPL_BN2S2,
+        OP_LOGE(context->GetNodeName(), "route produced reserved template %ld, only %ld/%ld/%ld are implemented.",
+                plan.tmpl, TMPL_BN2GS1S2, TMPL_BN2, TMPL_BN2S2),
+        return ge::GRAPH_FAILED);
 
     if (plan.isBn2MultiBlk == 1 && (info.maskMode == MASK_MODE_CAUSAL || info.maskMode == MASK_MODE_WINDOW) &&
         FagBn2HasInvalidOuter(info.s1, info.s2, info.s1Token, info.s2Token)) {

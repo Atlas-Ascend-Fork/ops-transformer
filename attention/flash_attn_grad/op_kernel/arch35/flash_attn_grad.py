@@ -37,6 +37,18 @@ from pipeline.fag_kernel import (
     flash_attn_grad_preload3,
 )
 from fag_tiling import FlashAttnGradTilingData, FlashAttnGradTilingKey, Tmpl
+from pipeline.fag_kernel import process_bn2s2, process_deter_plan_bn2s2
+from fag_common import (
+    SYNC_C1_TO_V2_FLAG_bn2s2,
+    SYNC_C2_TO_V2_FLAG_bn2s2,
+    SYNC_V2_TO_C1_FLAG_bn2s2,
+    SYNC_V2_TO_C2_FLAG_bn2s2,
+    SYNC_C4_TO_V6_PP_FLAG_bn2s2,
+    SYNC_DKV_RELEASE_PP_FLAG_bn2s2,
+    WIDE_DK_READY_bn2s2,
+    WIDE_DV_READY_bn2s2,
+    WIDE_KV_READ_DONE_bn2s2,
+)
 
 # 这四个 flag 是**按 taskId 奇偶下标取**的，故必须在运行期真的存在一个数组。
 # codegen 只把「入口函数闭包里」的 list 提升成一个具名全局数组；若只在
@@ -88,7 +100,82 @@ def flash_attn_grad(
     preload3：仅 ``Tmpl.BN2GS1S2`` 且 D<=192，``runInfos[3]``。
     preload2：其余（``Tmpl.BN2`` 与 D=256/768 GS1S2），1-ahead，``runInfos[2]``。
     """
-    if template == Tmpl.BN2GS1S2 and d_align <= 192:
+    if template == Tmpl.BN2S2 and deter != 0 and layout == 1:
+        expected = pl.struct(
+            "FagPlanExpected",
+            batch=tiling.b,
+            headsQ=tiling.n1,
+            headsKv=tiling.n2,
+            totalQ=tiling.planT1,
+            totalKv=tiling.planT2,
+            maxQ=tiling.s1,
+            maxKv=tiling.s2,
+            dimQ=tiling.d,
+            dimV=tiling.dv,
+            aicNum=tiling.planAicNum,
+            aivNum=tiling.planAivNum,
+            dtype=tiling.planDtype,
+            maskMode=tiling.maskMode,
+            sink=sink,
+            windowLeft=tiling.winLeft,
+            windowRight=tiling.winRight,
+            maskPresent=tiling.planMaskPresent,
+            maskShapeType=tiling.planMaskShapeType,
+            l2Bytes=tiling.planL2Bytes,
+            ubBytes=tiling.planUbBytes,
+            libapiBytes=tiling.planLibapiBytes,
+            reservedPlanMode=tiling.planDeterministicLevel,
+        )
+        process_deter_plan_bn2s2(
+            q,
+            k,
+            v,
+            dout,
+            dk,
+            dv,
+            pl.make_ptr(cu_seqlens_q, dtype=pl.DT_INT32),
+            pl.make_ptr(cu_seqlens_kv, dtype=pl.DT_INT32),
+            pl.make_ptr(metadata, dtype=pl.DT_INT32),
+            pl.make_ptr(workspace, dtype=pl.DT_FP32),
+            attn_out,
+            pl.make_ptr(softmax_lse, dtype=pl.DT_FP32),
+            pl.make_ptr(sinks, dtype=pl.DT_FP32),
+            attn_mask,
+            tiling.scaleValue,
+            dq,
+            pl.make_ptr(dsink, dtype=pl.DT_FP32),
+            expected,
+            tiling.planWorkspaceBytes,
+            tiling.planBytes,
+        )
+    elif template == Tmpl.BN2S2:
+        process_bn2s2(
+            q,
+            k,
+            v,
+            dout,
+            attn_out,
+            softmax_lse,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            seqused_q,
+            seqused_kv,
+            attn_mask,
+            metadata,
+            sinks,
+            dq,
+            dk,
+            dv,
+            dsink,
+            workspace,
+            tiling,
+            d_align,
+            dv_align,
+            swizzle,
+            deter,
+            sink,
+        )
+    elif template == Tmpl.BN2GS1S2 and d_align <= 192:
         flash_attn_grad_preload3(
             q,
             k,

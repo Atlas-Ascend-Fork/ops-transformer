@@ -88,10 +88,6 @@ def band_owner_pair_prefix_family(m, n, p, q, lanes, lane, pairs, family):
     return out
 
 
-def band_owner_pair_prefix(m, n, p, q, lanes, lane, pairs):
-    return band_owner_pair_prefix_family(m, n, p, q, lanes, lane, pairs, deter_family)
-
-
 def band_balanced_column(m, n, p, q, rank):
     columns = pl.min(n, m + q - 1)
     peak = pl.min(pl.min(m, p + q - 1), n + p - 1)
@@ -121,10 +117,6 @@ def band_owner_column_family(m, n, p, q, rank, family):
     if family == 8:
         return band_balanced_column(m, n, p, q, rank)
     return pl.astype(rank + 1, pl.DT_INT64)
-
-
-def band_owner_column(m, n, p, q, rank):
-    return band_owner_column_family(m, n, p, q, rank, deter_family)
 
 
 def cal_band_column_owner_family(k, b, g, m, n, p, q, core, r, family):
@@ -214,10 +206,6 @@ def cal_band_column_owner_family(k, b, g, m, n, p, q, core, r, family):
                     x = pl.astype(pl.max(1, y - q + 1) + local_row, pl.DT_INT64)
                     w = pl.astype(group * g + (r - 1 + lane) % g + 1, pl.DT_INT64)
     return (w, x, y)
-
-
-def cal_band_column_owner(k, b, g, m, n, p, q, core, r):
-    return cal_band_column_owner_family(k, b, g, m, n, p, q, core, r, deter_family)
 
 
 def cal_band_folded_owner(k, b, g, m, n, p, q, core, r):

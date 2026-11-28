@@ -49,6 +49,7 @@ from compute.fag_vector_api import (
     cast_p_vf,
     dsink_partial_vf,
     dsink_reduce_add_vf,
+    fill_scaled_zero_bn2s2_vf,
     fill_zero_f16_vf,
     fill_zero_vf,
     muls_cast_vf,
@@ -69,6 +70,7 @@ from fag_common import (
 from fag_tiling import Tmpl
 from compute.attenmask import (
     copy_in_atten_mask,
+    copy_in_atten_mask_rows,
     muls_sel_simple_softmax_vf,
 )
 # --- end generated imports ---
@@ -111,6 +113,19 @@ def _vector_load_rows(constInfo, runInfo):
     tile's physical shape/stride unchanged; rowShift selects the valid rows
     inside this load window, including windows borrowed across TND batches.
     """
+    if (
+        template == Tmpl.BN2
+        and d_align == 256
+        and dv_align == 256
+        and is_bn2_multiblk == 0
+        and deter == 0
+        and mask_mode == 0
+        and sink == 0
+        and swizzle == 0
+        and nz_out == 0
+    ):
+        # A zero-row sibling keeps a legal one-row load; VFs/stores remain empty.
+        return pl.max(runInfo.halfS1RealSize, 1)
     return pl.min(VECTOR_BASEM, pl.max(constInfo.s1ViewSize - runInfo.loadBase, 0))
 
 
@@ -137,7 +152,7 @@ def _sfmg_tile_compute(
     to that window, so workspace indexing and pre/zero interleaving do not
     change. Narrow loads retain their existing physical row layout.
     """
-    if dv_align == 768:
+    if dv_align >= 512:
         for rowOff in pl.range(0, halfRows, wideRows):
             rows = pl.min(wideRows, halfRows - rowOff)
             y_ub = y_group.next()
@@ -167,7 +182,7 @@ def _sfmg_tile_compute(
                     dy_ub,
                     rows,
                     0,
-                    768,
+                    dv_align,
                     (tail + 1) // 2,
                     tail // 2,
                     rowOff,
@@ -180,37 +195,39 @@ def _sfmg_tile_compute(
                     dy_ub,
                     rows,
                     0,
-                    768,
+                    dv_align,
                     (tail + 1) // 2,
                     tail // 2,
                     rowOff,
                 )
-            elif constInfo.dvSize <= 640:
-                tail = constInfo.dvSize - 512
-                softmax_grad_front_row640_vf(
-                    sfmg_ub,
-                    y_ub,
-                    dy_ub,
-                    rows,
-                    0,
-                    768,
-                    (tail + 1) // 2,
-                    tail // 2,
-                    rowOff,
-                )
-            else:
-                tail = constInfo.dvSize - 640
-                softmax_grad_front_row768_vf(
-                    sfmg_ub,
-                    y_ub,
-                    dy_ub,
-                    rows,
-                    0,
-                    768,
-                    (tail + 1) // 2,
-                    tail // 2,
-                    rowOff,
-                )
+            elif dv_align == 768:
+                # Keep wider VF reads out of the physical 512-column key.
+                if constInfo.dvSize <= 640:
+                    tail = constInfo.dvSize - 512
+                    softmax_grad_front_row640_vf(
+                        sfmg_ub,
+                        y_ub,
+                        dy_ub,
+                        rows,
+                        0,
+                        dv_align,
+                        (tail + 1) // 2,
+                        tail // 2,
+                        rowOff,
+                    )
+                else:
+                    tail = constInfo.dvSize - 640
+                    softmax_grad_front_row768_vf(
+                        sfmg_ub,
+                        y_ub,
+                        dy_ub,
+                        rows,
+                        0,
+                        dv_align,
+                        (tail + 1) // 2,
+                        tail // 2,
+                        rowOff,
+                    )
     else:
         y_ub = y_group.next()
         dy_ub = dy_group.next()
@@ -255,6 +272,27 @@ def _sfmg_tile_compute(
             )
 
 
+def load_precomputed_sfmg(constInfo, runInfo, tensor_sfmg_ws, sfmg_ub):
+    headQ = runInfo.n2oIdx * constInfo.gSize + runInfo.goIdx
+    rows = runInfo.halfS1RealSize
+    if rows > 0:
+        # 只搬有效行（rows），并 clamp 确保不超出 ws 的 (head,batch) 段：
+        # rowShift 使读取起点 = rowBase（全局行），rows 使终点 = rowBase+rows
+        # 不会超出本 batch 的物理范围。剩余 sfmg_ub[rows..63] 为残留，
+        # GS 的 V3 按有效行计算；与内联路径的 VF 写入范围一致。
+        # validshape/order 与 lse 同一套：[64,1] DN tile 取 [rows,1]，
+        # order=[1,0] 把 tile 行轴映到 ws 的扁平 token 轴。
+        pl.set_validshape(sfmg_ub, [rows, 1])
+        pl.load(
+            sfmg_ub,
+            tensor_sfmg_ws,
+            [0, headQ * constInfo.t1Size + runInfo.loadBaseTnd + runInfo.rowShift],
+            order=[1, 0],
+        )
+        # 恢复物理形状 [64,1]；GS 的 V3 仍只读取 rows 行。
+        pl.set_validshape(sfmg_ub, [VECTOR_BASEM, 1])
+
+
 def process_vec1(
     constInfo,
     runInfo,
@@ -282,24 +320,7 @@ def process_vec1(
     拼条件。
     """
     if constInfo.enablePreSfmg == 1:
-        headQ = runInfo.n2oIdx * constInfo.gSize + runInfo.goIdx
-        rows = runInfo.halfS1RealSize
-        if rows > 0:
-            # 只搬有效行（rows），并 clamp 确保不超出 ws 的 (head,batch) 段：
-            # rowShift 使读取起点 = rowBase（全局行），rows 使终点 = rowBase+rows
-            # 不会超出本 batch 的物理范围。剩余 sfmg_ub[rows..63] 为残留，
-            # GS 的 V3 按有效行计算；与内联路径的 VF 写入范围一致。
-            # validshape/order 与 lse 同一套：[64,1] DN tile 取 [rows,1]，
-            # order=[1,0] 把 tile 行轴映到 ws 的扁平 token 轴。
-            pl.set_validshape(sfmg_ub, [rows, 1])
-            pl.load(
-                sfmg_ub,
-                tensor_sfmg_ws,
-                [0, headQ * constInfo.t1Size + runInfo.loadBaseTnd + runInfo.rowShift],
-                order=[1, 0],
-            )
-            # 恢复物理形状 [64,1]；GS 的 V3 仍只读取 rows 行。
-            pl.set_validshape(sfmg_ub, [VECTOR_BASEM, 1])
+        load_precomputed_sfmg(constInfo, runInfo, tensor_sfmg_ws, sfmg_ub)
     else:
         # 未前移：主循环内联重算，数值与 pre 路径一致（同一套 VF）。
         loadRows = _vector_load_rows(constInfo, runInfo)
@@ -349,6 +370,72 @@ def _zero_step(zt, zdq, zdk, zdv, dqStart, zS1, dkStart, zS2, dvStart, zS3, zc):
                 pl.set_validshape(zt, [1, n])
                 pl.store(zdv, zt, [0, dvStart + (zc - zS2)])
     return zc + n
+
+
+def normal_wide_tnd_presfmg_bn2s2(
+    ci, y, dy, ws, y_group, dy_group, out_group, flat_group, row_stride, ws_offset
+):
+    # Split physical token/head pairs at row granularity. The workspace is
+    # head-major; Y and dY are token-major and keep their original head stride.
+    total = ci.t1Size * ci.n1Size
+    aiv = pl.get_block_idx()
+    # Keep each 32-byte GM write block under one AIV. Only the physical end
+    # and head crossings within a single AIV may need a short store.
+    share = (total + 8 * ci.aivCount - 1) // (8 * ci.aivCount) * 8
+    # The first row may be inside a 32-byte GM block. Shift each interior
+    # boundary forward to the next absolute block, preserving the first row.
+    prefix = (8 - ws_offset % 8) % 8
+    position = aiv * share + pl.min(aiv, 1) * prefix
+    end = pl.min((aiv + 1) * share + prefix, total)
+    # An integral number of 32-row input slots avoids an extra short VF
+    # inside every full output window. The two output views share a mutex.
+    window = SP_ROWS[dv_align] // 32 * 32
+    while position < end:
+        head = position // ci.t1Size
+        token = position - head * ci.t1Size
+        rows = pl.min(window, pl.min(end - position, ci.t1Size - token))
+        out = out_group.next()
+        flat = flat_group.next()
+        _sfmg_tile_compute(
+            ci,
+            y,
+            dy,
+            0,
+            token,
+            head,
+            rows,
+            rows,
+            0,
+            y_group,
+            dy_group,
+            out,
+            row_stride,
+            32,
+        )
+        pl.set_validshape(flat, [1, rows])
+        pl.store(ws, flat, [0, position])
+        position = position + rows
+
+
+def normal_causal_kv_covered_bn2s2(ci, cuq, cuk, sw_active):
+    covered = pl.const(0, pl.DT_INT64)
+    if (
+        ci.wideKvSlots == 1
+        and sw_active == 0
+        and ci.gSize == 1
+        and ci.sequsedQOptional == 0
+        and ci.sequsedKvOptional == 0
+    ):
+        # For right-down causal the final real query can see every real key.
+        # The native column owner publishes s2RealSize rows at its last task.
+        # An orphan KV batch is the sole gap in the untruncated physical grid.
+        covered = 1
+        for b in pl.range(0, ci.bSize):
+            if pl.getval(cuq, b + 1) == pl.getval(cuq, b) and pl.getval(
+                cuk, b + 1
+            ) > pl.getval(cuk, b):
+                covered = 0
+    return covered
 
 
 def process_presfmg(
@@ -512,10 +599,9 @@ def process_presfmg(
 # ==================================================================
 
 
-def prefetch_vec_lse(constInfo, runInfo, tensor_lse, lse_ub):
-    """准备本任务 LSE；调用方决定在消费时或提前一任务装入 UB。"""
+def load_vec_lse_rows(constInfo, runInfo, tensor_lse, lse_ub, loadRows):
+    """Shared LSE addressing; callers retain their physical/actual-row policy."""
     headQ = runInfo.n2oIdx * constInfo.gSize + runInfo.goIdx
-    loadRows = _vector_load_rows(constInfo, runInfo)
     pl.set_validshape(lse_ub, [loadRows, 1])
     if layout == 1:
         # TND：lse 是 (N1, T1) token 主序。变长 TND 的 loadBase 已是全局
@@ -528,6 +614,12 @@ def prefetch_vec_lse(constInfo, runInfo, tensor_lse, lse_ub):
         pl.load(
             lse_ub, tensor_lse, [runInfo.boIdx, headQ, runInfo.loadBase], order=[2, 0]
         )
+
+
+def prefetch_vec_lse(constInfo, runInfo, tensor_lse, lse_ub):
+    load_vec_lse_rows(
+        constInfo, runInfo, tensor_lse, lse_ub, _vector_load_rows(constInfo, runInfo)
+    )
 
 
 def process_vec2(
@@ -566,7 +658,17 @@ def process_vec2(
 def process_vec3(constInfo, runInfo, subIdx, ds_l1, mm1_ub, mm2_ub, sfmg_ub, nzp_ub):
     rowOff = subIdx * runInfo.firstHalfS1RealSize
     rows = VECTOR_BASEM
-    if template == Tmpl.BN2GS1S2:
+    if template == Tmpl.BN2GS1S2 or (
+        template == Tmpl.BN2
+        and d_align == 256
+        and dv_align == 256
+        and is_bn2_multiblk == 0
+        and deter == 0
+        and mask_mode == 0
+        and sink == 0
+        and swizzle == 0
+        and nz_out == 0
+    ):
         rows = runInfo.halfS1RealSize
     if rows > 0:
         broadcast_sub_mul_cast_vf(
@@ -584,7 +686,17 @@ def process_vec3(constInfo, runInfo, subIdx, ds_l1, mm1_ub, mm2_ub, sfmg_ub, nzp
 def process_vec4(constInfo, runInfo, subIdx, p_l1, mm2_ub, nzp_ub):
     rowOff = subIdx * runInfo.firstHalfS1RealSize
     rows = VECTOR_BASEM
-    if template == Tmpl.BN2GS1S2:
+    if template == Tmpl.BN2GS1S2 or (
+        template == Tmpl.BN2
+        and d_align == 256
+        and dv_align == 256
+        and is_bn2_multiblk == 0
+        and deter == 0
+        and mask_mode == 0
+        and sink == 0
+        and swizzle == 0
+        and nz_out == 0
+    ):
         rows = runInfo.halfS1RealSize
     if rows > 0:
         cast_p_vf(nzp_ub, mm2_ub, rows)
@@ -694,17 +806,8 @@ def process_sink_zero(tensor_slots, constInfo, zt, aiv_idx):
     process_pre(tensor_slots, zt, aiv_idx * constInfo.n1Size, constInfo.n1Size)
 
 
-def process_pre(tensor_ws, zt, elemStart, nElems):
-    """把一段连续 GM 清零，按一维元素切。
-
-    tensor_ws 是 [1, totalElems] 的扁平视图（B*S*N*D 紧凑）。本核负责
-    [elemStart, elemStart+nElems)。UB 按 PRE_ELEMS 切 full tile；尾块用
-    trip count 0/1 的第二个 pl.range。
-    PyPTO tile 必须是二维，故写成 [1, N]，语义仍是一维元素。
-    zt 已由调用方填零，本函数只 store。dtype 跟 zt / tensor_ws（fp32 ws
-    或 16-bit out）。
-    """
-    chunk = PRE_ELEMS[d_align]
+def process_pre_chunked(tensor_ws, zt, elemStart, nElems, chunk):
+    """Clear a flat range with the caller's resource-sized chunk."""
     nFull = nElems // chunk
     rem = nElems - nFull * chunk
     off = elemStart
@@ -718,12 +821,14 @@ def process_pre(tensor_ws, zt, elemStart, nElems):
         pl.store(tensor_ws, zt, [0, off])
 
 
-def process_pre_from_meta(meta, fagOff, tensor_dq, tensor_dk, tensor_dv, dQ, dV, zt):
-    """按 metadata 行区间清 dq/dk/dv。GS1S2 清 fp32 workspace，bn2_need_zero 清 16-bit out。
+def process_pre(tensor_ws, zt, elemStart, nElems):
+    process_pre_chunked(tensor_ws, zt, elemStart, nElems, PRE_ELEMS[d_align])
 
-    AICPU FagSplitRows：dqRows=B*S1*N1、dkvRows=B*S2*N2，按 AIV 均分行。
-    元素起点 = rowStart * 行宽。填零 VF 跟 tilingkey：bn2_need_zero==1 走 16-bit。
-    """
+
+def process_pre_from_meta_chunked(
+    meta, fagOff, tensor_dq, tensor_dk, tensor_dv, dQ, dV, zt, chunk, clear_kv=1
+):
+    """Shared metadata row ownership; resource capacity stays a caller argument."""
     vBlockIdx = pl.get_block_idx()
     one64 = pl.const(1, pl.DT_INT64)
     dqRowStart = pl.getval(meta, fagOff + META_FAG_DQ_ROW_STARTS + vBlockIdx) * one64
@@ -731,20 +836,29 @@ def process_pre_from_meta(meta, fagOff, tensor_dq, tensor_dk, tensor_dv, dQ, dV,
     dkvRowStart = pl.getval(meta, fagOff + META_FAG_DKV_ROW_STARTS + vBlockIdx) * one64
     dkvRowEnd = pl.getval(meta, fagOff + META_FAG_DKV_ROW_ENDS + vBlockIdx) * one64
     dqNElems = (dqRowEnd - dqRowStart) * dQ
-    dkvNElems = (dkvRowEnd - dkvRowStart) * dQ
-    dvNElems = (dkvRowEnd - dkvRowStart) * dV
-    preElems = pl.min(PRE_ELEMS[d_align], pl.max(dqNElems, pl.max(dkvNElems, dvNElems)))
-    pl.set_validshape(zt, [1, PRE_ELEMS[d_align]])
+    kvRows = (dkvRowEnd - dkvRowStart) * clear_kv
+    dkvNElems = kvRows * dQ
+    dvNElems = kvRows * dV
+    preElems = pl.min(chunk, pl.max(dqNElems, pl.max(dkvNElems, dvNElems)))
+    pl.set_validshape(zt, [1, chunk])
     if bn2_need_zero == 1:
         fill_zero_f16_vf(zt, (preElems + VF_LANES_F16 - 1) // VF_LANES_F16)
     else:
         fill_zero_vf(zt, (preElems + VF_LANES - 1) // VF_LANES)
-    process_pre(tensor_dq, zt, dqRowStart * dQ, dqNElems)
-    process_pre(tensor_dk, zt, dkvRowStart * dQ, dkvNElems)
-    process_pre(tensor_dv, zt, dkvRowStart * dV, dvNElems)
+    process_pre_chunked(tensor_dq, zt, dqRowStart * dQ, dqNElems, chunk)
+    process_pre_chunked(tensor_dk, zt, dkvRowStart * dQ, dkvNElems, chunk)
+    process_pre_chunked(tensor_dv, zt, dkvRowStart * dV, dvNElems, chunk)
 
 
-def zero_tnd_empty_batch(constInfo, cu_q, cu_kv, tensor_dq, tensor_dk, tensor_dv, zt):
+def process_pre_from_meta(meta, fagOff, tensor_dq, tensor_dk, tensor_dv, dQ, dV, zt):
+    process_pre_from_meta_chunked(
+        meta, fagOff, tensor_dq, tensor_dk, tensor_dv, dQ, dV, zt, PRE_ELEMS[d_align]
+    )
+
+
+def zero_tnd_empty_batch(
+    constInfo, cu_q, cu_kv, tensor_dq, tensor_dk, tensor_dv, zt, clear_dq=True
+):
     """变长 TND：把「空 batch」对侧的 out 行清零。
 
     packed 索引空间按每 batch 的有效块数拼起来，空 batch（一侧长度为 0）
@@ -776,9 +890,10 @@ def zero_tnd_empty_batch(constInfo, cu_q, cu_kv, tensor_dq, tensor_dk, tensor_dv
         k0 = pl.getval(cu_kv, i) * one64
         k1 = pl.getval(cu_kv, i + 1) * one64
         # KV 为空：dq 整段为 0（没有 key 参与 softmax）。
-        if q1 > q0:
-            if k1 == k0:
-                process_pre(tensor_dq, zt, q0 * n1 * dQ, (q1 - q0) * n1 * dQ)
+        if clear_dq:
+            if q1 > q0:
+                if k1 == k0:
+                    process_pre(tensor_dq, zt, q0 * n1 * dQ, (q1 - q0) * n1 * dQ)
         # Q 为空：dk/dv 整段为 0（该 batch 对 KV 没有贡献）。
         if k1 > k0:
             if q1 == q0:
@@ -886,6 +1001,18 @@ def muls_cast_ws_out(
         return
     tile_w = D_CHUNK_MAXW[d_align]
     nSegs = tile_w * VECTOR_BASEM // VF_LANES_F16
+    if (
+        template == Tmpl.BN2
+        and d_align == 256
+        and dv_align == 256
+        and is_bn2_multiblk == 0
+        and deter == 0
+        and mask_mode == 0
+        and sink == 0
+        and swizzle == 0
+        and nz_out == 0
+    ):
+        nSegs = (tile_w * rows + VF_LANES_F16 - 1) // VF_LANES_F16
     for i in pl.range(0, D_NCHUNKS[d_align]):
         dOff = chunk_off(i)
         w = chunk_valid_d(dim_size, i)
@@ -931,4 +1058,1858 @@ def process_dq_multiblk(
         rows,
         constInfo.scaleValue,
         constInfo.dSize,
+    )
+
+
+# BN2S2 implementation: separate resource and synchronization semantics.
+from compute.attenmask import copy_in_atten_mask
+from memory import fag_mem as mem
+from fag_common import (
+    CUBE_BASEM_bn2s2,
+    D_NCHUNKS_bn2s2,
+    NZP_ROWS_bn2s2,
+    VECTOR_BASEM_bn2s2,
+    VECTOR_BASEN_bn2s2,
+    VF_LANES_bn2s2,
+    VF_LANES_F16_bn2s2,
+    plan_run_info_bn2s2,
+)
+from schedule.deterministic.tnd.fag_deter_tnd_plan import (
+    PF_bn2s2,
+    PlanSplit_bn2s2,
+    plan_i64_bn2s2,
+    seq_i64_bn2s2,
+)
+from memory.fag_mem import (
+    BN2_CAST_W_bn2s2,
+    PLAN_POST_ROWS_bn2s2,
+    PLAN_PRE_ELEMENTS_bn2s2,
+    POST_ELEMS_bn2s2,
+    PRE_ELEMS_bn2s2,
+)
+from compute.fag_vector_api import (
+    broadcast_sub_mul_cast_vf,
+    cast_p_vf,
+    dsink_partial_bn2s2_vf,
+    dsink_reduce_add_vf,
+    fill_zero_f16_vf,
+    fill_zero_vf,
+    muls_cast_vf,
+    plan_cast_only_vf,
+    plan_merge_band_mask_vf,
+    plan_sink_negate_vf,
+    plan_sink_partial_vf,
+    plan_sink_reduce_chunk_vf,
+    softmax_grad_front_row192_bn2s2_vf,
+    softmax_grad_front_row256_acc_vf,
+    softmax_grad_front_row256_bn2s2_vf,
+    softmax_grad_front_row320_single_vf,
+    softmax_grad_front_row_bn2s2_vf,
+    softmax_grad_front_single_bn2s2_vf,
+)
+from schedule.fag_schedule import (
+    META_FAG_DKV_ROW_ENDS_bn2s2,
+    META_FAG_DKV_ROW_STARTS_bn2s2,
+    META_FAG_DQ_ROW_ENDS_bn2s2,
+    META_FAG_DQ_ROW_STARTS_bn2s2,
+)
+from compute.attenmask import (
+    compute_offset_for_causal,
+    _load_compress_mask,
+    muls_sel_simple_softmax_vf,
+)
+
+# --- end generated imports ---
+
+# ==================================================================
+#  UB -> CV 共享 L1
+# ==================================================================
+
+
+# ==================================================================
+#  V1 —— sfmg = rowsum(dy * y)
+# ==================================================================
+
+
+def _vector_load_rows_bn2s2(constInfo, runInfo):
+    """Bound y/dy/lse GM reads by the physical Q view, not the used length.
+
+    s1ViewSize is packed T for TND and physical S for BSND/BNSD. Keep the
+    tile's physical shape/stride unchanged; rowShift selects the valid rows
+    inside this load window, including windows borrowed across TND batches.
+    """
+    rows = pl.min(
+        VECTOR_BASEM_bn2s2, pl.max(constInfo.s1ViewSize - runInfo.loadBase, 0)
+    )
+    if (
+        template == Tmpl.BN2S2
+        and deter == 0
+        and sink == 0
+        and (
+            (d_align == 128 and dv_align == 128) or (d_align == 192 and dv_align == 192)
+        )
+    ):
+        # D72/D161 use their real Dv and the existing physical UB pitch.
+        # VF consumes only [rowShift, rowShift + halfS1RealSize); retain the
+        # borrowed prefix but do not transfer the unused trailing rows.
+        # Keep the existing producer/consumer generation on empty subcores.
+        rows = pl.min(rows, pl.max(runInfo.rowShift + runInfo.halfS1RealSize, 1))
+    return rows
+
+
+def process_plan_vec1_bn2s2(
+    constInfo, runInfo, subIdx, tensor_y, tensor_dy, y_ub, dy_ub, sfmg_ub, rowStride
+):
+    # D64 plan path: retain the borrowed prefix and skip unused trailing rows.
+    if runInfo.halfS1RealSize > 0:
+        # D192/Dv128 copies the exact active rows as ASC ProcessVec1 does.
+        # Keep RunInfo unchanged: LSE and all other consumers still use its offset.
+        loadRows = runInfo.rowShift + runInfo.halfS1RealSize
+        loadBase = runInfo.loadBase
+        vfRowShift = runInfo.rowShift
+        if d_align == 192 and dv_align == 128:
+            loadRows = runInfo.halfS1RealSize
+            loadBase = loadBase + vfRowShift
+            vfRowShift = pl.astype(0, pl.DT_INT64)
+        pl.set_validshape(y_ub, [loadRows, constInfo.dvSize])
+        pl.set_validshape(dy_ub, [loadRows, constInfo.dvSize])
+        pl.load(
+            y_ub, tensor_y, [runInfo.idx0Q, loadBase, runInfo.idx2Q, 0], order=[1, 3]
+        )
+        pl.load(
+            dy_ub, tensor_dy, [runInfo.idx0Q, loadBase, runInfo.idx2Q, 0], order=[1, 3]
+        )
+        softmax_grad_front_row_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            vfRowShift,
+            rowStride,
+            constInfo.dvEvenSize,
+            constInfo.dvOddSize,
+        )
+
+
+def _sfmg_whole_at_width_bn2s2(
+    ci, info, tensor_y, tensor_dy, y_slot, dy_slot, sfmg, row_width, slot_elements
+):
+    # Retain the slot and mutex selected by the caller. The last VF writes a
+    # scalar per valid output row at its existing offset in the macro tile.
+    step = slot_elements // row_width
+    y_tile = pl.reinterpret(y_slot, shape=[step, row_width])
+    dy_tile = pl.reinterpret(dy_slot, shape=[step, row_width])
+    remainder = ci.dvSize - (row_width - 128)
+    even = (remainder + 1) // 2
+    odd = remainder // 2
+    for off in pl.range(0, info.halfS1RealSize, step):
+        rows = pl.min(step, info.halfS1RealSize - off)
+        src_row = info.loadBase + info.rowShift + off
+        pl.set_validshape(y_tile, [rows, ci.dvSize])
+        pl.set_validshape(dy_tile, [rows, ci.dvSize])
+        pl.load(y_tile, tensor_y, [info.idx0Q, src_row, info.idx2Q, 0], order=[1, 3])
+        pl.load(dy_tile, tensor_dy, [info.idx0Q, src_row, info.idx2Q, 0], order=[1, 3])
+        if row_width == 384:
+            softmax_grad_front_row384_vf(
+                sfmg, y_tile, dy_tile, rows, 0, row_width, even, odd, off
+            )
+        else:
+            softmax_grad_front_row512_vf(
+                sfmg, y_tile, dy_tile, rows, 0, row_width, even, odd, off
+            )
+
+
+def _sfmg_whole_wide_bn2s2(ci, info, y, dy, y_slot, dy_slot, sfmg, slot_elements):
+    if ci.dvSize <= 384:
+        _sfmg_whole_at_width_bn2s2(
+            ci, info, y, dy, y_slot, dy_slot, sfmg, 384, slot_elements
+        )
+    else:
+        _sfmg_whole_at_width_bn2s2(
+            ci, info, y, dy, y_slot, dy_slot, sfmg, 512, slot_elements
+        )
+
+
+def process_vec1_bn2s2(
+    constInfo,
+    runInfo,
+    subIdx,
+    tensor_y,
+    tensor_dy,
+    y_ub,
+    dy_ub,
+    sfmg_ub,
+    rowStride,
+    exact_192_rows=False,
+):
+    """softmaxGradFront: sfmg = rowsum(dy * y)。一趟 VECTOR_BASEM 行。"""
+    if dv_align >= 512:
+        if constInfo.dvSize > 256 and constInfo.dvSize < 512:
+            _sfmg_whole_wide_bn2s2(
+                constInfo,
+                runInfo,
+                tensor_y,
+                tensor_dy,
+                y_ub,
+                dy_ub,
+                sfmg_ub,
+                VECTOR_BASEM_bn2s2 * 256,
+            )
+        elif dv_align == 512:
+            _process_vec1_d512_bn2s2(
+                constInfo, runInfo, tensor_y, tensor_dy, y_ub, dy_ub, sfmg_ub, rowStride
+            )
+        else:
+            _process_vec1_d768_bn2s2(
+                constInfo, runInfo, tensor_y, tensor_dy, y_ub, dy_ub, sfmg_ub, rowStride
+            )
+        return
+    loadBase = runInfo.loadBase
+    vfShift = runInfo.rowShift
+    if exact_192_rows:
+        # Keep both MTE2 producers on a zero-row subcore. The D192 VF skips
+        # its row loop there, while its buffer mutex generation still retires.
+        loadBase = pl.min(loadBase + vfShift, constInfo.s1ViewSize - 1)
+        loadRows = pl.max(runInfo.halfS1RealSize, 1)
+        vfShift = pl.astype(0, pl.DT_INT64)
+    else:
+        loadRows = _vector_load_rows_bn2s2(constInfo, runInfo)
+    pl.set_validshape(y_ub, [loadRows, constInfo.dvSize])
+    pl.set_validshape(dy_ub, [loadRows, constInfo.dvSize])
+    pl.load(
+        y_ub,
+        tensor_y,
+        [runInfo.idx0Q, loadBase, runInfo.idx2Q, 0],
+        order=[1, 3],
+    )
+    pl.load(
+        dy_ub,
+        tensor_dy,
+        [runInfo.idx0Q, loadBase, runInfo.idx2Q, 0],
+        order=[1, 3],
+    )
+    # 列宽跟 dv_align：256/192 各一档 VF；64 与 128（含 D=192,Dv=128）共用
+    # 一次 128-lane load，用 even/odd mask 收真实 Dv。
+    if dv_align == 256:
+        w0 = pl.min(constInfo.dvSize, 128)
+        w1 = pl.max(constInfo.dvSize - 128, 0)
+        softmax_grad_front_row256_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            runInfo.rowShift,
+            rowStride,
+            (w0 + 1) // 2,
+            w0 // 2,
+            (w1 + 1) // 2,
+            w1 // 2,
+        )
+    elif dv_align == 192:
+        w0 = pl.min(constInfo.dvSize, 128)
+        w1 = pl.max(constInfo.dvSize - 128, 0)
+        softmax_grad_front_row192_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            vfShift,
+            rowStride,
+            (w0 + 1) // 2,
+            w0 // 2,
+            (w1 + 1) // 2,
+            w1 // 2,
+        )
+    elif (
+        d_align == 64
+        and dv_align == 64
+        and deter == 0
+        and layout == 1
+        and constInfo.dvSize == 1
+    ):
+        softmax_grad_front_single_bn2s2_vf(
+            sfmg_ub, y_ub, dy_ub, runInfo.halfS1RealSize, runInfo.rowShift, rowStride
+        )
+    else:
+        softmax_grad_front_row_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            runInfo.rowShift,
+            rowStride,
+            constInfo.dvEvenSize,
+            constInfo.dvOddSize,
+        )
+
+
+def _process_vec1_d768_bn2s2(
+    constInfo, runInfo, tensor_y, tensor_dy, y_ub, dy_ub, sfmg_ub, rowStride
+):
+    """768 档 V1：3 趟 VF256，后两趟累加到同一 sfmg。工作列宽 256。"""
+    loadRows = _vector_load_rows_bn2s2(constInfo, runInfo)
+    for k in pl.range(0, 3):
+        colOff = k * 256
+        rem = pl.max(constInfo.dvSize - colOff, 0)
+        winW = pl.min(256, rem)
+        if rem > 0:
+            pl.set_validshape(y_ub, [loadRows, winW])
+            pl.set_validshape(dy_ub, [loadRows, winW])
+            pl.load(
+                y_ub,
+                tensor_y,
+                [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, colOff],
+                order=[1, 3],
+            )
+            pl.load(
+                dy_ub,
+                tensor_dy,
+                [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, colOff],
+                order=[1, 3],
+            )
+            w0 = pl.min(rem, 128)
+            w1 = pl.max(rem - 128, 0)
+            even0 = (w0 + 1) // 2
+            odd0 = w0 // 2
+            even1 = (w1 + 1) // 2
+            odd1 = w1 // 2
+            if k == 0:
+                softmax_grad_front_row256_bn2s2_vf(
+                    sfmg_ub,
+                    y_ub,
+                    dy_ub,
+                    runInfo.halfS1RealSize,
+                    runInfo.rowShift,
+                    rowStride,
+                    even0,
+                    odd0,
+                    even1,
+                    odd1,
+                )
+            else:
+                softmax_grad_front_row256_acc_vf(
+                    sfmg_ub,
+                    y_ub,
+                    dy_ub,
+                    runInfo.halfS1RealSize,
+                    runInfo.rowShift,
+                    rowStride,
+                    even0,
+                    odd0,
+                    even1,
+                    odd1,
+                )
+
+
+def _process_vec1_d512_bn2s2(
+    constInfo, runInfo, tensor_y, tensor_dy, y_ub, dy_ub, sfmg_ub, rowStride
+):
+    """512/768 档 V1：按 256 列窗多趟 VF256（512=2 趟、768=3 趟），后趟累加到
+    同一 sfmg。工作列宽 256，趟数 = D_NCHUNKS // 2（块数每窗 2 块）。"""
+    loadRows = _vector_load_rows_bn2s2(constInfo, runInfo)
+    nWin = 2
+    for k in pl.range(0, nWin):
+        colOff = k * 256
+        rem = pl.max(constInfo.dvSize - colOff, 0)
+        winW = pl.min(256, rem)
+        if rem > 0:
+            pl.set_validshape(y_ub, [loadRows, winW])
+            pl.set_validshape(dy_ub, [loadRows, winW])
+            pl.load(
+                y_ub,
+                tensor_y,
+                [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, colOff],
+                order=[1, 3],
+            )
+            pl.load(
+                dy_ub,
+                tensor_dy,
+                [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, colOff],
+                order=[1, 3],
+            )
+            w0 = pl.min(rem, 128)
+            w1 = pl.max(rem - 128, 0)
+            even0 = (w0 + 1) // 2
+            odd0 = w0 // 2
+            even1 = (w1 + 1) // 2
+            odd1 = w1 // 2
+            if k == 0:
+                softmax_grad_front_row256_bn2s2_vf(
+                    sfmg_ub,
+                    y_ub,
+                    dy_ub,
+                    runInfo.halfS1RealSize,
+                    runInfo.rowShift,
+                    rowStride,
+                    even0,
+                    odd0,
+                    even1,
+                    odd1,
+                )
+            else:
+                softmax_grad_front_row256_acc_vf(
+                    sfmg_ub,
+                    y_ub,
+                    dy_ub,
+                    runInfo.halfS1RealSize,
+                    runInfo.rowShift,
+                    rowStride,
+                    even0,
+                    odd0,
+                    even1,
+                    odd1,
+                )
+
+
+# ==================================================================
+#  V2 —— P = simpleSoftmax(S * scale, lse) [+ atten mask]
+# ==================================================================
+
+
+# ==================================================================
+#  V3 —— dS = (dP - sfmg) * P，cast + ND2NZ 落 L1（mm4 读同址 ZN 视图）
+# ==================================================================
+
+
+# ==================================================================
+#  V4 —— P cast + ND2NZ 落 L1（mm5 读同址 ZN 视图）
+# ==================================================================
+
+
+# ==================================================================
+#  Pre —— dq/dk/dv 累加区清零
+# ==================================================================
+
+
+def process_sink_partial_bn2s2(
+    constInfo,
+    runInfo,
+    tensor_slots,
+    aiv_idx,
+    p_ub,
+    dp_ub,
+    lse_ub,
+    sink_part_ub,
+    sink_val,
+):
+    """本 s2 块的 dsink 贡献，原子加到槽位区本 AIV 行的 headQ 列。"""
+    rows = runInfo.halfS1RealSize
+    if rows <= 0:
+        return
+    s2Real = runInfo.s2RealSize
+    if s2Real <= 0:
+        return
+    headQ = runInfo.n2oIdx * constInfo.gSize + runInfo.goIdx
+    loopTimes = (s2Real + VF_LANES_bn2s2 - 1) // VF_LANES_bn2s2 - 1
+    tailCols = s2Real - loopTimes * VF_LANES_bn2s2
+    dsink_partial_bn2s2_vf(
+        sink_part_ub,
+        p_ub,
+        dp_ub,
+        lse_ub,
+        sink_val,
+        rows,
+        loopTimes,
+        tailCols,
+        runInfo.rowShift,
+    )
+    pl.set_validshape(sink_part_ub, [1, 1])
+    pl.store(
+        tensor_slots,
+        sink_part_ub,
+        [0, aiv_idx * constInfo.n1Size + headQ],
+        atomic=pl.AtomicType.AtomicAdd,
+    )
+    pl.set_validshape(sink_part_ub, [1, VECTOR_BASEN_bn2s2])
+
+
+def process_sink_reduce_bn2s2(
+    constInfo, tensor_slots, tensor_dsink, acc_ub, row_ub, aiv_count
+):
+    """Batch-load four independent rows, then add them in original AIV order.
+
+    row_ub is the same four-buffer group consumed by the public reducer.
+    Only the final load/barrier schedule is shared; the BN2S2 partial-sum
+    VF and its floating-point reduction order remain unchanged.
+    """
+    process_sink_reduce(
+        constInfo, tensor_slots, tensor_dsink, acc_ub, row_ub, aiv_count
+    )
+
+
+def process_sink_zero_bn2s2(tensor_slots, constInfo, zt, aiv_idx):
+    """清本 AIV 的 dsink 槽位行，供主循环 atomicAdd。"""
+    fill_zero_vf(zt, (constInfo.n1Size + VF_LANES_bn2s2 - 1) // VF_LANES_bn2s2)
+    process_pre_bn2s2(tensor_slots, zt, aiv_idx * constInfo.n1Size, constInfo.n1Size)
+
+
+def process_pre_bn2s2(tensor_ws, zt, elemStart, nElems):
+    process_pre_chunked(tensor_ws, zt, elemStart, nElems, PRE_ELEMS_bn2s2[d_align])
+
+
+def store_isolated_zero_bn2s2(out, f16, scale, is_dv, begin, count, chunk):
+    if count > 0:
+        tile = f16.next()
+        pl.set_validshape(tile, [1, chunk])
+        vectors = (pl.min(count, chunk) + 127) // 128
+        if is_dv:
+            fill_zero_f16_vf(tile, vectors)
+        else:
+            fill_scaled_zero_bn2s2_vf(tile, scale, vectors)
+        process_pre_chunked(out, tile, begin, count, chunk)
+
+
+def process_dense_dq_rows_bn2s2(
+    ci, cuq, cuk, ws, out, start, end, zero, f32, f16, post
+):
+    # Clip only physically Q-only intervals against this worker's metadata rows.
+    # Uninterrupted active rows keep the original bulk DMA and accumulation.
+    cursor = start
+    one64 = pl.const(1, pl.DT_INT64)
+    for b in pl.range(0, ci.bSize):
+        if pl.getval(cuk, b) == pl.getval(cuk, b + 1):
+            q0 = pl.getval(cuq, b) * one64 * ci.n1Size
+            q1 = pl.getval(cuq, b + 1) * one64 * ci.n1Size
+            lo = pl.max(start, q0)
+            hi = pl.min(end, q1)
+            if hi > lo:
+                if post:
+                    process_post(
+                        ws,
+                        out,
+                        f32,
+                        f16,
+                        ci.scaleValue,
+                        cursor * ci.dSize,
+                        (lo - cursor) * ci.dSize,
+                    )
+                    store_isolated_zero_bn2s2(
+                        out,
+                        f16,
+                        ci.scaleValue,
+                        False,
+                        lo * ci.dSize,
+                        (hi - lo) * ci.dSize,
+                        POST_ELEMS_bn2s2[d_align],
+                    )
+                else:
+                    process_pre_bn2s2(
+                        ws, zero, cursor * ci.dSize, (lo - cursor) * ci.dSize
+                    )
+                cursor = hi
+    if post:
+        process_post(
+            ws,
+            out,
+            f32,
+            f16,
+            ci.scaleValue,
+            cursor * ci.dSize,
+            (end - cursor) * ci.dSize,
+        )
+    else:
+        process_pre_bn2s2(ws, zero, cursor * ci.dSize, (end - cursor) * ci.dSize)
+
+
+def pre_dense_tnd_bn2s2(ci, cuq, cuk, meta, fagOff, dq_ws, dq, dk, dv, zero, zero16):
+    aiv = pl.get_block_idx()
+    one64 = pl.const(1, pl.DT_INT64)
+    start = pl.getval(meta, fagOff + META_FAG_DQ_ROW_STARTS_bn2s2 + aiv) * one64
+    end = pl.getval(meta, fagOff + META_FAG_DQ_ROW_ENDS_bn2s2 + aiv) * one64
+    capacity = PRE_ELEMS_bn2s2[d_align]
+    pl.set_validshape(zero, [1, capacity])
+    fill_zero_vf(zero, (pl.min(capacity, (end - start) * ci.dSize) + 63) // 64)
+    process_dense_dq_rows_bn2s2(
+        ci, cuq, cuk, dq_ws, dq, start, end, zero, zero, zero, False
+    )
+    # AIVs divide EACH orphan KV span by physical head rows. Both dimensions
+    # are 16-element aligned at admission, including worker boundary stores.
+    filled = pl.const(0, pl.DT_INT64)
+    for b in pl.range(0, ci.bSize):
+        if pl.getval(cuq, b) == pl.getval(cuq, b + 1):
+            first = pl.getval(cuk, b) * one64 * ci.n2Size
+            last = pl.getval(cuk, b + 1) * one64 * ci.n2Size
+            rows = last - first
+            lo = first + rows * aiv // ci.aivCount
+            hi = first + rows * (aiv + 1) // ci.aivCount
+            if hi > lo:
+                needed = pl.min(capacity, (hi - lo) * pl.max(ci.dSize, ci.dvSize))
+                if needed > filled:
+                    pl.set_validshape(zero16, [1, capacity])
+                    fill_zero_f16_vf(zero16, (needed + 127) // 128)
+                    filled = needed
+                process_pre_bn2s2(dk, zero16, lo * ci.dSize, (hi - lo) * ci.dSize)
+                process_pre_bn2s2(dv, zero16, lo * ci.dvSize, (hi - lo) * ci.dvSize)
+
+
+def process_pre_from_meta_bn2s2(
+    meta, fagOff, tensor_dq, tensor_dk, tensor_dv, dQ, dV, zt, clear_kv
+):
+    process_pre_from_meta_chunked(
+        meta,
+        fagOff,
+        tensor_dq,
+        tensor_dk,
+        tensor_dv,
+        dQ,
+        dV,
+        zt,
+        PRE_ELEMS_bn2s2[d_align],
+        clear_kv,
+    )
+
+
+def process_pre_kv_out_zero_bn2s2(meta, fagOff, tensor_dk, tensor_dv, dQ, dV, zt, need):
+    """BN2S2 直出档（d_align<=128）：按 metadata 的 dkv 行区间清 16-bit dK/dV 输出。
+
+    直出路径下无效列/零长序列的 dK/dV 行不会被主循环写，必须在 pre 清零
+    兜底（对齐老 FAG pre 的 hasInvalidCol/sValueZeroUnderTND 分支）。dQ 输出
+    由 post 全量 cast 覆盖（ws 已清零），无需清。zt 需为 16-bit zero UB。
+    ``need`` 为 0 时元素数折叠为 0、清零循环空转；定长场景仅
+    零 Q 任务（s1==0）与 seqused 变长需要兜底，主路径传 0 保住整份 kv 输出
+    的写带宽。
+    """
+    vBlockIdx = pl.get_block_idx()
+    one64 = pl.const(1, pl.DT_INT64)
+    rowStart = (
+        pl.getval(meta, fagOff + META_FAG_DKV_ROW_STARTS_bn2s2 + vBlockIdx) * one64
+    )
+    rowEnd = pl.getval(meta, fagOff + META_FAG_DKV_ROW_ENDS_bn2s2 + vBlockIdx) * one64
+    dkNElems = (rowEnd - rowStart) * dQ * need
+    dvNElems = (rowEnd - rowStart) * dV * need
+    preElems = pl.min(PRE_ELEMS_bn2s2[d_align], pl.max(dkNElems, dvNElems))
+    fill_zero_f16_vf(zt, (preElems + VF_LANES_F16_bn2s2 - 1) // VF_LANES_F16_bn2s2)
+    process_pre_bn2s2(tensor_dk, zt, rowStart * dQ, dkNElems)
+    process_pre_bn2s2(tensor_dv, zt, rowStart * dV, dvNElems)
+
+
+# ==================================================================
+#  Post —— dQ/dK/dV 的 scale + cast
+# ==================================================================
+
+
+# ==================================================================
+#  BN2 模板的 vector 阶段
+# ==================================================================
+
+
+def _store_splitm_dkv_bn2s2(tensor_out, dst_ub, runInfo, subIdx, out_w):
+    """按 runInfo.firstHalfS2RealSize 把本子核的行写出。
+
+    切点在 set_run_info 里已经算好。vec0 从 keyOffset 起写这么多行，
+    vec1 的 GM 行偏移就是这份，行数是 s2RealSize 减去它。UB 行都从 0 排起。
+    """
+    first = runInfo.firstHalfS2RealSize
+    row_off = first * subIdx
+    if subIdx == 0:
+        rows = first
+    else:
+        rows = pl.max(runInfo.s2RealSize - first, 0)
+    if rows > 0:
+        seq_off = runInfo.keyOffset + row_off
+        pl.set_validshape(dst_ub, [rows, out_w])
+        pl.store(
+            tensor_out,
+            dst_ub,
+            [runInfo.idx0KV, seq_off, runInfo.idx2KV, 0],
+            order=[1, 3],
+            atomic=pl.AtomicType.AtomicNone,
+        )
+        pl.set_validshape(dst_ub, [VECTOR_BASEM_bn2s2, BN2_CAST_W_bn2s2])
+
+
+def process_muls_cast_dk_bn2_bn2s2(
+    tensor_dk, src_ub, dst_ub, constInfo, runInfo, subIdx
+):
+    """v6：mm4 的 fp32 UB → muls(scale) → cast 16-bit → dK GM。
+
+    BN2 与 BN2S2 共用。行区间用 runInfo.firstHalfS2RealSize。
+    """
+    pl.set_validshape(src_ub, [VECTOR_BASEM_bn2s2, BN2_CAST_W_bn2s2])
+    pl.set_validshape(dst_ub, [VECTOR_BASEM_bn2s2, BN2_CAST_W_bn2s2])
+    muls_cast_vf(
+        dst_ub,
+        src_ub,
+        constInfo.scaleValue,
+        VECTOR_BASEM_bn2s2 * BN2_CAST_W_bn2s2 // VECTOR_BASEN_bn2s2,
+    )
+    _store_splitm_dkv_bn2s2(tensor_dk, dst_ub, runInfo, subIdx, constInfo.dSize)
+
+
+# （曾有 _cast_ws_col / process_muls_cast_dkv_from_ws 做 d>=192 的"列末直出"
+# 消费——从 GM ws 读 fp32 经 Muls/Cast 直写 16-bit GM。实测跨核事件不保证
+# FIX 写 GM 对对端 MTE2 读的可见性（写穿透竞态导致 dK 前 64 列错值），已
+# 随消费端撤回 post 全三段整体删除，勿再引入；老仓 DqkvMulsAndCastFromGM
+# 的同款算术跑在 post/sync_all 之后，两者时机不同。）
+
+
+# ==================================================================
+#  BN2S2 TND metadata 确定性：V2/V3/V4、列写回与 pre/post
+# ==================================================================
+# 屏障由 kernel 编排；此处保持原搬运、逐列写回和 sink 归约顺序。
+
+
+def plan_copy_mask_bn2s2(h, info, sub, tensor_mask, mask, mask_pre):
+    if info.halfS1RealSize > 0:
+        vec_off = sub * info.firstHalfS1RealSize
+        local_delta = (info.s1oIdx - info.s2oIdx) * 128
+        skew = info.batchS2Len - info.batchS1Len
+        if mask_mode == 3:
+            offset = compute_offset_for_causal(local_delta + skew, vec_off)
+            _load_compress_mask(
+                tensor_mask, mask, offset, info.halfS1RealSize, info.s2RealSize
+            )
+        else:
+            pre = h.tokenQ - skew
+            post = h.tokenKv + skew
+            next_delta = local_delta + post
+            pre_delta = local_delta - pre - 1
+            offset = compute_offset_for_causal(next_delta, vec_off)
+            _load_compress_mask(
+                tensor_mask, mask, offset, info.halfS1RealSize, info.s2RealSize
+            )
+            if pre_delta + 129 > 0:
+                pre_offset = compute_offset_for_causal(pre_delta, vec_off)
+                _load_compress_mask(
+                    tensor_mask,
+                    mask_pre,
+                    pre_offset,
+                    info.halfS1RealSize,
+                    info.s2RealSize,
+                )
+                plan_merge_band_mask_vf(mask, mask_pre, info.halfS1RealSize)
+
+
+def plan_load_lse_bn2s2(h, info, tensor_lse, lse):
+    load_rows = pl.min(64, pl.max(h.totalQ - info.loadBase, 0))
+    load_base = info.loadBase
+    if d_align == 192 and dv_align == 128 and sink == 0:
+        # Keep one harmless in-bounds row for the zero-work subcore so its
+        # MTE2 producer/VF consumer mutex generation still pairs normally.
+        load_rows = pl.max(info.halfS1RealSize, 1)
+        load_base = pl.min(info.loadBase + info.rowShift, h.totalQ - 1)
+    pl.set_validshape(lse, [load_rows, 1])
+    pl.load(lse, tensor_lse, [info.n2oIdx, load_base], order=[1, 0])
+
+
+def plan_vec2_bn2s2(ci, h, info, sub, mm2, lse, tensor_mask, mask, mask_pre):
+    if mask_mode != 0:
+        plan_copy_mask_bn2s2(h, info, sub, tensor_mask, mask, mask_pre)
+    lse_shift = info.rowShift
+    if d_align == 192 and dv_align == 128 and sink == 0:
+        lse_shift = pl.astype(0, pl.DT_INT64)
+    muls_sel_simple_softmax_vf(
+        mm2, lse, mask, ci.scaleValue, info.halfS1RealSize, lse_shift
+    )
+
+
+def plan_insert_tail_bn2s2(info, sub, l1, nzp):
+    if info.halfS1RealSize > 0:
+        copy_ub2l1(l1, nzp, sub * info.firstHalfS1RealSize, info.halfS1RealSize)
+
+
+def plan_vec3_bn2s2(ci, info, sub, ds_l1, mm1, mm2, sfmg, nzp):
+    broadcast_sub_mul_cast_vf(nzp, mm1, mm2, sfmg, ci.scaleValue, info.halfS1RealSize)
+    plan_insert_tail_bn2s2(info, sub, ds_l1, nzp)
+
+
+def plan_vec4_bn2s2(info, sub, p_l1, mm2, nzp):
+    cast_p_vf(nzp, mm2, info.halfS1RealSize)
+    plan_insert_tail_bn2s2(info, sub, p_l1, nzp)
+
+
+def plan_sink_task_bn2s2(info, tensor_sinks, tensor_partial, p, dp, lse, partial):
+    if info.halfS1RealSize > 0:
+        sink_value = pl.getval(tensor_sinks, info.n2oIdx)
+        loops = (info.s2RealSize + 63) // 64 - 1
+        tail = info.s2RealSize - loops * 64
+        plan_sink_partial_vf(
+            partial,
+            p,
+            dp,
+            lse,
+            sink_value,
+            info.halfS1RealSize,
+            loops,
+            tail,
+            info.rowShift,
+        )
+        pl.set_validshape(partial, [1, 1])
+        pl.store(
+            tensor_partial,
+            partial,
+            [0, info.sinkOffset],
+            atomic=pl.AtomicType.AtomicNone,
+        )
+        pl.set_validshape(partial, [1, 128])
+
+
+def plan_column_chunked_from_gm_bn2s2(
+    ws_ptr,
+    base,
+    stride,
+    tensor_out,
+    src,
+    dst,
+    key_token,
+    head,
+    rows,
+    sub_idx,
+    dim,
+    scale,
+    is_dv,
+    v1w,
+):
+    """Copy disjoint ASC ceil(real/2) rows; base/stride are FP32 element units.
+
+    Works for per-core scratch and the original interleaved special slot.
+    Chunking the elementwise conversion changes no FP32 accumulation order.
+    D tails load/store only valid columns; physical UB row width stays 128.
+    """
+    first = (rows + 1) // 2
+    half_rows = pl.min(first, rows - sub_idx * first)
+    source = pl.make_tensor(
+        pl.addptr(ws_ptr, base), [128, dim], [stride, 1], dtype=pl.DT_FP32
+    )
+    if d_align == 192 and dv_align == 192:
+        # Entire D in each row: no second 128-column DMA/conversion pass.
+        # Physical stride remains 192; invalid columns never reach GM.
+        for block in pl.range(0, (half_rows + 31) // 32):
+            row = block * 32
+            valid_rows = pl.min(32, half_rows - row)
+            pl.set_validshape(src, [valid_rows, dim])
+            pl.load(src, source, [sub_idx * first + row, 0])
+            pl.set_validshape(src, [32, 192])
+            pl.set_validshape(dst, [32, 192])
+            segments = (valid_rows * 192 + 127) // 128
+            if is_dv:
+                plan_cast_only_vf(dst, src, segments)
+            else:
+                muls_cast_vf(dst, src, scale, segments)
+            pl.set_validshape(dst, [valid_rows, dim])
+            pl.store(
+                tensor_out,
+                dst,
+                [0, key_token + sub_idx * first + row, head, 0],
+                order=[1, 3],
+                atomic=pl.AtomicType.AtomicNone,
+            )
+    else:
+        for block in pl.range(
+            0, (half_rows + PLAN_POST_ROWS_bn2s2[v1w] - 1) // PLAN_POST_ROWS_bn2s2[v1w]
+        ):
+            row = block * PLAN_POST_ROWS_bn2s2[v1w]
+            valid_rows = pl.min(PLAN_POST_ROWS_bn2s2[v1w], half_rows - row)
+            for chunk in pl.range(0, (dim + 127) // 128):
+                col = chunk * 128
+                width = pl.min(128, dim - col)
+                pl.set_validshape(src, [valid_rows, width])
+                pl.load(src, source, [sub_idx * first + row, col])
+                pl.set_validshape(src, [PLAN_POST_ROWS_bn2s2[v1w], 128])
+                pl.set_validshape(dst, [64, 128])
+                if is_dv:
+                    plan_cast_only_vf(dst, src, PLAN_POST_ROWS_bn2s2[v1w])
+                else:
+                    muls_cast_vf(dst, src, scale, PLAN_POST_ROWS_bn2s2[v1w])
+                pl.set_validshape(dst, [valid_rows, width])
+                pl.store(
+                    tensor_out,
+                    dst,
+                    [0, key_token + sub_idx * first + row, head, col],
+                    order=[1, 3],
+                    atomic=pl.AtomicType.AtomicNone,
+                )
+
+
+def plan_column_full320_from_gm_bn2s2(
+    ws_ptr,
+    base,
+    stride,
+    tensor_out,
+    src,
+    dst,
+    key_token,
+    head,
+    rows,
+    sub_idx,
+    dim,
+    scale,
+    is_dv,
+):
+    # The 768 family has 32768 bytes of ordinary column input and at least
+    # 16384 bytes of cast storage. Reinterpret only 24*320 elements at the
+    # original address; original mutex ownership is retained by the views.
+    whole_src = pl.reinterpret(src, shape=[24, 320])
+    whole_dst = pl.reinterpret(dst, shape=[24, 320])
+    first = (rows + 1) // 2
+    half_rows = pl.min(first, rows - sub_idx * first)
+    source = pl.make_tensor(
+        pl.addptr(ws_ptr, base), [128, dim], [stride, 1], dtype=pl.DT_FP32
+    )
+    for block in pl.range(0, (half_rows + 23) // 24):
+        row = block * 24
+        valid_rows = pl.min(24, half_rows - row)
+        pl.set_validshape(whole_src, [valid_rows, dim])
+        pl.load(whole_src, source, [sub_idx * first + row, 0])
+        pl.set_validshape(whole_src, [24, 320])
+        pl.set_validshape(whole_dst, [24, 320])
+        segments = (valid_rows * 320 + 127) // 128
+        if is_dv:
+            plan_cast_only_vf(whole_dst, whole_src, segments)
+        else:
+            muls_cast_vf(whole_dst, whole_src, scale, segments)
+        pl.set_validshape(whole_dst, [valid_rows, dim])
+        pl.store(
+            tensor_out,
+            whole_dst,
+            [0, key_token + sub_idx * first + row, head, 0],
+            order=[1, 3],
+            atomic=pl.AtomicType.AtomicNone,
+        )
+
+
+def normal_wide_slot_read_bn2s2(
+    ws,
+    base,
+    stride,
+    output,
+    src,
+    dst,
+    token,
+    head,
+    rows,
+    sub,
+    dim,
+    scale,
+    is_dv,
+    sw_active,
+    padded_384=False,
+):
+    if d_align == 256 and sw_active == 1:
+        plan_column_full_d_from_gm_bn2s2(
+            ws,
+            base,
+            stride,
+            output,
+            src,
+            dst,
+            token,
+            head,
+            rows,
+            sub,
+            dim,
+            scale,
+            is_dv,
+            32,
+            256,
+        )
+    elif d_align > 256 and dim <= 384:
+        if padded_384 and stride == 384:
+            plan_column_full_d_from_gm_bn2s2(
+                ws,
+                base,
+                stride,
+                output,
+                src,
+                dst,
+                token,
+                head,
+                rows,
+                sub,
+                dim,
+                scale,
+                is_dv,
+                21,
+                384,
+                True,
+            )
+        else:
+            plan_column_full_d_from_gm_bn2s2(
+                ws,
+                base,
+                stride,
+                output,
+                src,
+                dst,
+                token,
+                head,
+                rows,
+                sub,
+                dim,
+                scale,
+                is_dv,
+                21,
+                384,
+            )
+    elif d_align > 256 and sw_active == 1 and dim <= 512:
+        plan_column_full_d_from_gm_bn2s2(
+            ws,
+            base,
+            stride,
+            output,
+            src,
+            dst,
+            token,
+            head,
+            rows,
+            sub,
+            dim,
+            scale,
+            is_dv,
+            16,
+            512,
+        )
+    else:
+        plan_column_chunked_from_gm_bn2s2(
+            ws,
+            base,
+            stride,
+            output,
+            src,
+            dst,
+            token,
+            head,
+            rows,
+            sub,
+            dim,
+            scale,
+            is_dv,
+            256,
+        )
+
+
+def plan_column_full_d_from_gm_bn2s2(
+    ws_ptr,
+    base,
+    stride,
+    tensor_out,
+    src,
+    dst,
+    key_token,
+    head,
+    rows,
+    sub_idx,
+    dim,
+    scale,
+    is_dv,
+    physical_rows,
+    physical_width,
+    contiguous_slot=False,
+):
+    # ASC ceil(real/2) ownership, full-D transfer, balanced rows per iteration.
+    # The post phase has >=32KiB/16KiB; main has a separate32KiB input arena.
+    if contiguous_slot:
+        # Each row in this private slot owns its padding; cast and scale are lane-wise.
+        whole_src = pl.reinterpret(src, shape=[1, physical_rows * physical_width])
+        source = pl.make_tensor(
+            pl.addptr(ws_ptr, base),
+            [1, 128 * physical_width],
+            [128 * physical_width, 1],
+            dtype=pl.DT_FP32,
+        )
+    else:
+        whole_src = pl.reinterpret(src, shape=[physical_rows, physical_width])
+        source = pl.make_tensor(
+            pl.addptr(ws_ptr, base), [128, dim], [stride, 1], dtype=pl.DT_FP32
+        )
+    whole_dst = pl.reinterpret(dst, shape=[physical_rows, physical_width])
+    first = (rows + 1) // 2
+    half_rows = pl.min(first, rows - sub_idx * first)
+    loops = (half_rows + physical_rows - 1) // physical_rows
+    if loops > 0:
+        block_rows = (half_rows + loops - 1) // loops
+        for block in pl.range(0, loops):
+            row = block * block_rows
+            valid_rows = pl.min(block_rows, half_rows - row)
+            if contiguous_slot:
+                pl.set_validshape(whole_src, [1, valid_rows * physical_width])
+                pl.load(
+                    whole_src, source, [0, (sub_idx * first + row) * physical_width]
+                )
+            else:
+                pl.set_validshape(whole_src, [valid_rows, dim])
+                pl.load(whole_src, source, [sub_idx * first + row, 0])
+                pl.set_validshape(whole_src, [physical_rows, physical_width])
+            pl.set_validshape(whole_dst, [physical_rows, physical_width])
+            segments = (valid_rows * physical_width + 127) // 128
+            if is_dv:
+                plan_cast_only_vf(whole_dst, whole_src, segments)
+            else:
+                muls_cast_vf(whole_dst, whole_src, scale, segments)
+            pl.set_validshape(whole_dst, [valid_rows, dim])
+            pl.store(
+                tensor_out,
+                whole_dst,
+                [0, key_token + sub_idx * first + row, head, 0],
+                order=[1, 3],
+                atomic=pl.AtomicType.AtomicNone,
+            )
+
+
+def plan_column_from_gm_bn2s2(
+    ws_ptr,
+    base,
+    stride,
+    tensor_out,
+    src,
+    dst,
+    key_token,
+    head,
+    rows,
+    sub_idx,
+    dim,
+    scale,
+    is_dv,
+    v1w,
+):
+    if d_align == 192 and dv_align == 128:
+        if is_dv:
+            plan_column_full_d_from_gm_bn2s2(
+                ws_ptr,
+                base,
+                stride,
+                tensor_out,
+                src,
+                dst,
+                key_token,
+                head,
+                rows,
+                sub_idx,
+                dim,
+                scale,
+                is_dv,
+                64,
+                128,
+            )
+        else:
+            plan_column_full_d_from_gm_bn2s2(
+                ws_ptr,
+                base,
+                stride,
+                tensor_out,
+                src,
+                dst,
+                key_token,
+                head,
+                rows,
+                sub_idx,
+                dim,
+                scale,
+                is_dv,
+                42,
+                192,
+            )
+    elif d_align == 768:
+        if dim <= 320:
+            plan_column_full320_from_gm_bn2s2(
+                ws_ptr,
+                base,
+                stride,
+                tensor_out,
+                src,
+                dst,
+                key_token,
+                head,
+                rows,
+                sub_idx,
+                dim,
+                scale,
+                is_dv,
+            )
+        else:
+            plan_column_chunked_from_gm_bn2s2(
+                ws_ptr,
+                base,
+                stride,
+                tensor_out,
+                src,
+                dst,
+                key_token,
+                head,
+                rows,
+                sub_idx,
+                dim,
+                scale,
+                is_dv,
+                v1w,
+            )
+    else:
+        plan_column_chunked_from_gm_bn2s2(
+            ws_ptr,
+            base,
+            stride,
+            tensor_out,
+            src,
+            dst,
+            key_token,
+            head,
+            rows,
+            sub_idx,
+            dim,
+            scale,
+            is_dv,
+            v1w,
+        )
+
+
+def plan_ordinary_column_bn2s2(
+    ci, policy, info, ws_ptr, tensor_out, src, dst, sub_idx, is_dv, v1w
+):
+    base = policy.dkBase + policy.core * policy.scratchStride
+    dim = ci.dSize
+    stride = policy.dkStride
+    if is_dv:
+        base = policy.dvBase + policy.core * policy.scratchStride
+        dim = ci.dvSize
+        stride = policy.dvStride
+    plan_column_from_gm_bn2s2(
+        ws_ptr,
+        base,
+        stride,
+        tensor_out,
+        src,
+        dst,
+        info.keyOffset,
+        info.idx2KV,
+        info.s2RealSize,
+        sub_idx,
+        dim,
+        ci.scaleValue,
+        is_dv,
+        v1w,
+    )
+
+
+def plan_special_column_post_bn2s2(
+    ci, policy, saved, ws_ptr, tensor_out, src, dst, sub_idx, is_dv, v1w
+):
+    # saved comes from a retired owner task or final-table recovery after sync.
+    # Non-owners keep rows=0; sparse-empty owners can still flush contributions
+    # submitted by other cores into their original special workspace slot.
+    base = policy.specialBase + policy.core * 2 * 128 * policy.align
+    dim = ci.dSize
+    stride = (dim + 15) // 16 * 16
+    if is_dv:
+        base = base + 128 * policy.align
+        dim = ci.dvSize
+        stride = (dim + 15) // 16 * 16
+    plan_column_from_gm_bn2s2(
+        ws_ptr,
+        base,
+        stride,
+        tensor_out,
+        src,
+        dst,
+        saved.keyToken,
+        saved.head,
+        saved.rows,
+        sub_idx,
+        dim,
+        ci.scaleValue,
+        is_dv,
+        v1w,
+    )
+
+
+def plan_direct_dk_bn2s2(ci, info, tensor_out, mm2, dst, sub_idx):
+    pl.set_validshape(mm2, [64, 128])
+    pl.set_validshape(dst, [64, 128])
+    muls_cast_vf(dst, mm2, ci.scaleValue, 64)
+    if info.halfS2RealSize > 0:
+        pl.set_validshape(dst, [info.halfS2RealSize, ci.dSize])
+        pl.store(
+            tensor_out,
+            dst,
+            [0, info.keyOffset + sub_idx * info.firstHalfS2RealSize, info.idx2KV, 0],
+            order=[1, 3],
+            atomic=pl.AtomicType.AtomicNone,
+        )
+
+
+def plan_pre_range_bn2s2(words, factor_field, total_field, elements, aiv):
+    factor = plan_i64_bn2s2(words, factor_field)
+    begin = aiv * factor
+    count = pl.astype(0, pl.DT_INT64)
+    if aiv < plan_i64_bn2s2(words, total_field):
+        count = pl.max(0, pl.min(factor, elements - begin))
+    return begin, count
+
+
+def plan_isolated_prefix_bn2s2(h, cuq, cuk):
+    # All physical rows preceding the first batch with a nonempty rectangle
+    # have no GS writer. Subsequent batches retain the original pre/post.
+    q = pl.const(0, pl.DT_INT64)
+    k = pl.const(0, pl.DT_INT64)
+    b = pl.const(0, pl.DT_INT64)
+    if h.logicalSplit == PlanSplit_bn2s2.GS and h.dimQ % 16 == 0 and h.dimV % 16 == 0:
+        if mask_mode == 0 and d_align == 192 and dv_align == 192 and h.fixedSq > 0:
+            return h.fixedQBase * h.heads, h.fixedKvBase * h.heads
+        while b < h.batch:
+            next_q = pl.getval(cuq, b + 1) * pl.const(1, pl.DT_INT64)
+            next_k = pl.getval(cuk, b + 1) * pl.const(1, pl.DT_INT64)
+            if q == next_q or k == next_k:
+                q = next_q
+                k = next_k
+                b = b + 1
+            else:
+                b = h.batch
+    return q * h.heads, k * h.heads
+
+
+def plan_clip_prefix_bn2s2(begin, count, prefix):
+    skipped = pl.min(count, pl.max(0, prefix - begin))
+    return begin + skipped, count - skipped
+
+
+def plan_clear_bn2s2(tensor, zero, begin, count):
+    for part in pl.range(
+        0,
+        (count + mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg] - 1)
+        // mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg],
+    ):
+        offset = part * mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg]
+        size = pl.min(mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg], count - offset)
+        pl.set_validshape(zero, [1, size])
+        pl.store(tensor, zero, [0, begin + offset], atomic=pl.AtomicType.AtomicNone)
+
+
+def plan_clear_pre_bn2s2(words, h, aiv, gm, zero, zero16):
+    # Factors are ASC pre worker partitions, not metadata's old row ranges.
+    q_begin, q_count = plan_pre_range_bn2s2(
+        words,
+        PF_bn2s2.qPreBlockFactor,
+        PF_bn2s2.qPreBlockTotal,
+        plan_i64_bn2s2(words, PF_bn2s2.qPostBlockTotal),
+        aiv,
+    )
+    k_begin, k_count = plan_pre_range_bn2s2(
+        words,
+        PF_bn2s2.kPreBlockFactor,
+        PF_bn2s2.kPreBlockTotal,
+        plan_i64_bn2s2(words, PF_bn2s2.kPostBlockTotal),
+        aiv,
+    )
+    v_begin, v_count = plan_pre_range_bn2s2(
+        words,
+        PF_bn2s2.vPreBlockFactor,
+        PF_bn2s2.vPreBlockTotal,
+        plan_i64_bn2s2(words, PF_bn2s2.vPostBlockTotal),
+        aiv,
+    )
+    if sink != 0 and (d_align == 192 or d_align == 256):
+        q_begin, q_count = plan_clip_prefix_bn2s2(q_begin, q_count, gm.qPrefix)
+        k_begin, k_count = plan_clip_prefix_bn2s2(k_begin, k_count, gm.kPrefix)
+        v_begin, v_count = plan_clip_prefix_bn2s2(v_begin, v_count, gm.vPrefix)
+    if sink != 0:
+        # ASC pads the element count by 512 here (workspace aligns bytes).
+        # The excess reaches only the still-zero/uninitialized special region
+        # or the 20 MiB tail. Preserve it; validate against whole user capacity.
+        sink_elements = h.heads * plan_i64_bn2s2(words, PF_bn2s2.sinkReduceAxis)
+        padded = (sink_elements + 512) // 512 * 512
+        begin, count = plan_pre_range_bn2s2(
+            words, PF_bn2s2.sinkPreBlockFactor, PF_bn2s2.sinkPreBlockTotal, padded, aiv
+        )
+    capacity = mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg]
+    clear_elems = pl.astype(capacity, pl.DT_INT64)
+    if h.logicalSplit == PlanSplit_bn2s2.GS:
+        longest = pl.max(q_count, pl.max(k_count, v_count))
+        if sink != 0:
+            longest = pl.max(longest, count)
+        clear_elems = pl.min(capacity, longest)
+    pl.set_validshape(zero, [1, capacity])
+    if clear_elems > 0:
+        fill_zero_vf(zero, (clear_elems + 63) // 64)
+    plan_clear_bn2s2(gm.dqWs, zero, q_begin, q_count)
+    if h.logicalSplit == PlanSplit_bn2s2.GS:
+        plan_clear_bn2s2(gm.dkWs, zero, k_begin, k_count)
+        plan_clear_bn2s2(gm.dvWs, zero, v_begin, v_count)
+    if sink != 0:
+        plan_clear_bn2s2(gm.sinkPre, zero, begin, count)
+    if h.logicalSplit == PlanSplit_bn2s2.BN2S2:
+        special_size = 128 * plan_i64_bn2s2(words, PF_bn2s2.alignQ)
+        plan_clear_bn2s2(gm.special, zero, aiv * special_size, special_size)
+        if (
+            plan_i64_bn2s2(words, PF_bn2s2.hasZeroSequence) != 0
+            or plan_i64_bn2s2(words, PF_bn2s2.sValueZeroUnderTnd) != 0
+            or plan_i64_bn2s2(words, PF_bn2s2.invalidCol) != 0
+        ):
+            pl.set_validshape(zero16, [1, mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg]])
+            fill_zero_f16_vf(zero16, mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg] // 128)
+            plan_clear_bn2s2(gm.dkOut, zero16, k_begin, k_count)
+            plan_clear_bn2s2(gm.dvOut, zero16, v_begin, v_count)
+
+
+def plan_post_range_bn2s2(words, factor_field, total_field, aiv):
+    block = plan_i64_bn2s2(words, PF_bn2s2.postBaseElements)
+    span = plan_i64_bn2s2(words, factor_field) * block
+    begin = aiv * span
+    end = pl.min(
+        begin + span,
+        plan_i64_bn2s2(words, total_field),
+    )
+    return begin, end
+
+
+def plan_post_tile_bn2s2(tensor_ws, tensor_out, f32, f16, scale, is_dv, offset, size):
+    src = f32.next()
+    dst = f16.next()
+    pl.set_validshape(src, [1, size])
+    pl.set_validshape(dst, [1, size])
+    pl.load(src, tensor_ws, [0, offset])
+    if is_dv:
+        plan_cast_only_vf(dst, src, (size + 127) // 128)
+    else:
+        muls_cast_vf(dst, src, scale, (size + 127) // 128)
+    pl.store(tensor_out, dst, [0, offset], atomic=pl.AtomicType.AtomicNone)
+
+
+def plan_post_tensor_bn2s2(
+    words,
+    aiv,
+    factor_field,
+    total_field,
+    tensor_ws,
+    tensor_out,
+    f32,
+    f16,
+    scale,
+    is_dv,
+    prefix,
+):
+    begin, end = plan_post_range_bn2s2(words, factor_field, total_field, aiv)
+    if sink != 0 and (d_align == 192 or d_align == 256):
+        if begin < prefix and begin < end:
+            mid = pl.min(prefix, end)
+            store_isolated_zero_bn2s2(
+                tensor_out, f16, scale, is_dv, begin, mid - begin, 16384
+            )
+            begin = mid
+    # ASC REGBASE_POST_BASE, preserving post workers and ping->pong order.
+    if end > begin and end - begin <= 16384:
+        plan_post_tile_bn2s2(
+            tensor_ws, tensor_out, f32, f16, scale, is_dv, begin, end - begin
+        )
+    else:
+        for offset in pl.range(begin, end, 16384):
+            size = pl.min(16384, end - offset)
+            plan_post_tile_bn2s2(
+                tensor_ws, tensor_out, f32, f16, scale, is_dv, offset, size
+            )
+
+
+def plan_post_sink_bn2s2(words, aiv, tensor_partial, tensor_out, source, total):
+    factor = plan_i64_bn2s2(words, PF_bn2s2.sinkPostBlockFactor)
+    begin = aiv * factor
+    end = pl.min(begin + factor, plan_i64_bn2s2(words, PF_bn2s2.sinkPostBlockTotal))
+    axis = plan_i64_bn2s2(words, PF_bn2s2.sinkReduceAxis)
+    for head in pl.range(begin, end):
+        pl.set_validshape(total, [1, 128])
+        fill_zero_vf(total, 1)
+        for part in pl.range(0, (axis + 16383) // 16384):
+            size = pl.min(16384, axis - part * 16384)
+            src = source.next()
+            pl.set_validshape(src, [1, size])
+            pl.load(src, tensor_partial, [0, head * axis + part * 16384])
+            loops = (size + 63) // 64 - 1
+            plan_sink_reduce_chunk_vf(total, src, loops, size - loops * 64)
+        plan_sink_negate_vf(total)
+        pl.set_validshape(total, [1, 1])
+        pl.store(tensor_out, total, [0, head], atomic=pl.AtomicType.AtomicNone)
+
+
+def plan_sfmg_offset_bn2s2(h, info, sub):
+    return (
+        info.n2oIdx * h.totalQ
+        + info.tokenBaseQ
+        + info.s1oIdx * 128
+        + sub * info.firstHalfS1RealSize
+    )
+
+
+def plan_load_sfmg_bn2s2(h, info, sfmg_tensor, sfmg_ub, sub):
+    if info.halfS1RealSize > 0:
+        offset = plan_sfmg_offset_bn2s2(h, info, sub)
+        pl.set_validshape(sfmg_ub, [info.halfS1RealSize, 1])
+        pl.load(sfmg_ub, sfmg_tensor, [0, offset], order=[1, 0])
+        pl.set_validshape(sfmg_ub, [64, 1])
+
+
+def plan_compute_presfmg_bn2s2(
+    ci,
+    words,
+    h,
+    cuq,
+    aiv,
+    y,
+    dy,
+    sfmg_tensor,
+    y_group,
+    dy_group,
+    out_group,
+    flat_group,
+    v1w,
+):
+    used = plan_i64_bn2s2(words, PF_bn2s2.sfmgUsedCoreNum)
+    normal = plan_i64_bn2s2(words, PF_bn2s2.sfmgNormalCoreRows)
+    total_rows = plan_i64_bn2s2(words, PF_bn2s2.sfmgRows)
+    window_rows = mem.PLAN_SFMG_ROWS_bn2s2[dv_align]
+    if dv_align == 768:
+        if ci.dvSize > 256 and ci.dvSize <= 320:
+            window_rows = 80
+        elif (
+            mask_mode == 3
+            and h.logicalSplit == PlanSplit_bn2s2.GS
+            and ci.dvSize > 320
+            and ci.dvSize <= 384
+        ):
+            window_rows = 64
+    if aiv < used:
+        position = aiv * normal
+        end = pl.min(position + normal, total_rows)
+        info = plan_run_info_bn2s2()
+        info.idx0Q = pl.astype(0, pl.DT_INT64)
+        info.rowShift = pl.astype(0, pl.DT_INT64)
+        while position < end:
+            head = position // h.totalQ
+            token = position - head * h.totalQ
+            rows = pl.min(window_rows, pl.min(end - position, h.totalQ - token))
+            info.idx2Q = head
+            info.loadBase = token
+            info.halfS1RealSize = rows
+            y_ub = y_group.next()
+            dy_ub = dy_group.next()
+            out_ub = out_group.next()
+            flat_ub = flat_group.next()
+            if dv_align == 768:
+                if ci.dvSize > 256 and ci.dvSize <= 320:
+                    plan_presfmg_full320_bn2s2(
+                        ci, info, y, dy, y_ub, dy_ub, out_ub, rows
+                    )
+                elif (
+                    mask_mode == 3
+                    and h.logicalSplit == PlanSplit_bn2s2.GS
+                    and ci.dvSize > 320
+                    and ci.dvSize <= 384
+                ):
+                    # Two 104x256 slots per input. Reinterpret the selected
+                    # ping/pong slot only; the row scalar remains at offset 0.
+                    y_full = pl.reinterpret(y_ub, shape=[64, 384])
+                    dy_full = pl.reinterpret(dy_ub, shape=[64, 384])
+                    pl.set_validshape(y_full, [rows, ci.dvSize])
+                    pl.set_validshape(dy_full, [rows, ci.dvSize])
+                    pl.load(y_full, y, [0, token, head, 0], order=[1, 3])
+                    pl.load(dy_full, dy, [0, token, head, 0], order=[1, 3])
+                    tail = ci.dvSize - 256
+                    softmax_grad_front_row384_vf(
+                        out_ub,
+                        y_full,
+                        dy_full,
+                        rows,
+                        0,
+                        384,
+                        (tail + 1) // 2,
+                        tail // 2,
+                        0,
+                    )
+                else:
+                    plan_presfmg_reduce_rows_bn2s2(
+                        ci, info, 0, y, dy, y_ub, dy_ub, out_ub, v1w, rows
+                    )
+            else:
+                plan_presfmg_reduce_rows_bn2s2(
+                    ci, info, 0, y, dy, y_ub, dy_ub, out_ub, v1w, rows
+                )
+            pl.set_validshape(flat_ub, [1, rows])
+            pl.store(
+                sfmg_tensor, flat_ub, [0, position], atomic=pl.AtomicType.AtomicNone
+            )
+            position = position + rows
+
+
+def plan_presfmg_reduce_rows_bn2s2(
+    constInfo,
+    runInfo,
+    subIdx,
+    tensor_y,
+    tensor_dy,
+    y_ub,
+    dy_ub,
+    sfmg_ub,
+    rowStride,
+    loadRows,
+):
+    """softmaxGradFront: sfmg = rowsum(dy * y)。一趟 VECTOR_BASEM 行。"""
+    if dv_align == 768:
+        plan_presfmg_reduce_rows_d768_bn2s2(
+            constInfo,
+            runInfo,
+            tensor_y,
+            tensor_dy,
+            y_ub,
+            dy_ub,
+            sfmg_ub,
+            rowStride,
+            loadRows,
+        )
+        return
+    pl.set_validshape(y_ub, [loadRows, constInfo.dvSize])
+    pl.set_validshape(dy_ub, [loadRows, constInfo.dvSize])
+    pl.load(
+        y_ub,
+        tensor_y,
+        [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, 0],
+        order=[1, 3],
+    )
+    pl.load(
+        dy_ub,
+        tensor_dy,
+        [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, 0],
+        order=[1, 3],
+    )
+    # 列宽跟 dv_align：256/192 各一档 VF；64 与 128（含 D=192,Dv=128）共用
+    # 一次 128-lane load，用 even/odd mask 收真实 Dv。
+    if dv_align == 256:
+        w0 = pl.min(constInfo.dvSize, 128)
+        w1 = pl.max(constInfo.dvSize - 128, 0)
+        softmax_grad_front_row256_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            runInfo.rowShift,
+            rowStride,
+            (w0 + 1) // 2,
+            w0 // 2,
+            (w1 + 1) // 2,
+            w1 // 2,
+        )
+    elif dv_align == 192:
+        w0 = pl.min(constInfo.dvSize, 128)
+        w1 = pl.max(constInfo.dvSize - 128, 0)
+        softmax_grad_front_row192_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            runInfo.rowShift,
+            rowStride,
+            (w0 + 1) // 2,
+            w0 // 2,
+            (w1 + 1) // 2,
+            w1 // 2,
+        )
+    else:
+        softmax_grad_front_row_bn2s2_vf(
+            sfmg_ub,
+            y_ub,
+            dy_ub,
+            runInfo.halfS1RealSize,
+            runInfo.rowShift,
+            rowStride,
+            constInfo.dvEvenSize,
+            constInfo.dvOddSize,
+        )
+
+
+def plan_presfmg_reduce_rows_d768_bn2s2(
+    constInfo, runInfo, tensor_y, tensor_dy, y_ub, dy_ub, sfmg_ub, rowStride, loadRows
+):
+    """768 档 V1：3 趟 VF256，后两趟累加到同一 sfmg。工作列宽 256。"""
+    for k in pl.range(0, 3):
+        colOff = k * 256
+        rem = pl.max(constInfo.dvSize - colOff, 0)
+        winW = pl.min(256, rem)
+        if rem > 0:
+            pl.set_validshape(y_ub, [loadRows, winW])
+            pl.set_validshape(dy_ub, [loadRows, winW])
+            pl.load(
+                y_ub,
+                tensor_y,
+                [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, colOff],
+                order=[1, 3],
+            )
+            pl.load(
+                dy_ub,
+                tensor_dy,
+                [runInfo.idx0Q, runInfo.loadBase, runInfo.idx2Q, colOff],
+                order=[1, 3],
+            )
+            w0 = pl.min(rem, 128)
+            w1 = pl.max(rem - 128, 0)
+            even0 = (w0 + 1) // 2
+            odd0 = w0 // 2
+            even1 = (w1 + 1) // 2
+            odd1 = w1 // 2
+            if k == 0:
+                softmax_grad_front_row256_bn2s2_vf(
+                    sfmg_ub,
+                    y_ub,
+                    dy_ub,
+                    runInfo.halfS1RealSize,
+                    runInfo.rowShift,
+                    rowStride,
+                    even0,
+                    odd0,
+                    even1,
+                    odd1,
+                )
+            else:
+                softmax_grad_front_row256_acc_vf(
+                    sfmg_ub,
+                    y_ub,
+                    dy_ub,
+                    runInfo.halfS1RealSize,
+                    runInfo.rowShift,
+                    rowStride,
+                    even0,
+                    odd0,
+                    even1,
+                    odd1,
+                )
+
+
+def plan_presfmg_full320_bn2s2(ci, info, y, dy, y_ub, dy_ub, out_ub, rows):
+    # Alias only: original104x256 slots and mutex lifetimes are retained.
+    y_whole = pl.reinterpret(y_ub, shape=[81, 320])
+    dy_whole = pl.reinterpret(dy_ub, shape=[81, 320])
+    pl.set_validshape(y_whole, [rows, ci.dvSize])
+    pl.set_validshape(dy_whole, [rows, ci.dvSize])
+    pl.load(y_whole, y, [info.idx0Q, info.loadBase, info.idx2Q, 0], order=[1, 3])
+    pl.load(dy_whole, dy, [info.idx0Q, info.loadBase, info.idx2Q, 0], order=[1, 3])
+    tail = ci.dvSize - 256
+    softmax_grad_front_row320_single_vf(
+        out_ub, y_whole, dy_whole, rows, (tail + 1) // 2, tail // 2
+    )
+
+
+def plan_presfmg_gs_interleaved_bn2s2(
+    ci,
+    words,
+    h,
+    aiv,
+    gm,
+    zero,
+    y,
+    dy,
+    sfmg_tensor,
+    y_group,
+    dy_group,
+    out_group,
+    flat_group,
+):
+    # Only GS / pre-SFMG / no-sink / Dv257..320 enters this path.
+    # Original metadata partitions and original disjoint zero arena are retained.
+    qb, qc = plan_pre_range_bn2s2(
+        words,
+        PF_bn2s2.qPreBlockFactor,
+        PF_bn2s2.qPreBlockTotal,
+        plan_i64_bn2s2(words, PF_bn2s2.qPostBlockTotal),
+        aiv,
+    )
+    kb, kc = plan_pre_range_bn2s2(
+        words,
+        PF_bn2s2.kPreBlockFactor,
+        PF_bn2s2.kPreBlockTotal,
+        plan_i64_bn2s2(words, PF_bn2s2.kPostBlockTotal),
+        aiv,
+    )
+    vb, vc = plan_pre_range_bn2s2(
+        words,
+        PF_bn2s2.vPreBlockFactor,
+        PF_bn2s2.vPreBlockTotal,
+        plan_i64_bn2s2(words, PF_bn2s2.vPostBlockTotal),
+        aiv,
+    )
+    pl.set_validshape(zero, [1, mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg]])
+    fill_zero_vf(zero, mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg] // 64)
+    used = plan_i64_bn2s2(words, PF_bn2s2.sfmgUsedCoreNum)
+    normal = plan_i64_bn2s2(words, PF_bn2s2.sfmgNormalCoreRows)
+    total_rows = plan_i64_bn2s2(words, PF_bn2s2.sfmgRows)
+    position = aiv * normal
+    end = position
+    if aiv < used:
+        end = pl.min(position + normal, total_rows)
+    offset = pl.astype(0, pl.DT_INT64)
+    info = plan_run_info_bn2s2()
+    info.idx0Q = pl.astype(0, pl.DT_INT64)
+    info.rowShift = pl.astype(0, pl.DT_INT64)
+    while position < end or offset < qc or offset < kc or offset < vc:
+        if position < end:
+            head = position // h.totalQ
+            token = position - head * h.totalQ
+            rows = pl.min(80, pl.min(end - position, h.totalQ - token))
+            info.idx2Q = head
+            info.loadBase = token
+            info.halfS1RealSize = rows
+            y_ub = y_group.next()
+            dy_ub = dy_group.next()
+            out_ub = out_group.next()
+            flat_ub = flat_group.next()
+            plan_presfmg_full320_bn2s2(ci, info, y, dy, y_ub, dy_ub, out_ub, rows)
+            pl.set_validshape(flat_ub, [1, rows])
+            pl.store(
+                sfmg_tensor, flat_ub, [0, position], atomic=pl.AtomicType.AtomicNone
+            )
+            position = position + rows
+        if offset < qc:
+            size = pl.min(mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg], qc - offset)
+            pl.set_validshape(zero, [1, size])
+            pl.store(gm.dqWs, zero, [0, qb + offset], atomic=pl.AtomicType.AtomicNone)
+        if offset < kc:
+            size = pl.min(mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg], kc - offset)
+            pl.set_validshape(zero, [1, size])
+            pl.store(gm.dkWs, zero, [0, kb + offset], atomic=pl.AtomicType.AtomicNone)
+        if offset < vc:
+            size = pl.min(mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg], vc - offset)
+            pl.set_validshape(zero, [1, size])
+            pl.store(gm.dvWs, zero, [0, vb + offset], atomic=pl.AtomicType.AtomicNone)
+        offset = offset + mem.PLAN_ZERO_ELEMENTS_bn2s2[pre_sfmg]
+
+
+def process_normal_vec3_bn2s2(ci, info, sub, ds, c1, c2, sfmg, nzp):
+    rows = info.halfS1RealSize
+    if rows > 0:
+        broadcast_sub_mul_cast_vf(nzp, c1, c2, sfmg, ci.scaleValue, rows)
+        copy_ub2l1(ds, nzp, sub * info.firstHalfS1RealSize, rows)
+
+
+def process_normal_vec4_bn2s2(ci, info, sub, p, c2, nzp):
+    rows = info.halfS1RealSize
+    if rows > 0:
+        cast_p_vf(nzp, c2, rows)
+        copy_ub2l1(p, nzp, sub * info.firstHalfS1RealSize, rows)
+
+
+def process_normal_vec2_bn2s2(
+    constInfo,
+    runInfo,
+    subIdx,
+    tensor_lse,
+    mm2_ub,
+    lse_ub,
+    tensor_mask,
+    mask_ub,
+    mask_pre_ub,
+):
+    if mask_mode != 0:
+        copy_in_atten_mask(
+            constInfo, runInfo, subIdx, tensor_mask, mask_ub, mask_pre_ub
+        )
+    muls_sel_simple_softmax_vf(
+        mm2_ub,
+        lse_ub,
+        mask_ub,
+        constInfo.scaleValue,
+        runInfo.halfS1RealSize,
+        runInfo.rowShift,
+    )
+
+
+def load_normal_lse_bn2s2(constInfo, runInfo, tensor_lse, lse_ub):
+    load_vec_lse_rows(
+        constInfo,
+        runInfo,
+        tensor_lse,
+        lse_ub,
+        _vector_load_rows_bn2s2(constInfo, runInfo),
     )

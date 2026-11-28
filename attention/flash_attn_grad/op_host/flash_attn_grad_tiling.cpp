@@ -70,6 +70,7 @@ ge::graphStatus TilingParseForFlashAttnGrad(gert::TilingParseContext* context)
     compileInfo->aicNum = ascendcPlatform.GetCoreNumAic();
     compileInfo->libapiWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, compileInfo->l2CacheSize);
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo->ubSize);
 
     OP_LOGI(context->GetNodeName(), "parsed platform: aicNum=%u, aivNum=%u, l2CacheSize=%lu, libapiWorkspace=%lu.",
             compileInfo->aicNum, compileInfo->aivNum, compileInfo->l2CacheSize, compileInfo->libapiWorkspaceSize);

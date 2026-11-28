@@ -10,6 +10,9 @@
 
 import pypto_pro.language as pl
 
+from compute.fag_vector_api import plan_merge_band_mask_vf
+from fag_tiling import Tmpl
+
 CUBE_BASEM = 128
 CUBE_BASEN = 128
 VECTOR_BASEM = 64
@@ -81,11 +84,12 @@ def _load_compress_mask(tensor_mask, mask_ub, off, halfS1, s2Real):
     pl.set_validshape(mask_ub, [VECTOR_BASEM, VECTOR_BASEN])
 
 
-def copy_in_atten_mask(constInfo, runInfo, subIdx, tensor_mask, mask_ub, mask_pre_ub):
+def copy_in_atten_mask_rows(
+    constInfo, runInfo, vec_off, tensor_mask, mask_ub, mask_pre_ub
+):
     """按 mask_mode 把压缩 attenmask 搬进 UB。TND 时用 batch 局部坐标。0930 移植。"""
     if runInfo.halfS1RealSize == 0:
         return
-    vec_off = subIdx * runInfo.firstHalfS1RealSize
     halfS1 = runInfo.halfS1RealSize
     s2Real = runInfo.s2RealSize
     if layout == 1:
@@ -138,4 +142,19 @@ def copy_in_atten_mask(constInfo, runInfo, subIdx, tensor_mask, mask_ub, mask_pr
     if preFactor > 0:
         off_pre = compute_offset_for_causal(deltaPre, vec_off)
         _load_compress_mask(tensor_mask, mask_pre_ub, off_pre, halfS1, s2Real)
-        merge_band_mask_vf(mask_ub, mask_pre_ub, halfS1)
+        if template == Tmpl.BN2S2:
+            plan_merge_band_mask_vf(mask_ub, mask_pre_ub, halfS1)
+        else:
+            merge_band_mask_vf(mask_ub, mask_pre_ub, halfS1)
+
+
+def copy_in_atten_mask(constInfo, runInfo, subIdx, tensor_mask, mask_ub, mask_pre_ub):
+    """Actual-M SplitM path: both Vector halves use the score tile's split."""
+    copy_in_atten_mask_rows(
+        constInfo,
+        runInfo,
+        subIdx * runInfo.firstHalfS1RealSize,
+        tensor_mask,
+        mask_ub,
+        mask_pre_ub,
+    )

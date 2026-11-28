@@ -30,7 +30,7 @@ namespace {
 // 布局钉死：改了 py 侧字段就会在这里断编译，逼着同步改 Tmp 和这些数字。
 // 注意 scaleValue 是唯一的 4 字节字段，它后面有 4 字节填充 —— 框架的
 // CheckAlignAndGenPlaceHolder 也会插同样的填充，两边才对得上。
-static_assert(sizeof(FlashAttnGradTilingData) == 960,
+static_assert(sizeof(FlashAttnGradTilingData) == 1064,
               "TilingData layout changed; update FlashAttnGradTilingDataTmp in flash_attn_grad_tiling.h too.");
 static_assert(offsetof(FlashAttnGradTilingData, deterCausalGroups) == 952, "Causal group count must be appended");
 static_assert(offsetof(FlashAttnGradTilingData, scaleValue) == 56, "scaleValue moved; re-check the 4-byte padding.");
@@ -50,28 +50,31 @@ static_assert(offsetof(FlashAttnGradTilingData, deterSparseKind) == 224,
 static_assert(offsetof(FlashAttnGradTilingData, metadataWordCount) == 936,
               "metadata capacity must follow deterministic band phases.");
 static_assert(offsetof(FlashAttnGradTilingData, deterL2Bytes) == 944, "L2 capacity must follow metadataWordCount.");
+static_assert(offsetof(FlashAttnGradTilingData, planBytes) == 960, "Plan identity must be appended.");
+static_assert(offsetof(FlashAttnGradTilingData, planMaskShapeType) == 1056, "Plan identity ABI changed.");
 
 void LogPlan(gert::TilingContext* context, const FagParsedInfo& info, const FagTilingPlan& plan,
              const FagRouteTrace& trace)
 {
-    OP_LOGI(context->GetNodeName(),
-            "FlashAttnGrad tiling: usedCube=%u, usedBlockDim=%u, useActualCores=%d, s1Outer=%ld, s2Outer=%ld, "
-            "layoutStr=%s, layout=%ld, maskMode=%ld, win=(%ld,%ld), sparseType=%ld, totalPerBatch=%ld, "
-            "hasAttenMask=%d, hasSeqused=%d, hasSinks=%d, isEmptyShape=%d, "
-            "template=%ld, isBn2MultiBlk=%ld, bn2NeedZero=%ld, swizzle=%ld, deter=%d, dAlign=%ld, dvAlign=%ld, "
-            "enablePreSfmg=%ld, nzOut=%ld, "
-            "B=%ld, S1=%ld, S2=%ld, N1=%ld, N2=%ld, G=%ld, D=%ld, Dv=%ld, "
-            "viewQ=[%ld,S,%ld,D] b0=%ld, viewKV=[%ld,S,%ld,D] b0=%ld, coefN=(%ld,%ld), "
-            "tilingKey=%llu, workspaceSize=%zu.",
-            plan.schedule.usedCube, plan.schedule.blockDim, static_cast<int>(plan.schedule.useActualCores),
-            plan.schedule.s1Outer, plan.schedule.s2Outer, info.layoutQ.c_str(), info.layout, info.maskMode,
-            info.winLeft, info.winRight, info.sparseType, info.totalPerBatchNum, static_cast<int>(info.hasAttenMask),
-            static_cast<int>(info.hasSeqused), static_cast<int>(info.hasSinks), static_cast<int>(IsEmptyShape(info)),
-            plan.kernel.tmpl, plan.kernel.isBn2MultiBlk, plan.kernel.bn2NeedZero, plan.schedule.swizzle,
-            static_cast<int>(info.isDeterministic && plan.kernel.tmpl == TMPL_BN2GS1S2), plan.kernel.dAlign,
-            plan.kernel.dvAlign, plan.kernel.enablePreSfmg, plan.kernel.nzOut, info.b, info.s1, info.s2, info.n1,
-            info.n2, info.g, info.d, info.dv, info.viewD0Q, info.viewD2Q, info.coefB0Q, info.viewD0KV, info.viewD2KV,
-            info.coefB0KV, info.coefN0, info.coefN2, plan.tilingKey, plan.workspace.totalSize);
+    OP_LOGI(
+        context->GetNodeName(),
+        "FlashAttnGrad tiling: usedCube=%u, usedBlockDim=%u, useActualCores=%d, s1Outer=%ld, s2Outer=%ld, "
+        "layoutStr=%s, layout=%ld, maskMode=%ld, win=(%ld,%ld), sparseType=%ld, totalPerBatch=%ld, "
+        "hasAttenMask=%d, hasSeqused=%d, hasSinks=%d, isEmptyShape=%d, "
+        "template=%ld, isBn2MultiBlk=%ld, bn2NeedZero=%ld, swizzle=%ld, deter=%d, dAlign=%ld, dvAlign=%ld, "
+        "enablePreSfmg=%ld, nzOut=%ld, "
+        "B=%ld, S1=%ld, S2=%ld, N1=%ld, N2=%ld, G=%ld, D=%ld, Dv=%ld, "
+        "viewQ=[%ld,S,%ld,D] b0=%ld, viewKV=[%ld,S,%ld,D] b0=%ld, coefN=(%ld,%ld), "
+        "tilingKey=%llu, workspaceSize=%zu.",
+        plan.schedule.usedCube, plan.schedule.blockDim, static_cast<int>(plan.schedule.useActualCores),
+        plan.schedule.s1Outer, plan.schedule.s2Outer, info.layoutQ.c_str(), info.layout, info.maskMode, info.winLeft,
+        info.winRight, info.sparseType, info.totalPerBatchNum, static_cast<int>(info.hasAttenMask),
+        static_cast<int>(info.hasSeqused), static_cast<int>(info.hasSinks), static_cast<int>(IsEmptyShape(info)),
+        plan.kernel.tmpl, plan.kernel.isBn2MultiBlk, plan.kernel.bn2NeedZero, plan.schedule.swizzle,
+        static_cast<int>(info.isDeterministic && (plan.kernel.tmpl == TMPL_BN2GS1S2 || plan.kernel.tmpl == TMPL_BN2S2)),
+        plan.kernel.dAlign, plan.kernel.dvAlign, plan.kernel.enablePreSfmg, plan.kernel.nzOut, info.b, info.s1, info.s2,
+        info.n1, info.n2, info.g, info.d, info.dv, info.viewD0Q, info.viewD2Q, info.coefB0Q, info.viewD0KV,
+        info.viewD2KV, info.coefB0KV, info.coefN0, info.coefN2, plan.tilingKey, plan.workspace.totalSize);
 
     // 决策追溯：上板发现别的模板更快时，先看这行就知道今天为什么选了它。
     OP_LOGI(context->GetNodeName(), "FlashAttnGrad deter plan: family=%ld, rounds=%ld.", plan.schedule.deter.family,
@@ -137,10 +140,12 @@ ge::graphStatus FlashAttnGradTilingRegbase::DoOpTiling()
     if (ret != ge::GRAPH_SUCCESS) {
         return ret;
     }
-    // BN2GS1S2 的 pre/post 用 sync_all；BN2 仅 bn2NeedZero 那份二进制有
-    // sync_all，sink 二进制（tilingkey sink=1）BN2 也有 sync_all。
-    // batch mode 在未满核启动时必须开，否则可能卡死。
-    if (plan.kernel.tmpl == TMPL_BN2GS1S2 || plan.kernel.bn2NeedZero == 1 || info.hasSinks) {
+    // BN2GS1S2 与 BN2S2 的 pre/post 用 sync_all；BN2 仅 bn2NeedZero 那份二进制有
+    // sync_all，sink 二进制（tilingkey sink=1）BN2 也有 sync_all。batch mode 在
+    // 未满核启动时必须开，否则可能卡死。BN2S2 的 dq 跨核累加依赖 pre 清零 +
+    // post/直出收尾的全核同步，必须开。
+    if (plan.kernel.tmpl == TMPL_BN2GS1S2 || plan.kernel.tmpl == TMPL_BN2S2 || plan.kernel.bn2NeedZero == 1 ||
+        info.hasSinks) {
         ret = SetScheduleMode(FagScheduleMode::BATCH_MODE);
         if (ret != ge::GRAPH_SUCCESS) {
             return ret;
@@ -298,6 +303,20 @@ ge::graphStatus FlashAttnGradTilingRegbase::WriteTilingData(const FagParsedInfo&
     const auto* metadataShape = context_->GetOptionalInputShape(METADATA_INDEX);
     tilingData->metadataWordCount = metadataShape == nullptr ? 0 : metadataShape->GetStorageShape().GetShapeSize();
     tilingData->deterL2Bytes = static_cast<int64_t>(info.l2CacheSize);
+    const auto& cfg = info.deterConfig;
+    tilingData->planBytes = info.deterMetadataBytes;
+    tilingData->planWorkspaceBytes = info.deterWorkspaceBytes;
+    tilingData->planT1 = info.t1;
+    tilingData->planT2 = info.t2;
+    tilingData->planDtype = static_cast<int64_t>(cfg.schedule.route.dtype);
+    tilingData->planAicNum = cfg.schedule.aicNum;
+    tilingData->planAivNum = cfg.schedule.aivNum;
+    tilingData->planL2Bytes = static_cast<int64_t>(info.useDeterPlan ? cfg.schedule.l2Bytes : info.l2CacheSize);
+    tilingData->planUbBytes = cfg.ubBytes;
+    tilingData->planLibapiBytes = 0;        // Reserved ABI word; runtime workspace is host-only.
+    tilingData->planDeterministicLevel = 0; // Reserved ABI word: mode-independent plan.
+    tilingData->planMaskPresent = cfg.schedule.hasMask;
+    tilingData->planMaskShapeType = cfg.schedule.maskShapeType;
     return ge::GRAPH_SUCCESS;
 }
 

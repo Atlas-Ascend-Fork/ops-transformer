@@ -26,19 +26,20 @@
 namespace optiling {
 
 // TilingKey 位域（与 kernel FlashAttnGradTilingKey 一致）：
-//   bit[1:0] template   0=BN2GS1S2, 1=BN2, 2=未用, 3=BN2S2(保留，勿复用)
+//   bit[1:0] template   0=BN2GS1S2, 1=BN2, 2=未用, 3=BN2S2
 //   bit2     layout     0=非TND, 1=TND（BNSD 不占位，运行期靠视图参数区分）
 //   bit[4:3] mask_mode  host 存 0/1/2，kernel values=[0,3,4]
 //   bit5     swizzle          仅 template=0 有效
-//   bit[8:6] d_align    0=64, 1=128, 2=192, 3=256, 4=768
+//   bit[8:6] d_align    0=64, 1=128, 2=192, 3=256, 4=768, 5=512（512 追加尾部，与 kernel 侧 TilingKeyField 一致）
 //   bit[11:9] dv_align  同 d_align。一般 d_align==dv_align；仅 D=192 且 Dv=128
 //                       时为 128
 //   bit12    is_bn2_multiblk  仅 template=1 有效
 //   bit13    bn2_need_zero    仅 MultiBlk + mask 3/4 的无效行/列
-//   bit14    deter            仅 template=0；BN2 单块保持 0
+//   bit14    deter            仅 BN2GS1S2/BN2S2 支持；BN2 单块保持 0
 //   bit15    sink            1 = 本次带 sinks 输入，kernel 额外算 dsink
-//   bit16..20 deter_family   确定性调度族，保留既有编码
-//   bit21    nz_out          仅 GS1S2、D/Dv 分档128；dqkv内部workspace为NZ
+//   bit16    pre_sfmg        metadata-backed BN2S2 static PreSFMG selection
+//   bit17..21 deter_family   确定性调度族，保留既有编码
+//   bit22    nz_out          仅 GS1S2、D/Dv 分档128；dqkv内部workspace为NZ
 uint64_t EncodeTilingKey(const FagParsedInfo& info, const FagKernelPlan& kernel, const FagSchedulePlan& schedule);
 
 } // namespace optiling

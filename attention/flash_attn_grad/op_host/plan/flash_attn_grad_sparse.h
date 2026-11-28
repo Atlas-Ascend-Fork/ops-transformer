@@ -22,7 +22,6 @@ namespace optiling {
 // SparseType: 0=DENSE, 1=CASUAL, 2=BAND.
 constexpr int64_t FAG_SPARSE_DENSE = 0;
 constexpr int64_t FAG_SPARSE_CASUAL = 1;
-constexpr int64_t FAG_SPARSE_BAND = 2;
 constexpr int64_t FAG_CUBE_BASE = 128;
 constexpr int64_t FAG_WIN_INF = static_cast<int64_t>(std::numeric_limits<int32_t>::max());
 
@@ -57,7 +56,7 @@ inline int64_t FagDecideSparseType(int64_t maskMode, int64_t s1, int64_t s2, int
     if (casualCondition) {
         return FAG_SPARSE_CASUAL;
     }
-    return FAG_SPARSE_BAND;
+    return FAG_SPARSE_TYPE_BAND;
 }
 
 // 空 s2 列或从未被覆盖的 s1 行。
@@ -74,8 +73,8 @@ inline bool FagBn2HasInvalidOuter(int64_t s1, int64_t s2, int64_t s1Token, int64
     if (s1Outer > kMaxOuter || s2Outer > kMaxOuter) {
         return true;
     }
-    int64_t s1CvInner = FagCvInner(s1, FAG_S1_INNER, FAG_S1CV_RATIO_DEFAULT);
-    int64_t cvS2Inner = FagCvInner(s2, FAG_S2_INNER, FAG_S2CV_RATIO_DEFAULT);
+    int64_t s1CvInner = FagCvInner(s1, FAG_S1_INNER, FAG_HOST_S1CV_RATIO_DEFAULT);
+    int64_t cvS2Inner = FagCvInner(s2, FAG_S2_INNER, FAG_HOST_S2CV_RATIO_DEFAULT);
     int64_t s2CvTail = s2 - (s2Outer - 1) * cvS2Inner;
     if (s2CvTail <= 0) {
         s2CvTail = cvS2Inner;

@@ -26,6 +26,7 @@ ge::graphStatus ParsePlatform(gert::TilingContext* context, FagParsedInfo& info)
 
 // 属性 + shape + 可选输入存在性 + 布局视图参数。
 ge::graphStatus ParseFlashAttnGradInfo(gert::TilingContext* context, FagParsedInfo& info);
+ge::graphStatus ConfigureDeterMetadata(gert::TilingContext* context, FagParsedInfo& info);
 
 // 空 shape 检测。**预留钩子**：当前只用于日志，不改变分核与 workspace，
 // 以保持与重构前逐位一致。待空 tensor 分支落地后由编排层消费。
