@@ -114,6 +114,7 @@ inline MhcPreSinkhornBackwardNs::CubeCachePlan BuildCubeCachePlan(uint64_t rows,
     return plan;
 }
 
+// arch35 与 arch92 共用的 Tiling 实现：两架构使用同一套 Tiling 数据和分核策略，区分配比
 class MhcPreSinkhornBackwardArch35Tiling final : public Ops::Transformer::OpTiling::TilingBaseClass {
 public:
     explicit MhcPreSinkhornBackwardArch35Tiling(gert::TilingContext* context)
@@ -150,8 +151,10 @@ private:
 
     static uint64_t CalculateWorkspaceSize(uint64_t totalLength, uint64_t fusionSize, uint64_t cubeCoreNum,
                                            uint64_t vecCoreNum, uint64_t elementSize);
+    static bool IsAivEqualsAicSoc(const platform_ascendc::PlatformAscendC& platform);
 
     MhcPreSinkhornBackwardArch35TilingData* tilingData_ = nullptr;
+    uint64_t tilingKey_ = MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH35;
     uint64_t aicNum_ = 0;
     uint64_t aivNum_ = 0;
     uint64_t ubSize_ = 0;

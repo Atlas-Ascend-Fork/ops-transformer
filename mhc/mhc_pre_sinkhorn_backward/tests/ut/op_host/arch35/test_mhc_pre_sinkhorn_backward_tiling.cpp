@@ -12,7 +12,6 @@
 #include <gtest/gtest.h>
 #include "../../../../op_host/op_tiling/mhc_pre_sinkhorn_backward_tiling.h"
 #include "../../../../op_kernel/arch35/mhc_pre_sinkhorn_backward_data_arch35.h"
-#include "../../../../op_kernel/arch92/mhc_pre_sinkhorn_backward_data_arch92.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 
@@ -565,30 +564,31 @@ void CheckPlatformRouting(const char* soc, int32_t deterministic, uint64_t expec
         EXPECT_EQ(data->sinkhornPlan.path,
                   expectedSmallM != 0U ? SinkhornPath::N4_COMPACT : SinkhornPath::N4_ROW_PACKED);
     }
-    if (expectedKey == 4001) {
-        ASSERT_GE(info.tilingDataSize, sizeof(MhcPreSinkhornBackward960DeterminiticTilingData));
-        const auto* data =
-            reinterpret_cast<const MhcPreSinkhornBackward960DeterminiticTilingData*>(info.tilingData.get());
-        EXPECT_EQ(data->n, N);
-        EXPECT_EQ(data->c, C);
+    if (expectedKey == MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH92) {
+        // arch92 复用 arch35 方案：同一 Tiling 数据结构，且 AIV 核数按 1:1 配比对齐 AIC 核数。
+        ASSERT_GE(info.tilingDataSize, sizeof(MhcPreSinkhornBackwardArch35TilingData));
+        const auto* data = reinterpret_cast<const MhcPreSinkhornBackwardArch35TilingData*>(info.tilingData.get());
+        EXPECT_EQ(data->N, N);
+        EXPECT_EQ(data->D, C);
+        EXPECT_EQ(data->vecCoreNum, data->coreNum);
     }
 }
 } // namespace
 
 TEST_F(MhcPreSinkhornBackwardTiling, test_platform_routing_960_arch92)
 {
-    CheckPlatformRouting("Ascend960DT", 0, 4001);
-    CheckPlatformRouting("Ascend960DT", 3, 4001);
+    CheckPlatformRouting("Ascend960DT", 0, MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH92);
+    CheckPlatformRouting("Ascend960DT", 3, MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH92);
 }
 
 TEST_F(MhcPreSinkhornBackwardTiling, test_platform_routing_950_arch35)
 {
-    CheckPlatformRouting(kSocVersion950, 0, 3000);
+    CheckPlatformRouting(kSocVersion950, 0, MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH35);
 }
 
 TEST_F(MhcPreSinkhornBackwardTiling, test_runtime_small_m_boundaries_950_arch35)
 {
     for (int64_t rows : {0, 1, 511, 512, 513, 8192}) {
-        CheckPlatformRouting(kSocVersion950, 0, 3000, 1, rows);
+        CheckPlatformRouting(kSocVersion950, 0, MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH35, 1, rows);
     }
 }

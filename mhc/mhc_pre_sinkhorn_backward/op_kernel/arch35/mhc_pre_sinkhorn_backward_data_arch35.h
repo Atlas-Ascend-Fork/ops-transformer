@@ -139,7 +139,7 @@ struct MhcPreSinkhornBackwardMMConfig {
     uint32_t dbL0C = 0;
 };
 
-// arch35 的 Host/Kernel 共享 Tiling 数据。
+// arch35 与 arch92 共用的 Host/Kernel Tiling 数据。
 struct MhcPreSinkhornBackwardArch35TilingData {
     uint32_t coreNum = 0;
     uint32_t vecCoreNum = 0;
@@ -188,5 +188,13 @@ struct MhcPreSinkhornBackwardArch35TilingData {
     // dPre 改由外部 grad_pre 提供，xGradVec3 的加权源由 h_pre 切换为 pre_mix。
     uint32_t hasPreMix = 0;
 };
+
+// TilingKey与arch绑定：Host Tiling 与 Kernel 入口需按下表保持一致。
+// 3000: arch35(KERNEL_TYPE_MIX_AIC_1_2)。
+// 4000: arch92(KERNEL_TYPE_MIX_AIC_1_1)。
+// 注意：必须为预处理宏而非 constexpr 变量，TILING_KEY_IS/KERNEL_TASK_TYPE 需在
+// 预编译扫描阶段展开为数字字面量。
+#define MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH35 3000U
+#define MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH92 4000U
 
 #endif // MHC_PRE_SINKHORN_BACKWARD_DATA_ARCH35_H

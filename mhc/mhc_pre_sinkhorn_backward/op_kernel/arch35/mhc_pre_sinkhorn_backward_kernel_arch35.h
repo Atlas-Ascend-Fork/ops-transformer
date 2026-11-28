@@ -10,7 +10,7 @@
 
 /*!
  * \file mhc_pre_sinkhorn_backward_kernel_arch35.h
- * \brief MhcPre 与 Sinkhorn 反向融合计算
+ * \brief MhcPre 与 Sinkhorn 反向融合计算（arch35 与 arch92 共用）
  */
 
 #ifndef __MHC_PRE_SINKHORN_BACKWARD_KERNEL_H_
@@ -28,8 +28,10 @@ using namespace AscendC;
 
 constexpr uint32_t MHC_PRE_BACKWARD_IMPL_MODE_HF32 = 1U;
 
-template <class T, class P>
+template <class T, class P, uint32_t CV_RATIO>
 class MhcPreSinkhornBackwardKernel {
+    static_assert(CV_RATIO == 1U || CV_RATIO == 2U, "CV_RATIO must be 1 (arch92) or 2 (arch35)");
+
 public:
     __aicore__ inline MhcPreSinkhornBackwardKernel() = default;
     __aicore__ inline void Init(InitParams initParams);
@@ -72,17 +74,18 @@ public:
     // Vector侧V2流水
     __aicore__ inline void ProcessV2Pipeline();
     __aicore__ inline void ProcessV2(uint32_t offsetND, uint32_t copySizeND, uint64_t bsStart, uint64_t bsEnd,
-                                     uint32_t buffId);
+                                     uint32_t buffId, uint32_t colHalf, bool waitC0);
     __aicore__ inline void ProcessV2ChunkLoop(uint32_t offsetND, uint32_t copySizeND, uint64_t bsStart,
                                               uint64_t bsChunkStart, uint32_t currentChunkSize, uint32_t chunkNDSize,
-                                              uint32_t currentN, uint32_t buffId);
+                                              uint32_t currentN, uint32_t buffId, uint32_t colHalf);
     __aicore__ inline void ProcessV2ChunkLoadInvRms(uint64_t bsChunkStart, uint32_t currentChunkSize);
     __aicore__ inline void ProcessV2ChunkLoadHInGrad(uint32_t offsetND, uint32_t copySizeND, uint64_t bsChunkStart,
                                                      uint32_t currentChunkSize, uint32_t currentN, uint64_t bsStart);
     __aicore__ inline void ProcessV2ChunkLoadX(uint32_t offsetND, uint32_t copySizeND, uint64_t bsStart,
-                                               uint64_t bsChunkStart, uint32_t currentChunkSize, uint32_t buffId);
+                                               uint64_t bsChunkStart, uint32_t currentChunkSize, uint32_t buffId,
+                                               uint32_t colHalf);
     __aicore__ inline void ProcessV2ChunkProcessXRsGradMm(uint64_t bsStart, uint64_t bsChunkStart, uint32_t copySizeND,
-                                                          uint32_t currentChunkSize, uint32_t buffId);
+                                                          uint32_t currentChunkSize, uint32_t buffId, uint32_t colHalf);
     __aicore__ inline void ProcessV2ChunkOutputXGrad(uint32_t offsetND, uint32_t copySizeND, uint64_t bsChunkStart,
                                                      uint32_t currentChunkSize, uint32_t chunkNDSize);
 
@@ -194,16 +197,16 @@ private:
     bool hasPreMix_ = false;
 };
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::Init(InitParams initParams)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::Init(InitParams initParams)
 {
     InitGlobalBuffersAndTiling(initParams);
     InitUBAndAIVBuffers(initParams);
     InitStage2AndDataCopy();
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitGlobalBuffersAndTiling(InitParams initParams)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::InitGlobalBuffersAndTiling(InitParams initParams)
 {
     xGm_.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(initParams.x));
     xGm_.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
@@ -247,11 +250,16 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitGlobalBuffersAndT
     blockIdx_ = GetBlockIdx();
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitUBAndAIVBuffers(InitParams initParams)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::InitUBAndAIVBuffers(InitParams initParams)
 {
     // 小 M 满足列对齐时直传 UB；大 M 经 GM 解耦 C0/V2，避免 UB 缓冲区反压。
     directC0_ = smallM_ && nD_ % ND_BLOCK_SIZE == 0;
+    if constexpr (CV_RATIO == 1U) {
+        // 直传依赖 AIC 的 128x128 C0 结果按列对半分发到两个配对 AIV 的 UB；
+        // 1:1 时单个 AIV 消费整块，dualDst 布局不适用，改走 GM 中转。
+        directC0_ = false;
+    }
     vecDealChunk_ = N_ > LARGE_N_THRESHOLD ? VEC_DEAL_CHUNK_LARGE_N : VEC_DEAL_CHUNK_SMALL_N;
     hPreMaxBufLen_ = vecDealChunk_ * N_;
     hPostMaxBufLen_ = hPreMaxBufLen_;
@@ -285,8 +293,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitUBAndAIVBuffers(I
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitStage2AndDataCopy()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::InitStage2AndDataCopy()
 {
     if ASCEND_IS_AIC {
         dealStartND_ = cubeDealnDPeCore_ * blockIdx_;
@@ -296,7 +304,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitStage2AndDataCopy
         }
     }
     if ASCEND_IS_AIV {
-        dealStartND_ = cubeDealnDPeCore_ * uint32_t(blockIdx_ / VEC_DEAL_VECIDX_DIV);
+        // AIV 与配对 AIC 的映射由 cv 配比决定：1:2 时 AIV j 配 AIC j/2，1:1 时 AIV j 配 AIC j。
+        dealStartND_ = cubeDealnDPeCore_ * uint32_t(blockIdx_ / CV_RATIO);
         dealEndND_ = dealStartND_ + cubeDealnDPeCore_;
         if (dealEndND_ > nD_) {
             dealEndND_ = nD_;
@@ -304,8 +313,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::InitStage2AndDataCopy
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::Process()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::Process()
 {
     if (totalLength_ == 0) {
         // 空输入时清空输出
@@ -343,9 +352,10 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::Process()
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::PreProcessV0(LocalTensor<P>& hPreGradBuf,
-                                                                        uint64_t runBSStart, uint64_t runBSEnd)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::PreProcessV0(LocalTensor<P>& hPreGradBuf,
+                                                                                  uint64_t runBSStart,
+                                                                                  uint64_t runBSEnd)
 {
     if (D_ > MAX_D_LEN) {
         PreProcessV0LargeD(hPreGradBuf, runBSStart, runBSEnd);
@@ -396,9 +406,10 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::PreProcessV0(LocalTen
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::PreProcessV0LargeD(LocalTensor<P>& hPreGradBuf,
-                                                                              uint64_t runBSStart, uint64_t runBSEnd)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::PreProcessV0LargeD(LocalTensor<P>& hPreGradBuf,
+                                                                                        uint64_t runBSStart,
+                                                                                        uint64_t runBSEnd)
 {
     DataCopyPadExtParams<T> pad = {false, 0, 0, 0};
     for (uint64_t row = runBSStart; row < runBSEnd; ++row) {
@@ -436,8 +447,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::PreProcessV0LargeD(Lo
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ClearReductionOutputs()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ClearReductionOutputs()
 {
     if ASCEND_IS_AIC {
         cubeCompute_.End();
@@ -466,8 +477,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ClearReductionOutputs
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0Main()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV0Main()
 {
     if (blockIdx_ >= usedVecCoreNum_) {
         return;
@@ -512,11 +523,12 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0Main()
     PipeBarrier<PIPE_MTE3>();
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0MainLoop(uint64_t vecRunTimes, float alphaPre,
-                                                                             float alphaPost, float alphaComb,
-                                                                             LocalTensor<P>& sumBuf,
-                                                                             LocalTensor<P>& biasGradSumBuf)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV0MainLoop(uint64_t vecRunTimes,
+                                                                                       float alphaPre, float alphaPost,
+                                                                                       float alphaComb,
+                                                                                       LocalTensor<P>& sumBuf,
+                                                                                       LocalTensor<P>& biasGradSumBuf)
 {
     for (uint64_t cIdx = 0; cIdx < vecRunTimes; cIdx++) {
         uint64_t runBSStart = cIdx * vecDealChunk_ + dealStartBS_;
@@ -535,9 +547,9 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0MainLoop(uin
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0MainAlphaReduce(LocalTensor<P>& sumBuf,
-                                                                                    uint32_t coreId)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV0MainAlphaReduce(LocalTensor<P>& sumBuf,
+                                                                                              uint32_t coreId)
 {
     const bool directParams = usedVecCoreNum_ == 1U;
     // 单 AIV 时用 invRms 缓冲区保存 alpha 部分和，供 V3 输出；V2 不覆盖此区域。
@@ -578,9 +590,10 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0MainAlphaRed
     vecOutQueue1_.FreeTensor(alphaOutBuf);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::AllocV0V1Buffers(uint64_t runBSStart, uint64_t runBSEnd,
-                                                                            V0V1Buffers<P>& buffers)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::AllocV0V1Buffers(uint64_t runBSStart,
+                                                                                      uint64_t runBSEnd,
+                                                                                      V0V1Buffers<P>& buffers)
 {
     buffers.stepLength = static_cast<uint32_t>((runBSEnd - runBSStart) * N_);
     uint32_t hMixLength = static_cast<uint32_t>((runBSEnd - runBSStart) * N_ * N_);
@@ -618,11 +631,11 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::AllocV0V1Buffers(uint
     buffers.brcbTmpBuf = fp32TBuf_.GetWithOffset<uint8_t>(FP32_BUF_SIZE - ubOffset, ubOffset);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0(uint64_t runBSStart, uint64_t runBSEnd,
-                                                                     V0V1Buffers<P>& buffers, float alphaPre,
-                                                                     float alphaPost, float alphaComb,
-                                                                     LocalTensor<P>& hMixInput)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV0(uint64_t runBSStart, uint64_t runBSEnd,
+                                                                               V0V1Buffers<P>& buffers, float alphaPre,
+                                                                               float alphaPost, float alphaComb,
+                                                                               LocalTensor<P>& hMixInput)
 {
     DataCopyParams dataCopyParams;
     dataCopyParams.blockCount = 1;
@@ -701,20 +714,18 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV0(uint64_t ru
     AIV02Process<P>(buffers, hMixGradBuf, currentDealBsNum, alphaPre, alphaPost, alphaComb, N_);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessSinkhorn(uint64_t runBSStart,
-                                                                           uint32_t currentDealBsNum,
-                                                                           LocalTensor<P>& hResBuf)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessSinkhorn(uint64_t runBSStart,
+                                                                                     uint32_t currentDealBsNum,
+                                                                                     LocalTensor<P>& hResBuf)
 {
     sinkhorn_.Process(runBSStart, currentDealBsNum, hResBuf, vecInQueue0_);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV1(uint64_t runBSStart, uint64_t runBSEnd,
-                                                                     V0V1Buffers<P>& buffers, uint64_t vecRuntimesId,
-                                                                     LocalTensor<P>& sumBuf,
-                                                                     LocalTensor<P>& biasGradSumBuf,
-                                                                     const LocalTensor<P>& hMixInput)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV1(
+    uint64_t runBSStart, uint64_t runBSEnd, V0V1Buffers<P>& buffers, uint64_t vecRuntimesId, LocalTensor<P>& sumBuf,
+    LocalTensor<P>& biasGradSumBuf, const LocalTensor<P>& hMixInput)
 {
     uint32_t curBSSize = static_cast<uint32_t>(runBSEnd - runBSStart);
     constexpr bool isReuse = false;
@@ -799,8 +810,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV1(uint64_t ru
     PipeBarrier<PIPE_V>();
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessC0C1Pipeline()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessC0C1Pipeline()
 {
     if (GetBlockIdx() >= v1UsedCubeCoreNum_) {
         // 空闲 AIC 也需回收初始化时设置的事件。
@@ -839,9 +850,9 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessC0C1Pipeline()
     }
 }
 
-template <class T, class P>
+template <class T, class P, uint32_t CV_RATIO>
 template <bool TILED_HMIX_GRAD>
-__aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKernel<T, P>::ProcessStage2Tiles()
+__aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessStage2Tiles()
 {
     uint32_t currentNDBlock = Min(ND_BLOCK_SIZE, dealEndND_ - dealStartND_);
     uint32_t currentBSBlock = static_cast<uint32_t>(Min(static_cast<uint64_t>(BS_BLOCK_SIZE), totalLength_));
@@ -873,12 +884,13 @@ __aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKern
     }
 }
 
-template <class T, class P>
+template <class T, class P, uint32_t CV_RATIO>
 template <bool TILED_HMIX_GRAD>
-__aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKernel<T, P>::ProcessC0(
+__aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessC0(
     uint32_t offsetND, uint32_t currentNDBlock, uint64_t offsetBS, uint32_t currentBSBlock, uint32_t buffIdx)
 {
-    buffIdx = buffIdx % VEC_CORE_VECIDX_MOD;
+    // xRsGradMm/xRs 的 GM 双缓冲槽位轮转，与 cv 配比无关。
+    buffIdx = buffIdx % DOUBLE_BUFFER;
     uint64_t writeOffset = workspaceBuf_.GetXRsGradOffset(GetBlockIdx(), buffIdx);
     if constexpr (TILED_HMIX_GRAD) {
         cubeCompute_.PrepareHMixGradTile(workSpaceGm_[workspaceBuf_.GetHMixGradOffset(offsetBS)], currentBSBlock,
@@ -889,14 +901,14 @@ __aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKern
                            offsetND - dealStartND_);
 }
 
-template <class T, class P>
+template <class T, class P, uint32_t CV_RATIO>
 template <bool TILED_HMIX_GRAD>
-__aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKernel<T, P>::ProcessC1(
+__aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessC1(
     uint32_t offsetND, uint32_t currentNDBlock, uint64_t offsetBS, uint32_t currentBSBlock, uint32_t buffIdx)
 {
     AscendC::CrossCoreWaitFlag(CROSS_CORE_WAIT_FLAG_C1);
-    // 两个 AIV 分别写入 ND 的前后半块，C1 读取整个 ND 分块。
-    buffIdx = buffIdx % VEC_CORE_VECIDX_MOD;
+    // V2 将 xRs 按 ND 前后半块写入同一 GM 缓冲，C1 读取整个 ND 分块。
+    buffIdx = buffIdx % DOUBLE_BUFFER;
     uint64_t offsetXs = workspaceBuf_.GetXRsOffset(GetBlockIdx(), buffIdx);
     bool enAtomic = (offsetBS != 0);
     cubeCompute_.ProcessC1(mmConfigC1_, workSpaceGm_[workspaceBuf_.GetHMixGradOffset(offsetBS)], workSpaceGm_[offsetXs],
@@ -909,10 +921,10 @@ __aicore__ inline __attribute__((always_inline)) void MhcPreSinkhornBackwardKern
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2Pipeline()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2Pipeline()
 {
-    if (blockIdx_ >= 2 * v1UsedCubeCoreNum_) {
+    if (blockIdx_ >= CV_RATIO * v1UsedCubeCoreNum_) {
         return;
     }
     if (directC0_) {
@@ -923,20 +935,37 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2Pipeline()
     globalUbOffset_ = PROCESS_V2_CHUNK_SIZE * sizeof(uint32_t);
 
     // 与 AIC 使用相同的 M 外层、ND 内层顺序；buffId 标识同一个逻辑 Tile。
-    uint32_t vecIdx = blockIdx_ % VEC_CORE_VECIDX_MOD;
+    // 每个 128 列 ND 分块按 64 列半块处理，半块归属由 cv 配比决定：
+    // - 1:2（arch35）：每个 AIV 固定处理自身配对半块（与原 arch35 实现逐语句一致）；
+    // - 1:1（arch92）：单个 AIV 顺序处理两个半块，C0 事件仅在首个半块消费。
+    uint32_t vecIdx = blockIdx_ % CV_RATIO;
     uint32_t buffId = 0;
     for (uint64_t offsetBS = 0; offsetBS < totalLength_; offsetBS += BS_BLOCK_SIZE) {
         const uint32_t rows = static_cast<uint32_t>(Min(static_cast<uint64_t>(BS_BLOCK_SIZE), totalLength_ - offsetBS));
         for (uint32_t baseND = dealStartND_; baseND < dealEndND_; baseND += ND_BLOCK_SIZE) {
-            const uint32_t offsetND = baseND + (ND_BLOCK_SIZE / 2) * vecIdx;
-            if (offsetND >= dealEndND_) {
-                // 64 列尾块仍由两个 AIV 参与握手，空半块消费 C0 事件后通知 C1。
-                for (uint32_t row = 0; row < rows; row += MATMUL_WRITE_OFFSET_M) {
-                    CrossCoreWaitFlag(CROSS_CORE_WAIT_FLAG_C0);
+            if constexpr (CV_RATIO == 2U) {
+                const uint32_t offsetND = baseND + (ND_BLOCK_SIZE / 2) * vecIdx;
+                if (offsetND >= dealEndND_) {
+                    // 64 列尾块仍由两个 AIV 参与握手，空半块消费 C0 事件后通知 C1。
+                    for (uint32_t row = 0; row < rows; row += MATMUL_WRITE_OFFSET_M) {
+                        CrossCoreWaitFlag(CROSS_CORE_WAIT_FLAG_C0);
+                    }
+                    CrossCoreSetFlag<CROSS_CORE_FLAG_INDEX, PIPE_MTE3>(CROSS_CORE_WAIT_FLAG_C1);
+                } else {
+                    ProcessV2(offsetND, Min(ND_BLOCK_SIZE / 2, dealEndND_ - offsetND), offsetBS, offsetBS + rows,
+                              buffId, vecIdx, true);
+                    CrossCoreSetFlag<CROSS_CORE_FLAG_INDEX, PIPE_MTE3>(CROSS_CORE_WAIT_FLAG_C1);
                 }
-                CrossCoreSetFlag<CROSS_CORE_FLAG_INDEX, PIPE_MTE3>(CROSS_CORE_WAIT_FLAG_C1);
             } else {
-                ProcessV2(offsetND, Min(ND_BLOCK_SIZE / 2, dealEndND_ - offsetND), offsetBS, offsetBS + rows, buffId);
+                for (uint32_t slice = 0; slice < NUMBER_TWO / CV_RATIO; ++slice) {
+                    const uint32_t offsetND = baseND + (vecIdx + slice) * (ND_BLOCK_SIZE / 2);
+                    if (offsetND >= dealEndND_) {
+                        // 1:1 时不存在配对 AIV，直接跳过剩余半块。
+                        break;
+                    }
+                    ProcessV2(offsetND, Min(ND_BLOCK_SIZE / 2, dealEndND_ - offsetND), offsetBS, offsetBS + rows,
+                              buffId, vecIdx + slice, slice == 0);
+                }
                 CrossCoreSetFlag<CROSS_CORE_FLAG_INDEX, PIPE_MTE3>(CROSS_CORE_WAIT_FLAG_C1);
             }
             ++buffId;
@@ -944,9 +973,11 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2Pipeline()
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2(uint32_t offsetND, uint32_t copySizeND,
-                                                                     uint64_t bsStart, uint64_t bsEnd, uint32_t buffId)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2(uint32_t offsetND, uint32_t copySizeND,
+                                                                               uint64_t bsStart, uint64_t bsEnd,
+                                                                               uint32_t buffId, uint32_t colHalf,
+                                                                               bool waitC0)
 {
     // 保留运行时除法，避免常量形状编译将小 D 分块的通道下标错误折叠为 0。
     volatile uint32_t channelOffset = offsetND;
@@ -954,7 +985,7 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2(uint32_t of
     // 按 64 行分块，降低 V2 的 TBuf 峰值占用。
     uint32_t chunkSize = PROCESS_V2_CHUNK_SIZE / NUMBER_TWO;
     uint32_t currentBsSize = static_cast<uint32_t>(bsEnd - bsStart);
-    buffId = buffId % VEC_CORE_VECIDX_MOD;
+    buffId = buffId % DOUBLE_BUFFER;
     uint32_t ubOffset = globalUbOffset_;
     uint32_t maxChunkNDSize = chunkSize * copySizeND;
 
@@ -991,12 +1022,14 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2(uint32_t of
         uint32_t currentChunkSize = static_cast<uint32_t>(bsChunkEnd - bsChunkStart);
         uint32_t chunkNDSize = currentChunkSize * copySizeND;
 
-        // C0 每次输出 128 行，由两个 64 行分块依次消费。
-        if ((bsChunkStart - bsStart) % MATMUL_WRITE_OFFSET_M == 0) {
+        // C0 每次输出 128 行，由两个 64 行分块依次消费；1:1 时第二个半块由同一 AIV 顺序处理，
+        // C0 事件仅需在首个半块消费，保持与 AIC 发送次数一致；1:2 时每个半块均消费。
+        constexpr bool c0WaitEveryChunk = (CV_RATIO == 2U);
+        if ((c0WaitEveryChunk || waitC0) && (bsChunkStart - bsStart) % MATMUL_WRITE_OFFSET_M == 0) {
             AscendC::CrossCoreWaitFlag(CROSS_CORE_WAIT_FLAG_C0);
         }
-        ProcessV2ChunkLoop(offsetND, copySizeND, bsStart, bsChunkStart, currentChunkSize, chunkNDSize, currentN,
-                           buffId);
+        ProcessV2ChunkLoop(offsetND, copySizeND, bsStart, bsChunkStart, currentChunkSize, chunkNDSize, currentN, buffId,
+                           colHalf);
         if (directC0_ && ((bsChunkEnd - bsStart) % MATMUL_WRITE_OFFSET_M == 0 || bsChunkEnd == bsEnd)) {
             CrossCoreSetFlag<CROSS_CORE_FLAG_INDEX, PIPE_V>(C0_UB_BUFFER_FREE_FLAG_BASE +
                                                             c0UbBufferIndex_ % DOUBLE_BUFFER);
@@ -1005,26 +1038,24 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2(uint32_t of
     }
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoop(uint32_t offsetND, uint32_t copySizeND,
-                                                                              uint64_t bsStart, uint64_t bsChunkStart,
-                                                                              uint32_t currentChunkSize,
-                                                                              uint32_t chunkNDSize, uint32_t currentN,
-                                                                              uint32_t buffId)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2ChunkLoop(
+    uint32_t offsetND, uint32_t copySizeND, uint64_t bsStart, uint64_t bsChunkStart, uint32_t currentChunkSize,
+    uint32_t chunkNDSize, uint32_t currentN, uint32_t buffId, uint32_t colHalf)
 {
     ProcessV2ChunkLoadHInGrad(offsetND, copySizeND, bsChunkStart, currentChunkSize, currentN, bsStart);
 
-    ProcessV2ChunkLoadX(offsetND, copySizeND, bsStart, bsChunkStart, currentChunkSize, buffId);
+    ProcessV2ChunkLoadX(offsetND, copySizeND, bsStart, bsChunkStart, currentChunkSize, buffId, colHalf);
 
-    ProcessV2ChunkProcessXRsGradMm(bsStart, bsChunkStart, copySizeND, currentChunkSize, buffId);
+    ProcessV2ChunkProcessXRsGradMm(bsStart, bsChunkStart, copySizeND, currentChunkSize, buffId, colHalf);
 
     ProcessV2ChunkOutputXGrad(offsetND, copySizeND, bsChunkStart, currentChunkSize, chunkNDSize);
 }
 
 // 加载 V1 预计算的 RMS 梯度系数
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoadInvRms(uint64_t bsChunkStart,
-                                                                                    uint32_t currentChunkSize)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2ChunkLoadInvRms(uint64_t bsChunkStart,
+                                                                                              uint32_t currentChunkSize)
 {
     DataCopyPadParams dataCopyPadParams;
     dataCopyPadParams.isPad = false;
@@ -1045,8 +1076,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoadInv
 }
 
 // 加载 hInGrad
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoadHInGrad(
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2ChunkLoadHInGrad(
     uint32_t offsetND, uint32_t copySizeND, uint64_t bsChunkStart, uint32_t currentChunkSize, uint32_t currentN,
     uint64_t bsStart)
 {
@@ -1082,11 +1113,10 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoadHIn
 }
 
 // 加载 x 并转换为 FP32
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoadX(uint32_t offsetND, uint32_t copySizeND,
-                                                                               uint64_t bsStart, uint64_t bsChunkStart,
-                                                                               uint32_t currentChunkSize,
-                                                                               uint32_t buffId)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2ChunkLoadX(
+    uint32_t offsetND, uint32_t copySizeND, uint64_t bsStart, uint64_t bsChunkStart, uint32_t currentChunkSize,
+    uint32_t buffId, uint32_t colHalf)
 {
     DataCopyExtParams xCopyParams;
     DataCopyPadExtParams<T> xCopyPadParams;
@@ -1118,25 +1148,36 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkLoadX(u
     fp32ExtCopyParams.srcStride = 0;
     fp32ExtCopyParams.dstStride = (ND_BLOCK_SIZE - copySizeND) * sizeof(P);
 
-    uint64_t offset = workspaceBuf_.GetXRsOffset(GetBlockIdx() / VEC_DEAL_VECIDX_DIV, buffId);
-    uint32_t vecIdx = blockIdx_ % NUMBER_TWO;
+    // colHalf 为当前 AIV 负责的 64 列半块编号：1:2 时固定为本 AIV 的配对半块（由 blockIdx 求模，
+    // 与原 arch35 实现一致）；1:1 时为顺序处理的第 colHalf 块。
+    uint64_t offset = workspaceBuf_.GetXRsOffset(GetBlockIdx() / CV_RATIO, buffId);
+    if constexpr (CV_RATIO == 2U) {
+        uint32_t vecIdx = blockIdx_ % NUMBER_TWO;
+        offset += vecIdx * (ND_BLOCK_SIZE / 2);
+    } else {
+        offset += colHalf * (ND_BLOCK_SIZE / 2);
+    }
     offset += (bsChunkStart - bsStart) * ND_BLOCK_SIZE;
-    offset += vecIdx * (ND_BLOCK_SIZE / 2);
 
     DataCopyPad(workSpaceGm_[offset], xRsOutUb_, fp32ExtCopyParams);
     vecOutQueue1_.FreeTensor(xRsOutUb_);
 }
 
 // 计算 xRsGrad
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkProcessXRsGradMm(
-    uint64_t bsStart, uint64_t bsChunkStart, uint32_t copySizeND, uint32_t currentChunkSize, uint32_t buffId)
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2ChunkProcessXRsGradMm(
+    uint64_t bsStart, uint64_t bsChunkStart, uint32_t copySizeND, uint32_t currentChunkSize, uint32_t buffId,
+    uint32_t colHalf)
 {
     DataCopyPadParams dataCopyPadParams;
     dataCopyPadParams.isPad = false;
-    uint32_t vecIdx = blockIdx_ % NUMBER_TWO;
-    uint64_t offsetXRsGradMm = workspaceBuf_.GetXRsGradOffset(GetBlockIdx() / VEC_DEAL_VECIDX_DIV, buffId);
-    offsetXRsGradMm += (bsChunkStart - bsStart) * ND_BLOCK_SIZE + vecIdx * (ND_BLOCK_SIZE / 2);
+    uint64_t offsetXRsGradMm = workspaceBuf_.GetXRsGradOffset(GetBlockIdx() / CV_RATIO, buffId);
+    if constexpr (CV_RATIO == 2U) {
+        uint32_t vecIdx = blockIdx_ % NUMBER_TWO;
+        offsetXRsGradMm += (bsChunkStart - bsStart) * ND_BLOCK_SIZE + vecIdx * (ND_BLOCK_SIZE / 2);
+    } else {
+        offsetXRsGradMm += (bsChunkStart - bsStart) * ND_BLOCK_SIZE + colHalf * (ND_BLOCK_SIZE / 2);
+    }
 
     if (directC0_) {
         uint32_t rowInTile = (bsChunkStart - bsStart) % MATMUL_WRITE_OFFSET_M;
@@ -1169,8 +1210,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkProcess
 }
 
 // 转换并写回 grad_x
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkOutputXGrad(
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV2ChunkOutputXGrad(
     uint32_t offsetND, uint32_t copySizeND, uint64_t bsChunkStart, uint32_t currentChunkSize, uint32_t chunkNDSize)
 {
     bf16OutputBuf_ = vecOutQueue1_.AllocTensor<T>();
@@ -1190,15 +1231,15 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV2ChunkOutputX
     vecOutQueue1_.FreeTensor(bf16OutputBuf_);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3SingleCore()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV3SingleCore()
 {
     ProcessV3AlphaGradSingleCore();
     ProcessV3BiasGradSingleCore();
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3AlphaGradSingleCore()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV3AlphaGradSingleCore()
 {
     LocalTensor<P> alphaGradOutLocal = vecOutQueueSmall_.AllocTensor<P>();
     VFDoV3ProcessAlphaGradSingleCore<P>((__ubuf__ P*)alphaGradOutLocal.GetPhyAddr(),
@@ -1210,8 +1251,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3AlphaGradSin
     vecOutQueueSmall_.FreeTensor(alphaGradOutLocal);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3BiasGradSingleCore()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV3BiasGradSingleCore()
 {
     LocalTensor<P> biasGradOutLocal = vecOutQueueSmall_.AllocTensor<P>();
     LocalTensor<P> biasGradInLocal =
@@ -1228,15 +1269,15 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3BiasGradSing
     vecOutQueueSmall_.FreeTensor(biasGradOutLocal);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV3()
 {
     ProcessV3AlphaGrad();
     ProcessV3BiasGrad();
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3AlphaGrad()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV3AlphaGrad()
 {
     LocalTensor<P> alphaGradInLocal = vecInQueue1_.AllocTensor<P>();
     LocalTensor<P> alphaGradOutLocal = vecOutQueueSmall_.AllocTensor<P>();
@@ -1264,8 +1305,8 @@ __aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3AlphaGrad()
     vecOutQueueSmall_.FreeTensor(alphaGradOutLocal);
 }
 
-template <class T, class P>
-__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P>::ProcessV3BiasGrad()
+template <class T, class P, uint32_t CV_RATIO>
+__aicore__ inline void MhcPreSinkhornBackwardKernel<T, P, CV_RATIO>::ProcessV3BiasGrad()
 {
     LocalTensor<uint8_t> tmpLocal = fp32TBuf_.GetWithOffset<uint8_t>(hFusionBufLen_ / 4, 0);
     constexpr bool isReuse = false;

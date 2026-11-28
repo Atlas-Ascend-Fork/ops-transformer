@@ -36,7 +36,8 @@ static ge::graphStatus Tiling4MhcPreSinkhornBackward(gert::TilingContext* contex
 
     const auto npuArch = ascendcPlatform.GetCurNpuArch();
     if (npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) {
-        return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context, {100, 110});
+        // arch92 复用 arch35 Tiling（校正配比并切换 TilingKey 4000）。
+        return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context, {0});
     }
 
     if (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context)) {

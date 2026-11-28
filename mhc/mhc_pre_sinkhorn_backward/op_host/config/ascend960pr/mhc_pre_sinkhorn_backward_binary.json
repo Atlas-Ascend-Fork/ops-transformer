@@ -2,7 +2,7 @@
     "op_type": "MhcPreSinkhornBackward",
     "op_list": [
         {
-            "bin_filename": "MhcPreSinkhornBackward_bf16",
+            "bin_filename": "MhcPreSinkhornBackward_f6803f7d1a4edf574183345ae116fb75",
             "inputs": [
                 {
                     "name": "grad_hin",
@@ -123,6 +123,26 @@
                     "shape": [
                         -2
                     ]
+                },
+                {
+                    "name": "pre_mix",
+                    "index": 12,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ]
+                },
+                {
+                    "name": "grad_pre",
+                    "index": 13,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ]
                 }
             ],
             "outputs": [
@@ -165,18 +185,33 @@
                     "shape": [
                         -2
                     ]
+                },
+                {
+                    "name": "grad_pre_mix",
+                    "index": 4,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ]
                 }
             ],
             "attrs": [
                 {
                     "name": "hc_eps",
                     "dtype": "float32",
-                    "value": 1e-6
+                    "value": 1e-06
+                },
+                {
+                    "name": "enable_hf32",
+                    "dtype": "bool",
+                    "value": true
                 }
             ]
         },
         {
-            "bin_filename": "MhcPreSinkhornBackward_fp16",
+            "bin_filename": "MhcPreSinkhornBackward_538fa8d0d0ed9f66d9aa7c9e584cbd3d",
             "inputs": [
                 {
                     "name": "grad_hin",
@@ -297,6 +332,26 @@
                     "shape": [
                         -2
                     ]
+                },
+                {
+                    "name": "pre_mix",
+                    "index": 12,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ]
+                },
+                {
+                    "name": "grad_pre",
+                    "index": 13,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ]
                 }
             ],
             "outputs": [
@@ -339,13 +394,28 @@
                     "shape": [
                         -2
                     ]
+                },
+                {
+                    "name": "grad_pre_mix",
+                    "index": 4,
+                    "dtype": "float32",
+                    "format": "ND",
+                    "paramType": "optional",
+                    "shape": [
+                        -2
+                    ]
                 }
             ],
             "attrs": [
                 {
                     "name": "hc_eps",
                     "dtype": "float32",
-                    "value": 1e-6
+                    "value": 1e-06
+                },
+                {
+                    "name": "enable_hf32",
+                    "dtype": "bool",
+                    "value": true
                 }
             ]
         }
