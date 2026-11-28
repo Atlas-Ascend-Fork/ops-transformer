@@ -86,13 +86,12 @@ if _TORCHAIR_AVAILABLE:
             "topk": attr.Int(topk),
             "compress_factor": attr.Int(compress_factor),
         }
-        # GE binds the sole index buffer to physical output 0 for this mode.
-        indices_only = return_choice == 1
-        outputs = (
-            ["sparse_indices"]
-            if indices_only
-            else ["score", "sparse_indices", "sparse_values"]
-        )
+        if return_choice == 1:
+            outputs = ["sparse_indices", "sparse_count"]
+        elif return_choice == 2:
+            outputs = ["score", "sparse_indices", "sparse_values", "sparse_count"]
+        else:
+            outputs = ["score", "sparse_indices", "sparse_values", "sparse_count"]
         result = ge_op(
             op_type="MsaIndexScore",
             inputs=inputs,
@@ -126,12 +125,13 @@ if _TORCHAIR_AVAILABLE:
             .attr("compress_factor", attr.Int(1))
             .output("score", "DT_FLOAT16, DT_FLOAT")
             .output("sparse_indices", "DT_INT32")
-            .output("sparse_values", "DT_FLOAT"),
+            .output("sparse_values", "DT_FLOAT")
+            .output("sparse_count", "DT_INT32"),
         )
-        if indices_only:
-            return result
+        if return_choice == 1:
+            return result[0], result[1]
         if return_choice == 2:
-            return result[1], result[2]
+            return result[1], result[2], result[3]
         return result[0] if isinstance(result, (list, tuple)) else result
 
     @register_fx_node_ge_converter(

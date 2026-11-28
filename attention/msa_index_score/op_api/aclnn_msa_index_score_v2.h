@@ -30,7 +30,7 @@ ACLNN_API aclnnStatus aclnnMsaIndexScoreV2GetWorkspaceSize(
     const aclTensor* actualSeqQlenOptional, const aclTensor* actualSeqKlenOptional, char* layoutKeyOptional,
     int64_t sparseMode, int64_t initBlocks, int64_t localBlocks, char* layoutQueryOptional, int64_t poolBlockSize,
     int64_t returnChoice, int64_t topk, int64_t compressFactor, const aclTensor* score, const aclTensor* sparseIndices,
-    const aclTensor* sparseValues, uint64_t* workspaceSize, aclOpExecutor** executor);
+    const aclTensor* sparseValues, const aclTensor* sparseCount, uint64_t* workspaceSize, aclOpExecutor** executor);
 
 /* @brief aclnnMsaIndexScoreV2的第二段接口，用于执行计算。 */
 ACLNN_API aclnnStatus aclnnMsaIndexScoreV2(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,

@@ -137,6 +137,8 @@ gert::TilingContextPara MakeTilingPara(const MsaTilingSpec& spec, const MsaSocPa
                                                            spec.scoreShape[1], spec.topk},
                                                           ge::DT_FLOAT) :
                                                   Absent(ge::DT_FLOAT));
+        outputs.push_back(
+            Present({spec.poolBlockSize == 16 ? 1 : spec.queryShape[1], spec.scoreShape[1]}, ge::DT_INT32));
     }
 
     std::vector<gert::TilingContextPara::OpAttr> attrs = {

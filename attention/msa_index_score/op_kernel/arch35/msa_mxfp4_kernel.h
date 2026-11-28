@@ -25,7 +25,8 @@ public:
     __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR blockTable, GM_ADDR queryScale, GM_ADDR keyScale,
                                 GM_ADDR actualSeqQlen, GM_ADDR actualSeqKlen, GM_ADDR startLoc, GM_ADDR score,
                                 GM_ADDR workspace, const MsaIndexScoreTilingData* __restrict tiling,
-                                GM_ADDR sparseIndices = nullptr, GM_ADDR sparseValues = nullptr)
+                                GM_ADDR sparseIndices = nullptr, GM_ADDR sparseValues = nullptr,
+                                GM_ADDR sparseCount = nullptr)
     {
         query_ = query;
         key_ = key;
@@ -40,6 +41,7 @@ public:
         tiling_ = tiling;
         sparseIndices_ = sparseIndices;
         sparseValues_ = sparseValues;
+        sparseCount_ = sparseCount;
     }
 
     // Separate block16/block128 tiling keys select the corresponding template instances.
@@ -84,7 +86,7 @@ private:
                             LATENCY_TND>
             op;
         op.InitMx(query_, key_, queryScale_, keyScale_, blockTable_, actualSeqQlen_, actualSeqKlen_, startLoc_, score_,
-                  workspace_, tiling_, sparseIndices_, sparseValues_);
+                  workspace_, tiling_, sparseIndices_, sparseValues_, sparseCount_);
         op.Process();
     }
 
@@ -101,6 +103,7 @@ private:
     GM_ADDR workspace_ = nullptr;
     GM_ADDR sparseIndices_ = nullptr;
     GM_ADDR sparseValues_ = nullptr;
+    GM_ADDR sparseCount_ = nullptr;
 };
 
 } // namespace MsaIndexScoreNs

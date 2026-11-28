@@ -16,8 +16,9 @@ namespace MsaIndexScoreNs {
 template <class ElementQ, bool FUSED_SELECT = false, bool BALANCED = false, bool BYPASS = false>
 __aicore__ inline bool RunNativeFp8Pipeline(GM_ADDR query, GM_ADDR key, GM_ADDR table, GM_ADDR qLengths,
                                             GM_ADDR kLengths, GM_ADDR score, GM_ADDR workspace, GM_ADDR indices,
-                                            GM_ADDR values, const MsaIndexScoreTilingData* tiling)
+                                            GM_ADDR values, GM_ADDR counts, const MsaIndexScoreTilingData* tiling)
 {
+    (void)counts;
     AscendC::GlobalTensor<int32_t> qPrefix;
     qPrefix.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(qLengths));
     if (tiling->strideKvToken != 128U || qPrefix.GetValue(0) != 0 ||
@@ -67,7 +68,7 @@ __aicore__ inline bool RunNativeFp8Pipeline(GM_ADDR query, GM_ADDR key, GM_ADDR 
         MsaBlock16Select::FusedSelect::Run(reinterpret_cast<GM_ADDR>(a.out), indices,
                                            tiling->returnChoice == MSA_RETURN_INDICES_VALUES ? values : nullptr,
                                            tiling->totalQ, static_cast<uint32_t>(a.out_stride), AscendC::GetBlockNum(),
-                                           tiling->returnChoice == MSA_RETURN_INDICES_VALUES, meta);
+                                           tiling->returnChoice == MSA_RETURN_INDICES_VALUES, meta, counts);
 #endif
     }
     return true;

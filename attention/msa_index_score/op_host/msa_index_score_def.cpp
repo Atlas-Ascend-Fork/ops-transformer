@@ -113,6 +113,12 @@ public:
                        ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
                      ge::FORMAT_ND});
+        // [N1, T1]。return_choice=1 或 2 时必传，每行实际入选块数。
+        this->Output("sparse_count")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                     ge::FORMAT_ND});
 
         // key 布局：TND / BSND / BNSD / BBND / BNBD。aclnn 参数名为 layoutKeyOptional。
         this->Attr("layout_key").AttrType(OPTIONAL).String("BBND");
@@ -125,7 +131,7 @@ public:
         this->Attr("layout_query").AttrType(OPTIONAL).String("TND");
         // 打分池化块长：每个 score 归约的 token 数，只允许 128 或 16。
         this->Attr("pool_block_size").AttrType(OPTIONAL).Int(128);
-        // 0：只输出 score。1：只输出 sparse_indices。2：同时输出 indices 和 values。
+        // 0：只输出 score。1：输出 sparse_indices 和 sparse_count。2：再输出 sparse_values。
         this->Attr("return_choice").AttrType(OPTIONAL).Int(0);
         this->Attr("topk").AttrType(OPTIONAL).Int(16);
         // key 压缩倍数。1 表示不压缩。4 表示 4 个 token 已压成一行，当前仅预留。
@@ -225,6 +231,12 @@ public:
             .ParamType(OPTIONAL)
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
                        ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT16})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
+                     ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        aicoreConfig950.Output("sparse_count")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32,
+                       ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32, ge::DT_INT32})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND,
                      ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         aicoreConfig950.DynamicCompileStaticFlag(true)

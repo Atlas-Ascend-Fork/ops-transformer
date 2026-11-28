@@ -23,16 +23,16 @@
 
 #include <type_traits>
 
-#include "catlass/msa_catlass.hpp"
-#include "catlass/arch/msa_arch.hpp"
-#include "catlass/arch/msa_resource.hpp"
-#include "catlass/msa_coord.hpp"
-#include "catlass/msa_matrix_coord.hpp"
-#include "catlass/msa_gemm_coord.hpp"
-#include "catlass/layout/msa_layout.hpp"
-#include "catlass/gemm/msa_gemm_helper.hpp"
-#include "catlass/gemm/tile/msa_tile_copy.hpp"
-#include "catlass/gemm/tile/msa_tile_mmad.hpp"
+#include "../catlass/msa_catlass.hpp"
+#include "../catlass/arch/msa_arch.hpp"
+#include "../catlass/arch/msa_resource.hpp"
+#include "../catlass/msa_coord.hpp"
+#include "../catlass/msa_matrix_coord.hpp"
+#include "../catlass/msa_gemm_coord.hpp"
+#include "../catlass/layout/msa_layout.hpp"
+#include "../catlass/gemm/msa_gemm_helper.hpp"
+#include "../catlass/gemm/tile/msa_tile_copy.hpp"
+#include "../catlass/gemm/tile/msa_tile_mmad.hpp"
 
 #include "../msa_index_score_common.h"
 #include "../msa_index_score_task.h"
@@ -62,6 +62,8 @@ public:
     static constexpr bool IS_MXFP4 = IS_MXFP4_;
     static_assert(!MX_FIXED_TILE || IS_MXFP4, "fixed-tile specialization requires MXFP4");
     static constexpr bool GROUP_N256 = GROUP_N256_;
+    // GROUP_N256 在 fp8 score / 融合 TopK 打开：L1 N 放到 512，短 M 一次吃四页。L0B/L0C 各只剩一级。
+    static constexpr bool FP8_N512 = GROUP_N256;
     // 只有四页 fp16 行放得进每个 AIV 的 32KB ping 时才用 N=512，并把 L0 第二级让出去。
     static constexpr bool MXFP4_WIDE = IS_MXFP4 && MXFP4_N512_;
     // 块长 16 的 fp16/bf16：L0C 的 FP32 按 head 分组写进 UB，maxpool 不再经过 F322F16。
@@ -107,10 +109,11 @@ public:
     // 无法与本窗 Fixpipe 叠 L0C；实测 M-split 的 mte1/同步气泡更贵。
     // L0B 仍单级：N=512 的 B tile 占满 64KB。窄路径继续 128 行、N=256、双 L0C。
     static constexpr uint32_t L1_M = MSA_ROW_TILE_M;
-    static constexpr uint32_t L1_N =
-        MXFP4_WIDE ? (MSA_BLOCK_SIZE * 4U) : (IS_MXFP4 || GROUP_N256 ? (MSA_BLOCK_SIZE * 2U) : MSA_BLOCK_SIZE);
+    static constexpr uint32_t L1_N = (MXFP4_WIDE || FP8_N512) ?
+                                         (MSA_BLOCK_SIZE * 4U) :
+                                         (IS_MXFP4 || GROUP_N256 ? (MSA_BLOCK_SIZE * 2U) : MSA_BLOCK_SIZE);
     static constexpr uint32_t L0C_M = L1_M;
-    static constexpr uint32_t L0C_STAGES = MXFP4_WIDE ? 1U : 2U;
+    static constexpr uint32_t L0C_STAGES = (MXFP4_WIDE || FP8_N512) ? 1U : 2U;
     static constexpr uint32_t L1_K = MSA_K_TILE;
     static constexpr uint32_t L1A_SIZE = L1_M * L1_K * sizeof(ElementA);
     static constexpr uint32_t L1B_SIZE = L1_N * L1_K * sizeof(ElementB);
@@ -120,7 +123,7 @@ public:
     static constexpr uint32_t L0A_STAGES = 2;
     static constexpr uint32_t L0A_RESIDENT_ID = 0;
     static constexpr uint32_t L0A_FALLBACK_ID = 1;
-    static constexpr uint32_t L0B_STAGES = MXFP4_WIDE ? 1U : 2U;
+    static constexpr uint32_t L0B_STAGES = (MXFP4_WIDE || FP8_N512) ? 1U : 2U;
     static constexpr uint32_t L0A_PINGPONG_BUF_SIZE = ArchTag::L0A_SIZE / L0A_STAGES;
     static constexpr uint32_t L0B_PINGPONG_BUF_SIZE = ArchTag::L0B_SIZE / L0B_STAGES;
     static constexpr uint32_t L0C_TILE_SIZE = L0C_M * L1_N * sizeof(ElementAccumulator);

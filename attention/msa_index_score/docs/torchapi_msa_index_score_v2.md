@@ -111,8 +111,9 @@ cann_ops_transformer.msa_index_score_v2(
 | score（`return_choice=0`） | 块长 128 为 float32，块长 16 为 float16 | `[H, T1, RoundUp(M, 16)]` |
 | sparse_indices（`return_choice=1` 或 2） | int32 | `[H, T1, topk]` |
 | sparse_values（`return_choice=2`） | float32 | `[H, T1, topk]` |
+| sparse_count（`return_choice=1`或`2`） | int32 | 块长128为`[N1, T1]`，块长16为`[1, T1]` |
 
-块长 128 时 `H=N1`，块长 16 时 `H=1`。输出的 `T1` 等于 `actual_seq_qlen[-1]`。`return_choice=2` 返回 `(sparse_indices, sparse_values)`，索引和分数按槽位一一对应。TopK 未填满的槽位用块号 `-1` 补齐。对应分数和 score 的补位值在块长 128 时为 float32 最小有限值，在块长 16 时为 `-inf`。
+块长 128 时 `H=N1`，块长 16 时 `H=1`。输出的 `T1` 等于 `actual_seq_qlen[-1]`。`return_choice=1` 返回 `(sparse_indices, sparse_count)`，`return_choice=2` 返回 `(sparse_indices, sparse_values, sparse_count)`。`sparse_count` 是该行大于等于 0 的块号个数。索引和分数按槽位一一对应。TopK 未填满的槽位用块号 `-1` 补齐。对应分数和 score 的补位值在块长 128 时为 float32 最小有限值，在块长 16 时为 `-inf`。
 
 `M` 是对齐前的 score 列数，score 末维至少为 16：
 

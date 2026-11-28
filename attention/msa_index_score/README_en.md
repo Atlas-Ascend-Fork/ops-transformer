@@ -74,7 +74,7 @@ English | [简体中文](./README.md)
 - `sparse_mode` supports only 0 or 3. When it is 3, `atten_mask` must be $[2048, 2048]$.
 - `init_blocks` and `local_blocks` must be $\ge 0$ and must not exceed the number of logical blocks. When both are 0, $local\_mask$ is not written.
 - `q_len` / `kv_len` can be 0. The score with empty KV is filled with `-inf`.
-- `return_choice` defaults to 0 and keeps the original score-only behavior. A non-zero value requires `pool_block_size=128`. <term>Ascend 950PR&950DT products</term> support TopK for fp16, bf16, fp8, and MXFP4. <term>Atlas A2 products</term> and <term>Atlas A3 products</term> support TopK for fp16 and bf16 only. The score goes through GM workspace and is not moved from L0C to UB.
+- `return_choice` defaults to 0 and keeps the original score-only behavior. 1 writes `sparse_indices` and `sparse_count`. 2 also writes `sparse_values`. `sparse_count` is `[N1, T1]` int32, the number of indices in that row that are greater than or equal to 0. A non-zero value requires `pool_block_size=128`. <term>Ascend 950PR&950DT products</term> support TopK for fp16, bf16, fp8, and MXFP4. <term>Atlas A2 products</term> and <term>Atlas A3 products</term> support TopK for fp16 and bf16 only. The score goes through GM workspace and is not moved from L0C to UB.
 - Deterministic computation: with the same inputs and attributes, the output is consistent with the reference implementation.
 
 ## Invocation Description

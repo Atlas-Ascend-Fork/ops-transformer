@@ -28,15 +28,15 @@
 #include "c_api/asc_simd.h"
 #include "kernel_operator.h"
 
-#include "catlass/msa_catlass.hpp"
-#include "catlass/arch/msa_arch.hpp"
-#include "catlass/arch/msa_resource.hpp"
-#include "catlass/arch/msa_cross_core_sync.hpp"
-#include "catlass/msa_coord.hpp"
-#include "catlass/msa_gemm_coord.hpp"
-#include "catlass/msa_matrix_coord.hpp"
-#include "catlass/layout/msa_layout.hpp"
-#include "catlass/gemm/msa_gemm_type.hpp"
+#include "../catlass/msa_catlass.hpp"
+#include "../catlass/arch/msa_arch.hpp"
+#include "../catlass/arch/msa_resource.hpp"
+#include "../catlass/arch/msa_cross_core_sync.hpp"
+#include "../catlass/msa_coord.hpp"
+#include "../catlass/msa_gemm_coord.hpp"
+#include "../catlass/msa_matrix_coord.hpp"
+#include "../catlass/layout/msa_layout.hpp"
+#include "../catlass/gemm/msa_gemm_type.hpp"
 
 #include "../msa_index_score_common.h"
 #if defined(__DAV_C310_CUBE__) || defined(__DAV_310R6_CUBE__)
@@ -82,9 +82,10 @@ public:
     using ElementS = std::conditional_t<IS_QUANT || BLOCK16_FP32_MAX, float, half>;
     using SType = Catlass::Gemm::GemmType<ElementS, LayoutS>;
 
-    // 950 非量化、非 TopK 的 FP8 block128：PA 的相邻两个逻辑页可合成一次 MMAD。
+    // 950 非量化 FP8 block128：score 与融合 TopK 都在 PA 上短 M 一次吃四页，放不下再退回两页。
+    // bf16/fp16、int8、block16、MX 仍逐页。
     static constexpr bool FP8_SCORE_PIPE =
-        USE_C2UB_IN && !IS_QUANT && !IS_MXFP4 && !IS_BLOCK16 && !ENABLE_TOPK && sizeof(ElementQ) == 1U;
+        USE_C2UB_IN && !IS_QUANT && !IS_MXFP4 && !IS_BLOCK16 && sizeof(ElementQ) == 1U;
 
 #if defined(__DAV_C310_CUBE__) || defined(__DAV_310R6_CUBE__)
     // int8 的 K 源是每 stile 复用的 per-core scratch，保持 2 级 L1B 流水（3 级实测竞态崩溃）；
@@ -123,7 +124,7 @@ public:
 
     __aicore__ inline void Init(GM_ADDR query, GM_ADDR key, GM_ADDR blockTable, GM_ADDR scale, GM_ADDR actualSeqQlen,
                                 GM_ADDR actualSeqKlen, GM_ADDR startLoc, GM_ADDR score, GM_ADDR sparseIndices,
-                                GM_ADDR sparseValues, GM_ADDR workspace,
+                                GM_ADDR sparseValues, GM_ADDR sparseCount, GM_ADDR workspace,
                                 const MsaIndexScoreTilingData* __restrict tiling)
     {
         tiling_ = tiling;
@@ -155,6 +156,9 @@ public:
             if (tiling_->returnChoice == MSA_RETURN_INDICES_VALUES) {
                 gTopkVal_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(sparseValues));
             }
+            sparseCount_ = sparseCount;
+        } else if constexpr (!IS_BLOCK16) {
+            (void)sparseCount;
         }
         gWorkspace_.SetGlobalBuffer(reinterpret_cast<__gm__ ElementS*>(workspace));
         if constexpr (IS_BLOCK16) {
@@ -166,6 +170,7 @@ public:
                 gTopkVal_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(sparseValues),
                                           tiling_->totalQ * MSA_BLOCK16_TOPK);
             }
+            sparseCount_ = sparseCount;
             if (tiling_->returnChoice != MSA_RETURN_SCORE) {
                 // Immutable per-request metadata gives every core the same compact row extent.
                 if (tiling_->keyLayout == MSA_KEY_LAYOUT_TND) {
@@ -191,11 +196,12 @@ public:
     __aicore__ inline void InitMx(GM_ADDR query, GM_ADDR key, GM_ADDR queryScale, GM_ADDR keyScale, GM_ADDR blockTable,
                                   GM_ADDR actualSeqQlen, GM_ADDR actualSeqKlen, GM_ADDR startLoc, GM_ADDR score,
                                   GM_ADDR workspace, const MsaIndexScoreTilingData* __restrict tiling,
-                                  GM_ADDR sparseIndices = nullptr, GM_ADDR sparseValues = nullptr)
+                                  GM_ADDR sparseIndices = nullptr, GM_ADDR sparseValues = nullptr,
+                                  GM_ADDR sparseCount = nullptr)
     {
         if constexpr (IS_BLOCK16) {
             Init(query, key, blockTable, nullptr, actualSeqQlen, actualSeqKlen, startLoc, score, sparseIndices,
-                 sparseValues, workspace, tiling);
+                 sparseValues, sparseCount, workspace, tiling);
             auto* scaleScratch = reinterpret_cast<__gm__ fp8_e8m0_t*>(workspace + tiling_->mxScaleScratchOffset);
             gKeyScaleScratchMx_.SetGlobalBuffer(scaleScratch);
             gQScaleScratchMx_.SetGlobalBuffer(scaleScratch + MSA_BLOCK16_MX_SCALE_SCRATCH_BYTES / 2U);
@@ -218,7 +224,9 @@ public:
             if (tiling_->returnChoice == MSA_RETURN_INDICES_VALUES) {
                 gTopkVal_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(sparseValues));
             }
+            sparseCount_ = sparseCount;
         } else {
+            (void)sparseCount;
             gScore_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(score));
         }
         gWorkspace_.SetGlobalBuffer(reinterpret_cast<__gm__ ElementS*>(workspace));
@@ -247,7 +255,7 @@ public:
             auto ubTrunk = resource.ubBuf.template GetBufferByByte<float>(0);
             MsaIndexScoreTopk topk;
             topk.Run(tiling_, gScore_, gTopkIdx_, gTopkVal_, gActualSeqQlen_, gActualSeqKlen_,
-                     tiling_->returnChoice == MSA_RETURN_INDICES_VALUES, ubTrunk);
+                     tiling_->returnChoice == MSA_RETURN_INDICES_VALUES, ubTrunk, sparseCount_);
 #endif
         }
         if constexpr (IS_BLOCK16) {
@@ -275,7 +283,7 @@ public:
                         reinterpret_cast<GM_ADDR>(const_cast<__gm__ float*>(gTopkVal_.GetPhyAddr())) :
                         nullptr,
                     tiling_->totalQ, runtimeScoreStride_, AscendC::GetBlockNum(),
-                    tiling_->returnChoice == MSA_RETURN_INDICES_VALUES, meta);
+                    tiling_->returnChoice == MSA_RETURN_INDICES_VALUES, meta, sparseCount_);
 #endif
             }
         }
@@ -623,8 +631,8 @@ private:
                     }
                 }
             } else if constexpr (FP8_SCORE_PIPE) {
-                // 两页合成一次 MMAD：标量 / Fixpipe / 跨核握手按组付一次。页在 GM 上不连续，
-                // 仍按页搬进同一块 L1 的相邻 N。顺序布局尾块继续逐页（可能要 K scratch）。
+                // 四页或两页合成一次 MMAD。页在 GM 上不连续，按页搬进同一块 L1 的相邻 N。
+                // 顺序布局尾块继续逐页（可能要 K scratch）。
                 if (!MsaIsSeqKeyLayout(tiling_->keyLayout) && task.sBlkBegin < task.sBlkEnd) {
                     for (uint32_t blk = task.sBlkBegin; blk < task.sBlkEnd;) {
                         const uint32_t nPages = Fp8PageGroup(task, blk);
@@ -709,15 +717,20 @@ private:
         }
         const uint32_t room = MSA_BLOCKS_PER_STILE - (blk % MSA_BLOCKS_PER_STILE);
         const uint32_t remain = task.sBlkEnd - blk;
-        if (room < 2U || remain < 2U) {
-            return 1U;
-        }
         uint32_t m0 = 0U;
         uint32_t m1 = 0U;
         MsaC2UbGroupSplit(task.mActual, 1U, m0, m1);
         const uint32_t rows = m0 > m1 ? m0 : m1;
-        const uint64_t bytes = static_cast<uint64_t>(rows) * 2U * MSA_BLOCK_SIZE * sizeof(half);
-        return bytes <= MSA_A5_S_PING_BYTES ? 2U : 1U;
+        for (uint32_t pages = 4U; pages >= 2U; pages >>= 1U) {
+            if (pages > room || pages > remain) {
+                continue;
+            }
+            const uint64_t bytes = static_cast<uint64_t>(rows) * pages * MSA_BLOCK_SIZE * sizeof(half);
+            if (bytes <= MSA_A5_S_PING_BYTES) {
+                return pages;
+            }
+        }
+        return 1U;
     }
 
     __aicore__ inline bool KeyBlockNeedsScratch(const MsaTask& task, uint32_t blk) const
@@ -2510,6 +2523,7 @@ private:
     AscendC::GlobalTensor<int32_t> gStartLoc_;
     AscendC::GlobalTensor<float> gScore_;
     AscendC::GlobalTensor<int32_t> gTopkIdx_;
+    GM_ADDR sparseCount_ = nullptr;
     AscendC::GlobalTensor<float> gTopkVal_;
     AscendC::GlobalTensor<ElementS> gWorkspace_;
     uint32_t runtimeScoreStride_ = 0U;

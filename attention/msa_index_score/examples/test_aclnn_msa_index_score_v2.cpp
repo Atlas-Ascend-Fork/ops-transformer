@@ -37,19 +37,24 @@
 #include "aclnnop/aclnn_msa_index_score_v2.h"
 #include "securec.h"
 
-extern "C" aclnnStatus aclnnInnerMsaIndexScoreGetWorkspaceSize(
-    const aclTensor*, const aclTensor*, const aclTensor*, const aclTensor*, const aclTensor*, const aclTensor*,
-    const aclTensor*, const aclTensor*, const aclTensor*, char*, int64_t, int64_t, int64_t, char*, int64_t, int64_t,
-    int64_t, int64_t, const aclTensor*, const aclTensor*, const aclTensor*, uint64_t*, aclOpExecutor**);
+extern "C" aclnnStatus aclnnInnerMsaIndexScoreGetWorkspaceSize(const aclTensor*, const aclTensor*, const aclTensor*,
+                                                               const aclTensor*, const aclTensor*, const aclTensor*,
+                                                               const aclTensor*, const aclTensor*, const aclTensor*,
+                                                               char*, int64_t, int64_t, int64_t, char*, int64_t,
+                                                               int64_t, int64_t, int64_t, const aclTensor*,
+                                                               const aclTensor*, const aclTensor*, const aclTensor*,
+                                                               uint64_t*, aclOpExecutor**);
 extern "C" aclnnStatus aclnnInnerMsaIndexScore(void*, uint64_t, aclOpExecutor*, aclrtStream);
 static aclnnStatus MsaWorkspace(const aclTensor* q, const aclTensor* k, const aclTensor* bt, const aclTensor* ks,
                                 const aclTensor* mask, const aclTensor* qlen, const aclTensor* klen,
                                 const aclTensor* start, const aclTensor* qs, char* lk, int64_t sm, int64_t ib,
                                 int64_t lb, char* lq, int64_t pool, int64_t mode, int64_t cf, const aclTensor* score,
-                                const aclTensor* indices, const aclTensor* values, uint64_t* ws, aclOpExecutor** exec)
+                                const aclTensor* indices, const aclTensor* values, const aclTensor* counts,
+                                uint64_t* ws, aclOpExecutor** exec)
 {
     return aclnnMsaIndexScoreV2GetWorkspaceSize(q, k, start, bt, qs, ks, mask, qlen, klen, lk, sm, ib, lb, lq, pool,
-                                                mode, 128, cf, mode == 0 ? score : nullptr, indices, values, ws, exec);
+                                                mode, 128, cf, mode == 0 ? score : nullptr, indices, values, counts, ws,
+                                                exec);
 }
 
 namespace {
@@ -1134,11 +1139,15 @@ bool RunCase(const TestCase& tc, aclrtStream stream, bool isAscend950)
     void* valueDev = nullptr;
     aclTensor* valueT =
         (tc.returnScore == 2) ? buf.Create(valueInit, {1, totalQ, kBlock16TopK}, ACL_FLOAT, &valueDev) : nullptr;
+    void* countDev = nullptr;
+    aclTensor* countT =
+        topkOut ? buf.Create(std::vector<int32_t>(static_cast<size_t>(totalQ), 0), {1, totalQ}, ACL_INT32, &countDev) :
+                  nullptr;
 
     if (queryT == nullptr || keyT == nullptr || actualSeqQlenT == nullptr || actualSeqKlenT == nullptr ||
         startLocT == nullptr || (!topkOut && scoreT == nullptr) || (topkOut && indexT == nullptr) ||
-        (tc.returnScore == 2 && valueT == nullptr) || (isPa && blockTableT == nullptr) ||
-        (tc.sparseMode == kSparseModeRightDown && attenMaskT == nullptr)) {
+        (tc.returnScore == 2 && valueT == nullptr) || (topkOut && countT == nullptr) ||
+        (isPa && blockTableT == nullptr) || (tc.sparseMode == kSparseModeRightDown && attenMaskT == nullptr)) {
         (void)printf("  [%s] create tensor failed -> FAIL\n", tc.name.c_str());
         return false;
     }
@@ -1161,7 +1170,7 @@ bool RunCase(const TestCase& tc, aclrtStream stream, bool isAscend950)
     int ret =
         MsaWorkspace(queryT, keyT, blockTableT, scaleT, attenMaskT, actualSeqQlenT, actualSeqKlenT, startLocT, nullptr,
                      layoutKeyBuf, tc.sparseMode, tc.initBlocks, tc.localBlocks, layoutQueryBuf, blockLen,
-                     tc.returnScore, tc.compressFactor, scoreT, indexT, valueT, &workspaceSize, &executor);
+                     tc.returnScore, tc.compressFactor, scoreT, indexT, valueT, countT, &workspaceSize, &executor);
     if (ret != ACL_SUCCESS) {
         (void)printf("  [%s] GetWorkspaceSize failed, ERROR %d -> FAIL\n", tc.name.c_str(), ret);
         const char* err = aclGetRecentErrMsg();

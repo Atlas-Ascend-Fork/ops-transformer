@@ -367,9 +367,10 @@ std::vector<at::Tensor> msa_index_score_impl(
         // ACLNN_CMD binds every argument as a non-const lvalue reference.
         c10::optional<at::Tensor> noIndices;
         c10::optional<at::Tensor> noValues;
+        c10::optional<at::Tensor> noCount;
         ACLNN_CMD(aclnnMsaIndexScore, queryArg, keyArg, start_loc, block_table, queryScaleArg, keyScaleArg, atten_mask,
                   device_qlen, device_klen, layoutKeyStr, sparse_mode, init_blocks, local_blocks, return_choice, topk,
-                  compress_factor, score, noIndices, noValues);
+                  compress_factor, score, noIndices, noValues, noCount);
         if (host_lengths) {
             c10_npu::getCurrentNPUStream(query.device().index()).synchronize();
         }
@@ -380,6 +381,7 @@ std::vector<at::Tensor> msa_index_score_impl(
     const int64_t num_q_heads = query.size(1);
     at::Tensor indices = at::empty({num_q_heads, total_q, topk}, query.options().dtype(at::kInt));
     at::Tensor values = at::empty({0}, query.options().dtype(at::kFloat));
+    at::Tensor count = at::empty({num_q_heads, total_q}, query.options().dtype(at::kInt));
     if (return_choice == 2) {
         values = at::empty({num_q_heads, total_q, topk}, query.options().dtype(at::kFloat));
     }
@@ -390,14 +392,14 @@ std::vector<at::Tensor> msa_index_score_impl(
     }
     ACLNN_CMD(aclnnMsaIndexScore, queryArg, keyArg, start_loc, block_table, queryScaleArg, keyScaleArg, atten_mask,
               device_qlen, device_klen, layoutKeyStr, sparse_mode, init_blocks, local_blocks, return_choice, topk,
-              compress_factor, noScore, indices, valuesArg);
+              compress_factor, noScore, indices, valuesArg, count);
     if (host_lengths) {
         c10_npu::getCurrentNPUStream(query.device().index()).synchronize();
     }
     if (return_choice == 1) {
-        return {indices};
+        return {indices, count};
     }
-    return {indices, values};
+    return {indices, values, count};
 }
 
 at::Tensor msa_index_score(const at::Tensor& query, const at::Tensor& key, const at::Tensor& start_loc,

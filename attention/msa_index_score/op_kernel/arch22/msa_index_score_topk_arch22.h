@@ -37,9 +37,13 @@ public:
                                const AscendC::GlobalTensor<float>& score, AscendC::GlobalTensor<int32_t>& indices,
                                AscendC::GlobalTensor<float>& values, const AscendC::GlobalTensor<int32_t>& qlen,
                                const AscendC::GlobalTensor<int32_t>& klen, bool writeValues,
-                               const AscendC::LocalTensor<float>& ubTrunk)
+                               const AscendC::LocalTensor<float>& ubTrunk, GM_ADDR sparseCount = nullptr)
     {
         ubTrunk_ = ubTrunk;
+        hasCount_ = sparseCount != nullptr;
+        if (hasCount_) {
+            gCount_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sparseCount));
+        }
         if (tiling->totalQ == 0 || tiling->numQHeads == 0 || tiling->topk == 0) {
             return;
         }
@@ -545,6 +549,7 @@ private:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         }
+        WriteCount(outBase / k, k);
         return true;
     }
 
@@ -665,6 +670,7 @@ private:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
         }
+        WriteCount(outBase / k, limit);
         return true;
     }
 
@@ -743,6 +749,28 @@ private:
         }
     }
 
+    __aicore__ inline void WriteCount(uint64_t row, uint32_t count)
+    {
+        if (!hasCount_) {
+            return;
+        }
+        // 快路径刚用向量读过 ubTrunk_ 开头。标量覆盖同一地址前要等向量结束，否则是 UB 上的 WAR。
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID2);
+        auto slot = ubTrunk_.ReinterpretCast<int32_t>();
+        slot.SetValue(0, static_cast<int32_t>(count));
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID2);
+        AscendC::DataCopyExtParams params;
+        params.blockCount = 1;
+        params.blockLen = static_cast<uint32_t>(sizeof(int32_t));
+        params.srcStride = 0;
+        params.dstStride = 0;
+        AscendC::DataCopyPad(gCount_[row], slot, params);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID2);
+    }
+
     __aicore__ inline void WriteOutputs(AscendC::GlobalTensor<int32_t>& indices, AscendC::GlobalTensor<float>& values,
                                         uint64_t outBase, uint32_t k, uint32_t tailStart, bool writeValues)
     {
@@ -765,6 +793,14 @@ private:
                 dstValue.SetValue(j, value);
             }
         }
+        // DataCopyPad 的 UB 源须 32B 对齐。topk 不是 8 的倍数且同时写 values 时，
+        // 紧跟在分数后的 int32 会落在 16B 边界，950 上报 MTE 地址不对齐。
+        const uint32_t countElems = valueOff + (writeValues ? k : 0U);
+        const uint32_t countOff = MsaAlignUpPow2(countElems, MSA_FP32_PER_BLOCK);
+        auto countSlot = ubTrunk_[countOff].ReinterpretCast<int32_t>();
+        if (hasCount_) {
+            countSlot.SetValue(0, static_cast<int32_t>(nsel_));
+        }
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         if (copyOut) {
@@ -783,6 +819,14 @@ private:
                 params.blockLen = k * static_cast<uint32_t>(sizeof(float));
                 AscendC::DataCopyPad(values[outBase], dstValue, params);
             }
+        }
+        if (hasCount_) {
+            AscendC::DataCopyExtParams countParams;
+            countParams.blockCount = 1;
+            countParams.blockLen = static_cast<uint32_t>(sizeof(int32_t));
+            countParams.srcStride = 0;
+            countParams.dstStride = 0;
+            AscendC::DataCopyPad(gCount_[outBase / k], countSlot, countParams);
         }
         if constexpr (NATIVE_A8C8) {
             // The next row can reuse this buffer through Scalar, Vector or MTE2.
@@ -849,6 +893,8 @@ private:
     uint32_t worst_ = 0;
     bool lensReady_ = false;
     bool rowMetaReady_ = false;
+    bool hasCount_ = false;
+    AscendC::GlobalTensor<int32_t> gCount_;
 };
 
 } // namespace MsaIndexScoreNs

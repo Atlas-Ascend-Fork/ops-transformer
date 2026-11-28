@@ -287,10 +287,11 @@ TEST_F(MsaIndexScoreProto, MsaIndexScore_inferdtype)
         ge::DataType outputDtype = ge::DT_FLOAT;
         auto context_holder =
             gert::InferDataTypeContextFaker()
-                .NodeIoNum(9, 3)
+                .NodeIoNum(9, 4)
                 .NodeOutputTd(0, ge::FORMAT_ND, ge::FORMAT_ND)
                 .NodeOutputTd(1, ge::FORMAT_ND, ge::FORMAT_ND)
                 .NodeOutputTd(2, ge::FORMAT_ND, ge::FORMAT_ND)
+                .NodeOutputTd(3, ge::FORMAT_ND, ge::FORMAT_ND)
                 .InputDataTypes({&queryDtype, &keyDtype, &i32Dtype, &i32Dtype, &f32Dtype, &f32Dtype, &maskDtype,
                                  &i32Dtype, &i32Dtype})
                 .NodeAttrs({{"layout_key", Ops::Transformer::AnyValue::CreateFrom<std::string>("BBND")},
@@ -304,6 +305,7 @@ TEST_F(MsaIndexScoreProto, MsaIndexScore_inferdtype)
         EXPECT_EQ(context->GetOutputDataType(0), outputDtype);
         EXPECT_EQ(context->GetOutputDataType(1), i32Dtype);
         EXPECT_EQ(context->GetOutputDataType(2), f32Dtype);
+        EXPECT_EQ(context->GetOutputDataType(3), i32Dtype);
     }
 }
 
@@ -333,10 +335,12 @@ TEST_F(MsaIndexScoreProto, MsaIndexScore_infershape_optional_outputs)
             {{{}, {}}, scoreType, ge::FORMAT_ND},
             {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
         };
         const std::vector<int64_t> empty = {0};
         const std::vector<int64_t> score = {heads, 32, stride};
         const std::vector<int64_t> selected = {heads, 32, topk};
+        const std::vector<int64_t> counts = {heads, 32};
         for (const int64_t mode : {0, 1, 2}) {
             SCOPED_TRACE(testing::Message() << "pool=" << pool << " return_choice=" << mode);
             const std::vector<gert::InfershapeContextPara::OpAttr> attrs = {
@@ -352,12 +356,18 @@ TEST_F(MsaIndexScoreProto, MsaIndexScore_infershape_optional_outputs)
             };
             gert::InfershapeContextPara full("MsaIndexScore", inputs, outputs, attrs);
             ExecuteTestCase(full, ge::GRAPH_SUCCESS,
-                            {mode == 0 ? score : empty, mode == 0 ? empty : selected, mode == 2 ? selected : empty});
+                            {mode == 0 ? score : empty, mode == 0 ? empty : selected, mode == 2 ? selected : empty,
+                             mode == 0 ? empty : counts});
 
+            if (mode == 1) {
+                gert::InfershapeContextPara compact("MsaIndexScore", inputs, {outputs[1], outputs[3]}, attrs,
+                                                    inputInstances, {0, 1, 0, 1});
+                ExecuteTestCase(compact, ge::GRAPH_SUCCESS, {selected, counts});
+            }
             if (mode == 2) {
-                gert::InfershapeContextPara compact("MsaIndexScore", inputs, {outputs[1], outputs[2]}, attrs,
-                                                    inputInstances, {0, 1, 1});
-                ExecuteTestCase(compact, ge::GRAPH_SUCCESS, {selected, selected});
+                gert::InfershapeContextPara compact("MsaIndexScore", inputs, {outputs[1], outputs[2], outputs[3]},
+                                                    attrs, inputInstances, {0, 1, 1, 1});
+                ExecuteTestCase(compact, ge::GRAPH_SUCCESS, {selected, selected, counts});
             }
         }
     }

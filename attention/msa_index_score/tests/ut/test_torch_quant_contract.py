@@ -174,14 +174,18 @@ def test_sparse_public_api_preserves_master_topk_arguments(modules):
     captured = []
     module._op_module = types.SimpleNamespace(
         msa_index_score_sparse=lambda *args: captured.append(args)
-        or ("indices", "values")
+        or ("indices", "values", "count")
     )
     try:
         args = inputs(dtype=torch.bfloat16)
-        assert module.msa_index_score(**args, return_choice=1, topk=32) == "indices"
+        assert module.msa_index_score(**args, return_choice=1, topk=32) == (
+            "indices",
+            "count",
+        )
         assert module.msa_index_score(**args, return_choice=2, topk=32) == (
             "indices",
             "values",
+            "count",
         )
         assert captured[-1][2] is args["start_loc"]
         assert captured[-1][-3:] == (2, 32, 1)

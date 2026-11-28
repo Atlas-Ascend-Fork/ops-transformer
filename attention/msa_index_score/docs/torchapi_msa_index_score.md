@@ -213,6 +213,7 @@ cann_ops_transformer.msa_index_score(
 | score（`return_choice=0`） | float32 | `[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]` |
 | sparse_indices（`return_choice=1`或`2`） | int32 | `[N1, T1, topk]` |
 | sparse_values（`return_choice=2`） | float32 | `[N1, T1, topk]` |
+| sparse_count（`return_choice=1`或`2`） | int32 | `[N1, T1]` |
 
 ## 约束说明
 
@@ -220,7 +221,7 @@ cann_ops_transformer.msa_index_score(
 
 - query固定TND，逻辑块长128。BSND / BNSD的$S2$是定长槽，`actual_seq_klen[b+1] - actual_seq_klen[b]`不超过$S2$，且不传`block_table`。
 - `q_len` / `kv_len`允许为0。空KV的score为`-inf`。
-- `return_choice`默认0，返回score。为1时返回`sparse_indices`，为2时返回`(sparse_indices, sparse_values)`。`topk`默认16，范围1到128。`pool_block_size=128`时支持输出TopK。Ascend 950PR&950DT系列产品支持fp16、bf16、fp8与MXFP4；Atlas A2/A3系列产品只支持fp16和bf16。
+- `return_choice`默认0，返回score。为1时返回`(sparse_indices, sparse_count)`，为2时返回`(sparse_indices, sparse_values, sparse_count)`。`sparse_count`是该行大于等于0的块号个数。`topk`默认16，范围1到128。`pool_block_size=128`时支持输出TopK。Ascend 950PR&950DT系列产品支持fp16、bf16、fp8与MXFP4；Atlas A2/A3系列产品只支持fp16和bf16。
 
 ## 确定性计算
 

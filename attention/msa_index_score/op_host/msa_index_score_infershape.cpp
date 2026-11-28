@@ -95,6 +95,7 @@ static ge::graphStatus InferShapeMsaIndexScore(gert::InferShapeContext* context)
     auto* scoreShape = indicesOnly ? nullptr : context->GetOutputShape(RuntimeIndex(context, SCORE));
     auto* indicesShape = context->GetOutputShape(indicesOnly ? 0 : RuntimeIndex(context, INDICES));
     auto* valuesShape = indicesOnly ? nullptr : context->GetOutputShape(RuntimeIndex(context, VALUES));
+    auto* countShape = indicesOnly ? nullptr : context->GetOutputShape(RuntimeIndex(context, COUNT));
     const int64_t* topkPtr = (attrs != nullptr) ? attrs->GetInt(MSA_ATTR_TOPK) : nullptr;
     const int64_t topk = topkPtr == nullptr ? MSA_TOPK_DEFAULT : *topkPtr;
     const bool topkOut = returnChoice != MSA_RETURN_SCORE;
@@ -301,6 +302,7 @@ static ge::graphStatus InferShapeMsaIndexScore(gert::InferShapeContext* context)
     SetShape(scoreShape, !topkOut, scoreHeads, totalQ, scoreStride);
     SetShape(indicesShape, topkOut, scoreHeads, totalQ, topk);
     SetShape(valuesShape, returnChoice == MSA_RETURN_INDICES_VALUES, scoreHeads, totalQ, topk);
+    SetShape2(countShape, topkOut, scoreHeads, totalQ);
 
     OP_LOGI(context->GetNodeName(), "MsaIndexScore InferShape end.");
     return ge::GRAPH_SUCCESS;
@@ -327,6 +329,10 @@ static ge::graphStatus InferDataTypeMsaIndexScore(gert::InferDataTypeContext* co
     context->SetOutputDataType(RuntimeIndex(context, SCORE), scoreType);
     context->SetOutputDataType(RuntimeIndex(context, INDICES), ge::DT_INT32);
     context->SetOutputDataType(RuntimeIndex(context, VALUES), ge::DT_FLOAT);
+    const size_t countIndex = RuntimeIndex(context, COUNT);
+    if (countIndex != ABSENT) {
+        context->SetOutputDataType(countIndex, ge::DT_INT32);
+    }
     return ge::GRAPH_SUCCESS;
 }
 

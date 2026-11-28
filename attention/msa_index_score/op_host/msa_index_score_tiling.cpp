@@ -257,7 +257,7 @@ struct MsaIrOutput {
 inline bool HasCompactTopkOutputs(const gert::TilingContext* context, uint32_t returnChoice)
 {
     const auto* node = context->GetComputeNodeInfo();
-    const size_t topkOutputs = returnChoice == MSA_RETURN_INDICES_VALUES ? 2U : 1U;
+    const size_t topkOutputs = returnChoice == MSA_RETURN_INDICES_VALUES ? 3U : 2U;
     return returnChoice != MSA_RETURN_SCORE && node != nullptr && node->GetOutputsNum() == topkOutputs &&
            node->GetIrOutputsNum() <= topkOutputs;
 }
@@ -268,9 +268,22 @@ inline MsaIrOutput IrOutputAt(gert::TilingContext* context, size_t irIndex, uint
     size_t runtime = MsaIndexScoreOutput::RuntimeIndex(context, irIndex);
     // GE compile-time tiling can omit disabled outputs and renumber the remaining IR slots.
     if (HasCompactTopkOutputs(context, returnChoice)) {
-        const bool enabled = irIndex == MsaIndexScoreOutput::INDICES ||
-                             (irIndex == MsaIndexScoreOutput::VALUES && returnChoice == MSA_RETURN_INDICES_VALUES);
-        runtime = enabled ? irIndex - MsaIndexScoreOutput::INDICES : MsaIndexScoreOutput::ABSENT;
+        runtime = MsaIndexScoreOutput::ABSENT;
+        if (returnChoice == MSA_RETURN_INDICES) {
+            if (irIndex == MsaIndexScoreOutput::INDICES) {
+                runtime = 0U;
+            } else if (irIndex == MsaIndexScoreOutput::COUNT) {
+                runtime = 1U;
+            }
+        } else if (returnChoice == MSA_RETURN_INDICES_VALUES) {
+            if (irIndex == MsaIndexScoreOutput::INDICES) {
+                runtime = 0U;
+            } else if (irIndex == MsaIndexScoreOutput::VALUES) {
+                runtime = 1U;
+            } else if (irIndex == MsaIndexScoreOutput::COUNT) {
+                runtime = 2U;
+            }
+        }
     }
     if (runtime == MsaIndexScoreOutput::ABSENT) {
         return out;
@@ -1221,16 +1234,19 @@ ge::graphStatus ParseAndCheck(gert::TilingContext* context, MsaIndexScoreInfo& i
     const MsaIrOutput scoreOutIr = IrOutputAt(context, MsaIndexScoreOutput::SCORE, info.returnChoice);
     const MsaIrOutput indicesOutIr = IrOutputAt(context, MsaIndexScoreOutput::INDICES, info.returnChoice);
     const MsaIrOutput valuesOutIr = IrOutputAt(context, MsaIndexScoreOutput::VALUES, info.returnChoice);
+    const MsaIrOutput countOutIr = IrOutputAt(context, MsaIndexScoreOutput::COUNT, info.returnChoice);
     const gert::StorageShape* scoreShape = scoreOutIr.shape;
     const gert::StorageShape* indicesShape = indicesOutIr.shape;
     const gert::StorageShape* valuesShape = valuesOutIr.shape;
+    const gert::StorageShape* countShape = countOutIr.shape;
     const bool hasScore = MsaIndexScoreOutput::IsPresent(scoreShape);
     const bool hasIndices = MsaIndexScoreOutput::IsPresent(indicesShape);
     const bool hasValues = MsaIndexScoreOutput::IsPresent(valuesShape);
+    const bool hasCount = MsaIndexScoreOutput::IsPresent(countShape);
     if (info.returnChoice == MSA_RETURN_SCORE) {
         OP_CHECK_IF(!hasScore, OP_LOGE(context, "outputs do not match return_choice=%u.", info.returnChoice),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(hasIndices || hasValues,
+        OP_CHECK_IF(hasIndices || hasValues || hasCount,
                     OP_LOGE(context, "outputs do not match return_choice=%u.", info.returnChoice),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(logicalBlock16 && (scoreOutIr.desc == nullptr || scoreOutIr.desc->GetDataType() != ge::DT_FLOAT16),
@@ -1266,7 +1282,7 @@ ge::graphStatus ParseAndCheck(gert::TilingContext* context, MsaIndexScoreInfo& i
         OP_CHECK_IF(!logicalBlock16 && scoreOutIr.desc->GetDataType() != ge::DT_FLOAT,
                     OP_LOGE(context, "fp16 score is reserved and not supported."), return ge::GRAPH_FAILED);
     } else {
-        const bool outputsOk = !hasScore && hasIndices &&
+        const bool outputsOk = !hasScore && hasIndices && hasCount &&
                                ((info.returnChoice == MSA_RETURN_INDICES && !hasValues) ||
                                 (info.returnChoice == MSA_RETURN_INDICES_VALUES && hasValues));
         if (!outputsOk) {
@@ -1310,6 +1326,15 @@ ge::graphStatus ParseAndCheck(gert::TilingContext* context, MsaIndexScoreInfo& i
                                          "reserved and not supported."),
                         return ge::GRAPH_FAILED);
         }
+        const gert::Shape& countOut = countShape->GetStorageShape();
+        const auto* countDesc = countOutIr.desc;
+        OP_CHECK_NULL_WITH_CONTEXT(context, countDesc);
+        const bool countOk = countDesc->GetDataType() == ge::DT_INT32 && countOut.GetDimNum() == 2U &&
+                             static_cast<uint32_t>(countOut.GetDim(MSA_DIM_0)) == outputHeads &&
+                             static_cast<uint32_t>(countOut.GetDim(MSA_DIM_1)) == info.totalQ;
+        OP_CHECK_IF(!countOk,
+                    OP_LOGE(context, "sparse_count must be [N1, T1] int32, got rank=%zu.", countOut.GetDimNum()),
+                    return ge::GRAPH_FAILED);
         info.maxBlocksPerBatch = DeriveAlignedMaxBlocks(context, info);
     }
     // 块长 16：TND 16、BSND/BNSD，以及 BBND/BNBD 页长 16，仅 Ascend 950。

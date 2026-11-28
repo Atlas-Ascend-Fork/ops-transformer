@@ -24,8 +24,8 @@ extern aclnnStatus aclnnInnerMsaIndexScoreGetWorkspaceSize(
     const aclTensor* actualSeqQlenOptional, const aclTensor* actualSeqKlenOptional, char* layoutKeyOptional,
     int64_t sparseMode, int64_t initBlocks, int64_t localBlocks, char* layoutQueryOptional, int64_t poolBlockSize,
     int64_t returnChoice, int64_t topk, int64_t compressFactor, const aclTensor* scoreOptional,
-    const aclTensor* sparseIndicesOptional, const aclTensor* sparseValuesOptional, uint64_t* workspaceSize,
-    aclOpExecutor** executor);
+    const aclTensor* sparseIndicesOptional, const aclTensor* sparseValuesOptional, const aclTensor* sparseCountOptional,
+    uint64_t* workspaceSize, aclOpExecutor** executor);
 
 extern aclnnStatus aclnnInnerMsaIndexScore(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                            const aclrtStream stream);
@@ -40,7 +40,7 @@ ACLNN_API aclnnStatus aclnnMsaIndexScoreV2GetWorkspaceSize(
     const aclTensor* actualSeqQlenOptional, const aclTensor* actualSeqKlenOptional, char* layoutKeyOptional,
     int64_t sparseMode, int64_t initBlocks, int64_t localBlocks, char* layoutQueryOptional, int64_t poolBlockSize,
     int64_t returnChoice, int64_t topk, int64_t compressFactor, const aclTensor* score, const aclTensor* sparseIndices,
-    const aclTensor* sparseValues, uint64_t* workspaceSize, aclOpExecutor** executor)
+    const aclTensor* sparseValues, const aclTensor* sparseCount, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     // Score is optional only when V2 returns fused TopK outputs.
     if (returnChoice == 0 && score == nullptr) {
@@ -55,7 +55,7 @@ ACLNN_API aclnnStatus aclnnMsaIndexScoreV2GetWorkspaceSize(
         query, key, startLoc, blockTableOptional, queryScaleOptional, keyScaleOptional, attenMaskOptional,
         actualSeqQlenOptional, actualSeqKlenOptional, layoutKeyOptional, sparseMode, initBlocks, localBlocks,
         layoutQuery, poolBlockSizeNorm, returnChoice, topk, compressFactor, score, sparseIndices, sparseValues,
-        workspaceSize, executor);
+        sparseCount, workspaceSize, executor);
     return ret;
 }
 

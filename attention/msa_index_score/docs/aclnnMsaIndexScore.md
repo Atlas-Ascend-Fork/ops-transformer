@@ -47,7 +47,13 @@
     sparse\_indices[h,t,j]=\begin{cases}I_j&j<m\\-1&j\ge m\end{cases},\quad sparse\_values[h,t,j]=\begin{cases}score[h,t,I_j]&j<m\\-\infty&j\ge m\end{cases}
     $$
 
-    `returnChoice=1`时不写`sparseValues`。`validBlocks=0`时各槽为$-1$和$-\infty$。
+    `returnChoice`为1或2时，同时写出该行有效块数。它等于`sparse_indices`这一行中大于等于0的个数，也就是$m$。`validBlocks=0`时为0。
+
+    $$
+    sparse\_count[h,t]=\#\{j\mid sparse\_indices[h,t,j]\ge 0\}
+    $$
+
+    `returnChoice=1`时不写`sparseValues`，仍写`sparseCount`。`returnChoice=0`时只写`score`，`sparseCount`传`nullptr`。`validBlocks=0`时各槽为$-1$和$-\infty$。
 
 - **主要计算过程**：
 
@@ -55,7 +61,7 @@
     2. 按`sparse_mode`叠加$atten\_mask$：`sparse_mode=0`不做因果截断，`sparse_mode=3`按rightDownCausal屏蔽不可见位置。
     3. 在每个长度为$block\_size$的sparse block上做Maxpool，得到逐block的重要性分数。
     4. 用`start_loc`、`init_blocks`、`local_blocks`生成$local\_mask$，对强制保留的block写入高分，得到输出`score`。
-    5. `returnChoice`为1或2时继续做TopK。入选按分数从高到低，分数相同则列号更小者优先。写出时前缀列号从小到大，尾块列号放在该行有效结果的最后。尾块是有效列数按1024对齐后的余数。不足k的索引为-1。`pool_block_size=128`时支持输出TopK：Ascend 950PR&950DT系列产品支持fp16、bf16、fp8与MXFP4；Atlas A2/A3系列产品只支持fp16和bf16。
+    5. `returnChoice`为1或2时继续做TopK。入选按分数从高到低，分数相同则列号更小者优先。写出时前缀列号从小到大，尾块列号放在该行有效结果的最后。尾块是有效列数按1024对齐后的余数。不足k的索引为-1。同一轮写出`sparseCount`，值为该行非`-1`块号的个数。`pool_block_size=128`时支持输出TopK：Ascend 950PR&950DT系列产品支持fp16、bf16、fp8与MXFP4；Atlas A2/A3系列产品只支持fp16和bf16。
 
 - **参数介绍**：
 
@@ -88,6 +94,7 @@ aclnnStatus aclnnMsaIndexScoreGetWorkspaceSize(
     const aclTensor *scoreOptional,
     const aclTensor *sparseIndicesOptional,
     const aclTensor *sparseValuesOptional,
+    const aclTensor *sparseCountOptional,
     uint64_t        *workspaceSize,
     aclOpExecutor  **executor);
 aclnnStatus aclnnMsaIndexScore(
@@ -252,10 +259,37 @@ aclnnStatus aclnnMsaIndexScore(
       <td>score</td>
       <td>输出</td>
       <td>公式中的score。</td>
-      <td>逐block的重要性分数；末维为对齐后的逻辑block数。</td>
+      <td>逐block的重要性分数；末维为对齐后的逻辑block数。仅returnChoice=0时写入，为1或2时传nullptr。</td>
       <td>FLOAT</td>
       <td>ND</td>
       <td>3（[N1, T1, RoundUp(maxBlockNumPerSeq, 16)]）</td>
+    </tr>
+    <tr>
+      <td>sparseIndices</td>
+      <td>输出</td>
+      <td>TopK选中的逻辑block列号。</td>
+      <td>returnChoice为1或2时必选，禁止传入nullptr。returnChoice=0时传nullptr。不足k为-1。</td>
+      <td>INT32</td>
+      <td>ND</td>
+      <td>3（[N1, T1, topk]）</td>
+    </tr>
+    <tr>
+      <td>sparseValues</td>
+      <td>输出</td>
+      <td>与sparseIndices同序的块分数。</td>
+      <td>仅returnChoice=2时写入，禁止传入nullptr。returnChoice为0或1时传nullptr。不足k为-inf。</td>
+      <td>FLOAT</td>
+      <td>ND</td>
+      <td>3（[N1, T1, topk]）</td>
+    </tr>
+    <tr>
+      <td>sparseCount</td>
+      <td>输出</td>
+      <td>每行有效块个数。</td>
+      <td>returnChoice为1或2时必选，禁止传入nullptr。returnChoice=0时传nullptr。sparseCount[h,t]等于sparseIndices[h,t,:]中大于等于0的个数，即该行实际入选的KV块数。可直接作为后续generic_block_sparse_attention的sparseBlockCount。</td>
+      <td>INT32</td>
+      <td>ND</td>
+      <td>2（[N1, T1]）</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
@@ -409,7 +443,7 @@ aclnnStatus aclnnMsaIndexScore(
     - 为3时，代表rightDownCausal模式，`attenMaskOptional`必须传入，shape为$[2048, 2048]$，取值为1代表该位不参与计算，为0代表该位参与计算。
 - `initBlocks`、`localBlocks`必须$\ge 0$且不超过逻辑block数（PA为`blockTableOptional`第二维；TND为score末维对齐宽度）。两者均为0时跳过$local\_mask$。
 - `q_len` / `kv_len`允许为0。空KV的score填$-inf$。
-- `returnChoice`默认0，与原先只输出score一致。为1时只写`sparseIndicesOptional`，为2时同时写`sparseValuesOptional`。`topk`默认16，范围是1到128，只在非0时生效。
+- `returnChoice`默认0，与原先只输出score一致。为1时写`sparseIndicesOptional`和`sparseCountOptional`，为2时再写`sparseValuesOptional`。`topk`默认16，范围是1到128，只在非0时生效。
 - `pool_block_size=128`时支持输出TopK。Ascend 950PR&950DT系列产品支持fp16、bf16、fp8与MXFP4。Atlas A2/A3系列产品只支持fp16和bf16，score经GM workspace。索引是逻辑block列号，从0开始。不足k为-1。尾块列号位于该行其它入选列号之后。
 - 确定性计算：相同输入下输出确定。
 
@@ -1159,7 +1193,7 @@ bool RunCase(const TestCase& tc, aclrtStream stream)
     void* workspaceAddr = nullptr;
     int ret = aclnnMsaIndexScoreGetWorkspaceSize(queryT, keyT, startLocT, blockTableT, nullptr, scaleT, attenMaskT,
                                                  actualSeqQlenT, actualSeqKlenT, layoutKeyBuf, tc.sparseMode,
-                                                 kInitBlocks, kLocalBlocks, 0, 16, 1, scoreT, nullptr, nullptr,
+                                                 kInitBlocks, kLocalBlocks, 0, 16, 1, scoreT, nullptr, nullptr, nullptr,
                                                  &workspaceSize, &executor);
     if (ret != ACL_SUCCESS) {
         (void)printf("  [%s] GetWorkspaceSize failed, ERROR %d -> FAIL\n", tc.name.c_str(), ret);
