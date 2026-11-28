@@ -1853,7 +1853,9 @@ static void CalcRailUbSegments(const EngramFetchTilingData& tilingData, RailTili
 {
     ctx.rowBlockBytes = static_cast<uint32_t>(tilingData.batchRowsResp * ctx.rowStrideResp);
     ctx.statusBytes = static_cast<uint32_t>(
-        AlignTo(2 * Mc2Kernel::STATE_OFFSET + static_cast<int64_t>(tilingData.aivNum) * 8, Mc2Kernel::UB_ALIGN));
+        AlignTo(Mc2Kernel::RAIL_STATUS_SLOT_NUM * Mc2Kernel::STATE_OFFSET +
+                    static_cast<int64_t>(tilingData.aivNum) * Mc2Kernel::RAIL_STATUS_PER_CORE_BYTES,
+                Mc2Kernel::UB_ALIGN));
     uint32_t coreArrayBytes = static_cast<uint32_t>(
         AlignTo(AlignTo(static_cast<int64_t>(tilingData.aivNum) * sizeof(int32_t), Mc2Kernel::UB_ALIGN) +
                     static_cast<int64_t>(tilingData.aivNum) * sizeof(int32_t),
@@ -1880,7 +1882,8 @@ static ge::graphStatus CheckRailUbBudget(const gert::TilingContext* context, con
     uint32_t sDests = ctx.topo.ranksPerSupernode + ctx.topo.supernodeCnt;
     uint32_t sCnt = (tilingData.sendCoreCnt > 0U) ? tilingData.sendCoreCnt : 1U;
     uint32_t sFlowBytes = static_cast<uint32_t>(
-        AlignTo(static_cast<int64_t>(5) * ((sDests + sCnt - 1U) / sCnt) * sizeof(int32_t), Mc2Kernel::UB_ALIGN));
+        AlignTo(static_cast<int64_t>(Mc2Kernel::SFLOW_SEG_NUM) * ((sDests + sCnt - 1U) / sCnt) * sizeof(int32_t),
+                Mc2Kernel::UB_ALIGN));
     const uint64_t creditSpinBytes = Mc2Kernel::UB_ALIGN;  // 信用读自旋格
     const uint64_t cursorBytes = 2U * Mc2Kernel::UB_ALIGN; // 游标
     uint64_t permanentUb = Mc2Kernel::HCOMM_INIT_SIZE + ctx.statusBytes + ctx.tempBytes + ctx.indicesBytes +

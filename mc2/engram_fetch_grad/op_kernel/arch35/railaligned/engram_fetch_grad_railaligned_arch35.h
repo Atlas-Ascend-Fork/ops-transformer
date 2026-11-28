@@ -446,9 +446,10 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::InitStatusTempBuffers(c
     indicesBufElems_ = IDX_BUF_BYTES / sizeof(int32_t);
     indicesBufBytes_ = IDX_BUF_BYTES;
 
-    uint32_t statusBytes = static_cast<uint32_t>(
-        (2 * STATE_OFFSET + static_cast<uint64_t>(t->aivNum) * 2 * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN *
-        UB_ALIGN);
+    uint32_t statusBytes =
+        static_cast<uint32_t>((RAIL_STATUS_SLOT_NUM * STATE_OFFSET +
+                               static_cast<uint64_t>(t->aivNum) * RAIL_STATUS_PER_CORE_BYTES + UB_ALIGN - 1) /
+                              UB_ALIGN * UB_ALIGN);
     tpipe_->InitBuffer(statusBuf_, statusBytes);
     statusBufBytes_ = statusBytes;
     uint32_t coreArrayBytes = static_cast<uint32_t>(
@@ -490,7 +491,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::InitUnsortFlowBuffers(c
     {
         uint32_t sDests = topo_.ranksPerSupernode + topo_.supernodeCnt;
         uint32_t sCnt = (t->sendCoreCnt > 0U) ? t->sendCoreCnt : 1U;
-        uint32_t sFlowInts = 5U * ((sDests + sCnt - 1U) / sCnt);
+        uint32_t sFlowInts = SFLOW_SEG_NUM * ((sDests + sCnt - 1U) / sCnt);
         tpipe_->InitBuffer(sFlowBuf_,
                            (sFlowInts * static_cast<uint32_t>(sizeof(int32_t)) + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN);
     }
@@ -1268,11 +1269,11 @@ __aicore__ inline uint32_t EngramFetchGradRailAlignedArch35::InitSflowTaskTable(
 {
     // 本核目的状态（UB 紧凑布局，5 段各 myDests 项）：flowW | flowR | taskIdx(−1 无任务，
     // 0 是合法任务号不可作哨兵) | ownOff | fin
-    for (uint32_t i = 0; i < 5U * myDests; ++i) {
+    for (uint32_t i = 0; i < SFLOW_SEG_NUM * myDests; ++i) {
         sflow.SetValue(static_cast<int32_t>(i), 0);
     }
     for (uint32_t k = 0; k < myDests; ++k) {
-        sflow.SetValue(static_cast<int32_t>(2 * myDests + k), -1); // 无任务显式 −1
+        sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + k), -1); // 无任务显式 −1
     }
     uint32_t unfinished = 0;
     for (uint32_t k = 0; k < myDests; ++k) {
@@ -1280,7 +1281,7 @@ __aicore__ inline uint32_t EngramFetchGradRailAlignedArch35::InitSflowTaskTable(
         bool selfSlot = (dIdx < ranksPerSupernode && dIdx == me_.local) ||
                         (dIdx >= ranksPerSupernode && dIdx == ranksPerSupernode + me_.supernode);
         if (selfSlot) {
-            sflow.SetValue(static_cast<int32_t>(4 * myDests + k), 1); // 自槽空置——永不完结工作
+            sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k), 1); // 自槽空置——永不完结工作
         } else {
             unfinished++;
         }
@@ -1301,7 +1302,7 @@ __aicore__ inline uint32_t EngramFetchGradRailAlignedArch35::InitSflowTaskTable(
         // 防御：dst 非法时 dIdx 越界，越界写会腐蚀 sflow 邻域 UB 且行静默丢失
         if (dIdx < dests && dIdx % sCoreCnt == sCoreIdx) {
             // 同区第二任务 = 条带碎片化：覆盖注册会静默丢行（本地桶例外，O 组直读全表）
-            int32_t regSlot = static_cast<int32_t>(2 * myDests + dIdx / sCoreCnt);
+            int32_t regSlot = static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + dIdx / sCoreCnt);
             int32_t prev = sflow.GetValue(regSlot);
             ascendc_assert(prev < 0 || static_cast<BucketKind>(kindV) == BUCKET_LOCAL,
                            "rail fragmented tasks on dest %u: task=%d shadows prev=%d, rows lost", dIdx, taskIdx, prev);
@@ -1331,7 +1332,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::SendOwnBucketRows(
     LocalTensor<int32_t>& head, uint32_t k, uint32_t myDests, uint32_t sCoreIdx, int64_t taskStart, int64_t taskRows,
     bool& sent)
 {
-    int64_t off = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
+    int64_t off = sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k));
     if (off < taskRows) {
         uint32_t rows = static_cast<uint32_t>((taskRows - off > batchRows_) ? batchRows_ : taskRows - off);
         if (!sender.HasCredit(rows)) {
@@ -1362,7 +1363,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::SendOwnBucketRows(
             SyncEv<AscendC::HardEvent::MTE3_S>();
             sender.SendBatch(handle, area, stage, rows);
             sender.DrainChannel(handle); // 通道取走 stage 后才可复写（下一目的拼块）
-            sflow.SetValue(static_cast<int32_t>(3 * myDests + k), static_cast<int32_t>(off + rows));
+            sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k), static_cast<int32_t>(off + rows));
             sent = true;
         }
     }
@@ -1402,7 +1403,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::FinishDestIfDone(RowSen
                                                                           uint32_t ranksPerSupernode, uint32_t fCoreCnt,
                                                                           uint32_t& unfinished, bool& progressed)
 {
-    bool ownDone = (taskIdx < 0) || (sflow.GetValue(static_cast<int32_t>(3 * myDests + k)) >= taskRows);
+    bool ownDone = (taskIdx < 0) || (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k)) >= taskRows);
     if (ownDone) {
         bool relayDone = true;
         if (dIdx < ranksPerSupernode && fCoreCnt > 0U) {
@@ -1415,7 +1416,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::FinishDestIfDone(RowSen
         }
         if (relayDone) {
             sender.Finish(handle, area); // Drain + done = writeCnt+1（本地单写，无聚合）
-            sflow.SetValue(static_cast<int32_t>(4 * myDests + k), 1);
+            sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k), 1);
             unfinished--;
             progressed = true;
         }
@@ -1436,11 +1437,12 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::ProcessDestOnce(uint32_
     DestAddrOf(dIdx, handle, area);
     RowSender sender;
     sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), win_, aivId_,
-                myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
-                sflow.GetValue(static_cast<int32_t>(myDests + k)));
+                myGlobalRank_,
+                static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k))),
+                sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k)));
     bool sent = false;
     // ── ① 自有桶行（任务表读取必须 Rd32 bypass：裸标量读命中本核 L1 陈旧行）──
-    int32_t taskIdx = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
+    int32_t taskIdx = sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + k));
     int64_t taskStart = 0;
     int64_t taskRows = 0;
     if (taskIdx >= 0) {
@@ -1460,8 +1462,8 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::ProcessDestOnce(uint32_
             DrainRelayRows(sender, handle, area, idx, staged, drained, sent);
         }
     }
-    sflow.SetValue(static_cast<int32_t>(k), static_cast<int32_t>(sender.WriteCnt()));
-    sflow.SetValue(static_cast<int32_t>(myDests + k),
+    sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k), static_cast<int32_t>(sender.WriteCnt()));
+    sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k),
                    sender.SyncCredit()); // 收编在途信用读（防跨目的互踩 scratch）
     if (sent) {
         progressed = true;
@@ -1482,7 +1484,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::HandleIdleRound(LocalTe
                    aivId_, unfinished,
                    static_cast<int32_t>(Rd32(segCountGM_ + static_cast<uint64_t>(aivId_) * RAIL_I32_BYTES)));
     for (uint32_t k = 0; k < myDests; ++k) {
-        if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+        if (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k)) != 0) {
             continue;
         }
         uint32_t dIdx = sCoreIdx + k * sCoreCnt;
@@ -1491,10 +1493,11 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::HandleIdleRound(LocalTe
         DestAddrOf(dIdx, handle, area);
         RowSender sender;
         sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), win_, aivId_,
-                    myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
-                    sflow.GetValue(static_cast<int32_t>(myDests + k)));
+                    myGlobalRank_,
+                    static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k))),
+                    sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k)));
         sender.WaitCredit(handle, area);
-        sflow.SetValue(static_cast<int32_t>(myDests + k), sender.RemoteReadCnt());
+        sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k), sender.RemoteReadCnt());
     }
 }
 
@@ -1526,7 +1529,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::SendLoopS()
     while (unfinished > 0U) {
         bool progressed = false;
         for (uint32_t k = 0; k < myDests; ++k) {
-            if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+            if (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k)) != 0) {
                 continue;
             }
             ProcessDestOnce(k, sflow, block, head, myDests, sCoreIdx, sCoreCnt, ranksPerSupernode, fCoreCnt, unfinished,
@@ -1547,7 +1550,7 @@ __aicore__ inline void EngramFetchGradRailAlignedArch35::SendLoopS()
     // DFX：Σ属主流 writeCnt → flagScratch[1]
     int32_t sentSum = 0;
     for (uint32_t k = 0; k < myDests; ++k) {
-        sentSum += sflow.GetValue(static_cast<int32_t>(k));
+        sentSum += sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k));
     }
     AscendC::AtomicAdd(reinterpret_cast<__gm__ int32_t*>(flagScratchGM_ + RAIL_FLAG_SENT_SLOT), sentSum);
     Wr32(segCountGM_ + aivId_ * RAIL_I32_BYTES, 0); // S 核不收集（Σ 交叉校验覆盖全核）

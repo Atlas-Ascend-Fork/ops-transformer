@@ -183,8 +183,8 @@ private:
                                            LocalTensor<int32_t>& head, uint32_t myDests, uint32_t sCoreIdx,
                                            uint32_t sCoreCnt, uint32_t ranksPerSupernode, uint32_t fCoreCnt,
                                            uint32_t& unfinished, bool& progressed);
-    __aicore__ inline void SnapshotDestState(uint32_t dIdxS, int32_t tS, bool ownDoneS, uint32_t ranksPerSupernode,
-                                             uint32_t fCoreCnt, uint32_t sCoreIdx);
+    __aicore__ inline void SnapshotDestState(uint32_t destIdxSnap, int32_t taskIdxSnap, bool ownDoneSnap,
+                                             uint32_t ranksPerSupernode, uint32_t fCoreCnt, uint32_t sCoreIdx);
     __aicore__ inline void SnapshotStalledDest(LocalTensor<int32_t>& sflow, uint32_t myDests, uint32_t sCoreIdx,
                                                uint32_t sCoreCnt, uint32_t ranksPerSupernode, uint32_t fCoreCnt);
     template <bool IsReq>
@@ -491,8 +491,10 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::InitPipeAndBuffers()
     tpipe_->InitBuffer(indicesBuf_, IDX_BUF_BYTES); // 排序产物分片扫描
     indicesBufElems_ = IDX_BUF_BYTES / sizeof(int32_t);
 
-    uint32_t statusBytes = static_cast<uint32_t>(
-        (2 * STATE_OFFSET + static_cast<uint64_t>(tAiv) * 2 * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN);
+    uint32_t statusBytes =
+        static_cast<uint32_t>((RAIL_STATUS_SLOT_NUM * STATE_OFFSET +
+                               static_cast<uint64_t>(tAiv) * RAIL_STATUS_PER_CORE_BYTES + UB_ALIGN - 1) /
+                              UB_ALIGN * UB_ALIGN);
     tpipe_->InitBuffer(statusBuf_, statusBytes);
     uint32_t coreArrayBytes =
         static_cast<uint32_t>((((static_cast<uint64_t>(tAiv) * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN) +
@@ -514,7 +516,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::InitPipeAndBuffers()
     // S 核每目的流状态：5 × 名下目的数 int32（flowW/flowR/taskIdx/ownOff/fin）
     {
         uint32_t sDests = topo_.ranksPerSupernode + topo_.supernodeCnt;
-        uint32_t sFlowInts = 5U * ((sDests + tSend - 1U) / tSend);
+        uint32_t sFlowInts = SFLOW_SEG_NUM * ((sDests + tSend - 1U) / tSend);
         tpipe_->InitBuffer(sFlowBuf_,
                            (sFlowInts * static_cast<uint32_t>(sizeof(int32_t)) + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN);
     }
@@ -1264,11 +1266,11 @@ __aicore__ inline uint32_t EngramFetchTrainRailAlignedArch35::InitSflowTaskTable
 {
     // 本核目的状态（UB 紧凑布局；下标 k ∈ [0, myDests)）：
     // [0,my)=flowW [my,2my)=flowR [2my,3my)=taskIdx(−1 无任务——0 是合法任务号) [3my,4my)=ownOff [4my,5my)=fin
-    for (uint32_t i = 0; i < 5U * myDests; ++i) {
+    for (uint32_t i = 0; i < SFLOW_SEG_NUM * myDests; ++i) {
         sflow.SetValue(static_cast<int32_t>(i), 0);
     }
     for (uint32_t k = 0; k < myDests; ++k) {
-        sflow.SetValue(static_cast<int32_t>(2 * myDests + k), -1);
+        sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + k), -1);
     }
     uint32_t unfinished = 0;
     for (uint32_t k = 0; k < myDests; ++k) {
@@ -1276,7 +1278,7 @@ __aicore__ inline uint32_t EngramFetchTrainRailAlignedArch35::InitSflowTaskTable
         bool selfSlot = (dIdx < ranksPerSupernode && dIdx == me_.local) ||
                         (dIdx >= ranksPerSupernode && dIdx == ranksPerSupernode + me_.supernode);
         if (selfSlot) {
-            sflow.SetValue(static_cast<int32_t>(4 * myDests + k), 1); // 自槽空置——永不完结工作
+            sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k), 1); // 自槽空置——永不完结工作
         } else {
             unfinished++;
         }
@@ -1296,7 +1298,7 @@ __aicore__ inline uint32_t EngramFetchTrainRailAlignedArch35::InitSflowTaskTable
         // 防御：dst 非法（上游产出垃圾）时 dIdx 越界——守卫内嵌（越界写会腐蚀 sflow 邻域 UB）
         if (dIdx < dests && dIdx % sCoreCnt == sCoreIdx) {
             // 同区第二任务 = 条带碎片化：按目的覆盖注册会静默丢行（本地桶例外——O 直读全表）
-            int32_t regSlot = static_cast<int32_t>(2 * myDests + dIdx / sCoreCnt);
+            int32_t regSlot = static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + dIdx / sCoreCnt);
             int32_t prev = sflow.GetValue(regSlot);
             ascendc_assert(prev < 0 || static_cast<BucketKind>(kindV) == BUCKET_LOCAL,
                            "rail fwd fragmented tasks on dest %u: task=%d shadows prev=%d, rows lost", dIdx, taskIdx,
@@ -1353,8 +1355,8 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendOwnReqRows(RowSend
         int32_t rowDst = entry / numEntriesPerRank_;
         head.SetValue(static_cast<int32_t>(j * rowStrideWords), rowDst);
         head.SetValue(static_cast<int32_t>(j * rowStrideWords + 1), static_cast<int32_t>(myGlobalRank_));
-        head.SetValue(static_cast<int32_t>(j * rowStrideWords + 2), entry);
-        head.SetValue(static_cast<int32_t>(j * rowStrideWords + 3), 0);
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords + RAIL_ROWHEAD_ENTRY_IDX), entry);
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords + RAIL_ROWHEAD_RSVD_IDX), 0);
     }
     SyncEv<AscendC::HardEvent::S_MTE3>();
     SendStagedBlock(sender, handle, area, block, rows, rowStride, sCoreIdx);
@@ -1409,7 +1411,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendOwnBucketRows(
     LocalTensor<int32_t>& head, uint32_t k, uint32_t myDests, uint32_t sCoreIdx, int64_t taskStart, int64_t taskRows,
     bool& sent)
 {
-    int64_t off = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
+    int64_t off = sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k));
     if (off < taskRows) {
         const uint32_t batchRows = IsReq ? batchRowsReq_ : batchRowsResp_;
         uint32_t rows = static_cast<uint32_t>((taskRows - off > batchRows) ? batchRows : taskRows - off);
@@ -1421,7 +1423,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendOwnBucketRows(
             } else {
                 SendOwnRespRows<HasSf>(sender, handle, area, block, head, rows, taskStart, off, sCoreIdx);
             }
-            sflow.SetValue(static_cast<int32_t>(3 * myDests + k), static_cast<int32_t>(off + rows));
+            sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k), static_cast<int32_t>(off + rows));
             sent = true;
         }
     }
@@ -1463,7 +1465,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::FinishDestIfDone(
     uint32_t k, uint32_t myDests, uint32_t dIdx, uint32_t ranksPerSupernode, uint32_t fCoreCnt, uint32_t& unfinished,
     bool& progressed)
 {
-    bool ownDone = (taskIdx < 0) || (sflow.GetValue(static_cast<int32_t>(3 * myDests + k)) >= taskRows);
+    bool ownDone = (taskIdx < 0) || (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k)) >= taskRows);
     if (ownDone) {
         bool relayDone = true;
         if (dIdx < ranksPerSupernode && fCoreCnt > 0U) {
@@ -1476,7 +1478,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::FinishDestIfDone(
         }
         if (relayDone) {
             sender.Finish(handle, area); // Drain + done = writeCnt+1（本地单写）
-            sflow.SetValue(static_cast<int32_t>(4 * myDests + k), 1);
+            sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k), 1);
             unfinished--;
             progressed = true;
         }
@@ -1499,10 +1501,11 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ProcessDestOnce(uint32
     const WinLayout& wfam = IsReq ? winReq_ : winResp_;
     RowSender sender;
     sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), wfam, aivId_,
-                myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
-                sflow.GetValue(static_cast<int32_t>(myDests + k)), dfxGM_);
+                myGlobalRank_,
+                static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k))),
+                sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k)), dfxGM_);
     bool sent = false;
-    int32_t taskIdx = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
+    int32_t taskIdx = sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + k));
     int64_t taskStart = 0;
     int64_t taskRows = 0;
     if (taskIdx >= 0) {
@@ -1522,8 +1525,8 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ProcessDestOnce(uint32
             DrainRelayRows<IsReq>(sender, handle, area, idx, staged, drained, sent);
         }
     }
-    sflow.SetValue(static_cast<int32_t>(k), static_cast<int32_t>(sender.WriteCnt()));
-    sflow.SetValue(static_cast<int32_t>(myDests + k), sender.SyncCredit());
+    sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k), static_cast<int32_t>(sender.WriteCnt()));
+    sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k), sender.SyncCredit());
     if (sent) {
         progressed = true;
     }
@@ -1532,45 +1535,49 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ProcessDestOnce(uint32
 }
 
 // 首个未完结 dest 的失败现场快照打包（trap 时随 RecvLoop 超时打出）
-__aicore__ inline void EngramFetchTrainRailAlignedArch35::SnapshotDestState(uint32_t dIdxS, int32_t tS, bool ownDoneS,
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SnapshotDestState(uint32_t destIdxSnap, int32_t taskIdxSnap,
+                                                                            bool ownDoneSnap,
                                                                             uint32_t ranksPerSupernode,
                                                                             uint32_t fCoreCnt, uint32_t sCoreIdx)
 {
-    bool allEofS = true;
-    bool drainEqS = true;
-    int32_t badFS = -1;
-    int32_t badStagedS = 0;
-    int32_t badDrainedS = 0;
-    int32_t badEofS = 1;
-    if (dIdxS < ranksPerSupernode && fCoreCnt > 0U) {
+    bool allEofSnap = true;
+    bool drainEqSnap = true;
+    int32_t firstBadCoreSnap = -1;
+    int32_t badStagedSnap = 0;
+    int32_t badDrainedSnap = 0;
+    int32_t badEofSnap = 1;
+    if (destIdxSnap < ranksPerSupernode && fCoreCnt > 0U) {
         for (uint32_t f = 0; f < fCoreCnt; ++f) {
-            const uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdxS;
+            const uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + destIdxSnap;
             const int32_t stV = Rd32(relayStagedGM_ + idx * RAIL_I32_BYTES);
             const int32_t drV = Rd32(relayDrainedGM_ + idx * RAIL_I32_BYTES);
             const int32_t eofV = Rd32(relayEofGM_ + idx * RAIL_I32_BYTES);
             if (eofV == 0) {
-                allEofS = false;
+                allEofSnap = false;
             }
             if (drV != stV) {
-                drainEqS = false;
+                drainEqSnap = false;
             }
-            if ((eofV == 0 || drV != stV) && badFS < 0) {
-                badFS = static_cast<int32_t>(f);
-                badStagedS = stV;
-                badDrainedS = drV;
-                badEofS = eofV;
+            if ((eofV == 0 || drV != stV) && firstBadCoreSnap < 0) {
+                firstBadCoreSnap = static_cast<int32_t>(f);
+                badStagedSnap = stV;
+                badDrainedSnap = drV;
+                badEofSnap = eofV;
             }
         }
     }
-    const int32_t tPack = (tS < 0) ? 0 : ((tS > DFX_TASK_IDX_CLAMP) ? DFX_TASK_IDX_CLAMP : tS);
-    const int32_t w0S = static_cast<int32_t>(dIdxS) | ((ownDoneS ? 1 : 0) << DFX_W0_OWN_DONE_BIT) |
-                        ((allEofS ? 1 : 0) << DFX_W0_ALL_EOF_BIT) | ((drainEqS ? 1 : 0) << DFX_W0_DRAIN_EQ_BIT) |
-                        ((tPack & DFX_TASK_IDX_MASK) << DFX_W0_TASK_SHIFT) | (1 << DFX_W0_VALID_BIT);
+    const int32_t tPack =
+        (taskIdxSnap < 0) ? 0 : ((taskIdxSnap > DFX_TASK_IDX_CLAMP) ? DFX_TASK_IDX_CLAMP : taskIdxSnap);
+    const int32_t statusWordSnap = static_cast<int32_t>(destIdxSnap) | ((ownDoneSnap ? 1 : 0) << DFX_W0_OWN_DONE_BIT) |
+                                   ((allEofSnap ? 1 : 0) << DFX_W0_ALL_EOF_BIT) |
+                                   ((drainEqSnap ? 1 : 0) << DFX_W0_DRAIN_EQ_BIT) |
+                                   ((tPack & DFX_TASK_IDX_MASK) << DFX_W0_TASK_SHIFT) | (1 << DFX_W0_VALID_BIT);
     const uint64_t snapBase = static_cast<uint64_t>(DFX_SCALAR_SLOTS + sCoreIdx * DFX_SNAP_WORDS) * RAIL_I32_BYTES;
-    Wr32(flagScratchGM_ + snapBase, w0S);
-    Wr32(flagScratchGM_ + snapBase + RAIL_I32_BYTES, badFS);
-    Wr32(flagScratchGM_ + snapBase + 2 * RAIL_I32_BYTES, badStagedS);
-    Wr32(flagScratchGM_ + snapBase + 3 * RAIL_I32_BYTES, badDrainedS | (badEofS << DFX_W3_BAD_EOF_SHIFT));
+    Wr32(flagScratchGM_ + snapBase, statusWordSnap);
+    Wr32(flagScratchGM_ + snapBase + DFX_SNAP_FIRST_BAD_WORD * RAIL_I32_BYTES, firstBadCoreSnap);
+    Wr32(flagScratchGM_ + snapBase + DFX_SNAP_STAGED_WORD * RAIL_I32_BYTES, badStagedSnap);
+    Wr32(flagScratchGM_ + snapBase + DFX_SNAP_DRAIN_WORD * RAIL_I32_BYTES,
+         badDrainedSnap | (badEofSnap << DFX_W3_BAD_EOF_SHIFT));
 }
 
 // 完结判定失败现场快照（每 DFX_SNAP_REFRESH_IDLE_ROUNDS 轮 idle 刷新一次）：本核首个未完结 dest
@@ -1581,17 +1588,19 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SnapshotStalledDest(Lo
                                                                               uint32_t fCoreCnt)
 {
     for (uint32_t k = 0; k < myDests; ++k) {
-        if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+        if (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k)) != 0) {
             continue; // 已完结——找首个未完结 dest
         }
-        const uint32_t dIdxS = sCoreIdx + k * sCoreCnt;
-        const int32_t tS = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
-        const int64_t offS = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
-        int64_t cntS = -1;
-        if (tS >= 0) {
-            cntS = Rd32(taskTableGM_ + static_cast<uint64_t>(tS) * RAIL_TASK_ENT_BYTES + RAIL_TASK_LEN_OFF);
+        const uint32_t destIdxSnap = sCoreIdx + k * sCoreCnt;
+        const int32_t taskIdxSnap = sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_TASK_IDX * myDests + k));
+        const int64_t ownOffsetSnap = sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_OWN_OFF * myDests + k));
+        int64_t taskRowsSnap = -1;
+        if (taskIdxSnap >= 0) {
+            taskRowsSnap =
+                Rd32(taskTableGM_ + static_cast<uint64_t>(taskIdxSnap) * RAIL_TASK_ENT_BYTES + RAIL_TASK_LEN_OFF);
         }
-        SnapshotDestState(dIdxS, tS, (tS < 0) || (offS >= cntS), ranksPerSupernode, fCoreCnt, sCoreIdx);
+        SnapshotDestState(destIdxSnap, taskIdxSnap, (taskIdxSnap < 0) || (ownOffsetSnap >= taskRowsSnap),
+                          ranksPerSupernode, fCoreCnt, sCoreIdx);
         break;
     }
 }
@@ -1603,7 +1612,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::WaitDestCredits(LocalT
 {
     const WinLayout& wfam = IsReq ? winReq_ : winResp_;
     for (uint32_t k = 0; k < myDests; ++k) {
-        if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+        if (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k)) != 0) {
             continue;
         }
         const uint32_t dIdx = sCoreIdx + k * sCoreCnt;
@@ -1612,10 +1621,11 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::WaitDestCredits(LocalT
         DestAddrOf<IsReq>(dIdx, handle, area);
         RowSender sender;
         sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), wfam, aivId_,
-                    myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
-                    sflow.GetValue(static_cast<int32_t>(myDests + k)), dfxGM_);
+                    myGlobalRank_,
+                    static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_W * myDests + k))),
+                    sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k)), dfxGM_);
         sender.WaitCredit(handle, area);
-        sflow.SetValue(static_cast<int32_t>(myDests + k), sender.RemoteReadCnt());
+        sflow.SetValue(static_cast<int32_t>(SFLOW_SEG_FLOW_R * myDests + k), sender.RemoteReadCnt());
     }
 }
 
@@ -1672,7 +1682,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendLoopS()
     while (unfinished > 0U) {
         bool progressed = false;
         for (uint32_t k = 0; k < myDests; ++k) {
-            if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+            if (sflow.GetValue(static_cast<int32_t>(SFLOW_SEG_FIN * myDests + k)) != 0) {
                 continue;
             }
             ProcessDestOnce<IsReq, HasSf>(k, sflow, block, head, myDests, sCoreIdx, sCoreCnt, ranksPerSupernode,

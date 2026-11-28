@@ -30,7 +30,6 @@
 #ifndef __aicore__
 #define ENGRAM_FETCH_GRAD_ROUTE_HOST_BUILD 1
 #define ENGRAM_FETCH_GRAD_ROUTE_AICORE
-#include <cstring> // host 垫片侧 NodeWinAt/NodeChannelAt 用 memcpy 读 ctx
 #else
 #define ENGRAM_FETCH_GRAD_ROUTE_AICORE __aicore__
 #endif
@@ -54,18 +53,14 @@ constexpr uint32_t RAIL_CTX_TOTAL_BYTES = RAIL_CTX_CH_OFF + RAIL_NODE_MAX * 8U; 
 // channel 建立在单一 world 通信域上（remoteRank = 全局 rank），建链侧换算落表：
 //   node[p]（p < C）←→ rank = mySn×C + p（直连同伴）；node[p]（p ≥ C）←→ rank = (p−C)×C + myL（轨道对端）
 #ifdef ENGRAM_FETCH_GRAD_ROUTE_HOST_BUILD
-// host 垫片侧（普通地址空间）：route UT / host 侧建链复用；memcpy 读规避 reinterpret_cast
+// host 垫片侧（普通地址空间）：route UT / host 侧建链复用
 ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint64_t NodeWinAt(const uint8_t* ctx, uint32_t p)
 {
-    uint64_t v = 0;
-    std::memcpy(&v, ctx + RAIL_CTX_WIN_OFF + static_cast<uint64_t>(p) * 8U, sizeof(v));
-    return v;
+    return *reinterpret_cast<const uint64_t*>(ctx + RAIL_CTX_WIN_OFF + static_cast<uint64_t>(p) * 8U);
 }
 ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint64_t NodeChannelAt(const uint8_t* ctx, uint32_t p)
 {
-    uint64_t v = 0;
-    std::memcpy(&v, ctx + RAIL_CTX_CH_OFF + static_cast<uint64_t>(p) * 8U, sizeof(v));
-    return v;
+    return *reinterpret_cast<const uint64_t*>(ctx + RAIL_CTX_CH_OFF + static_cast<uint64_t>(p) * 8U);
 }
 #else
 // kernel 侧（__gm__ 空间）：经 __gm__ uint64_t* 视图读
@@ -177,7 +172,12 @@ constexpr uint32_t IDX_BUF_BYTES = 4U * 1024U;    // 排序产物分片扫描
 constexpr uint32_t ENTRY_BATCH_CAP = 1024U;       // GM 清零批容量（int32 个数）
 
 // ── rail 表布局常量（int32 步长与各表项/字段偏移；grad/train 双侧共用）──
-constexpr uint32_t RAIL_I32_BYTES = 4U;         // int32 元素步长字节（Wr32/Rd32 槽步进）
+constexpr uint32_t RAIL_I32_BYTES = 4U;             // int32 元素步长字节（Wr32/Rd32 槽步进）
+constexpr uint32_t RAIL_STATUS_SLOT_NUM = 2U;       // 状态区槽数（clr / done 两轮）
+constexpr uint32_t RAIL_STATUS_PER_CORE_INT32 = 2U; // 每核状态计数个数（int32）
+constexpr uint32_t RAIL_STATUS_PER_CORE_BYTES = RAIL_STATUS_PER_CORE_INT32 * RAIL_I32_BYTES; // 每核 8B
+constexpr uint32_t RAIL_RELAY_CTL_TABLES = 3U;  // relay 控制三表：staged / drained / eof
+constexpr uint32_t SFLOW_SEG_NUM = 5U;          // sflow 每目的段数（flowW/flowR/taskIdx/ownOff/fin）
 constexpr uint32_t RAIL_STRIP_ENT_BYTES = 12U;  // 条带表项 (dst, startRow, rowCount)
 constexpr uint32_t RAIL_STRIP_START_OFF = 4U;   // 条带项 startRow 字段偏移
 constexpr uint32_t RAIL_STRIP_LEN_OFF = 8U;     // 条带项 rowCount 字段偏移
@@ -188,6 +188,8 @@ constexpr uint32_t RAIL_TASK_LEN_OFF = 12U;     // 任务项 rowCount 字段偏�
 constexpr uint32_t RAIL_ROWHEAD_SRC_OFF = 4U;   // 拼行 32B 头 src 字段偏移
 constexpr uint32_t RAIL_ROWHEAD_ENTRY_OFF = 8U; // 拼行 32B 头 entry 字段偏移
 constexpr uint32_t RAIL_ROWHEAD_RSVD_OFF = 12U; // 拼行 32B 头保留字段偏移
+constexpr uint32_t RAIL_ROWHEAD_ENTRY_IDX = RAIL_ROWHEAD_ENTRY_OFF / RAIL_I32_BYTES; // 行头 entry 的 int32 字序
+constexpr uint32_t RAIL_ROWHEAD_RSVD_IDX = RAIL_ROWHEAD_RSVD_OFF / RAIL_I32_BYTES; // 行头保留字段的 int32 字序
 constexpr uint32_t RAIL_COLLECT_ENT_BYTES = 8U; // 收集段条目 (src, entry) 字节
 constexpr uint32_t RAIL_SEND_CNT_STRIDE = 32U;  // sendCounts 每 rank 32B 槽距（写侧布局）
 constexpr uint32_t RAIL_FLAG_AREA_BYTES = 64U;  // flagScratch 头区字节（[0..31]=collectedCount）

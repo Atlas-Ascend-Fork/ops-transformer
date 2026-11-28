@@ -50,9 +50,22 @@ constexpr uint32_t DFX_W0_ALL_EOF_BIT = 6U;
 constexpr uint32_t DFX_W0_DRAIN_EQ_BIT = 7U;
 constexpr uint32_t DFX_W0_TASK_SHIFT = 8U;
 constexpr int32_t DFX_TASK_IDX_CLAMP = 1023; // 任务号 10bit 钳制（饱和值）
+// 快照 4 字槽序：0=状态位域 1=首个未完结核 2=staged 差值 3=drained+eof 差值
+constexpr uint32_t DFX_SNAP_STATUS_WORD = 0U;
+constexpr uint32_t DFX_SNAP_FIRST_BAD_WORD = 1U;
+constexpr uint32_t DFX_SNAP_STAGED_WORD = 2U;
+constexpr uint32_t DFX_SNAP_DRAIN_WORD = 3U;
+constexpr int32_t DFX_W3_LOW_HALF_MASK = 0xFFFF; // 快照 word3 低 16 位：drained 差值
 constexpr uint32_t DFX_TASK_IDX_MASK = 0x3FFU;
 constexpr uint32_t DFX_W0_VALID_BIT = 31U;
 constexpr uint32_t DFX_W3_BAD_EOF_SHIFT = 16U;
+// sflow 每目的 5 段（段长 myDests、段基址 = 段号 × myDests）：
+// 0=已发槽数 1=已读槽数 2=任务号(-1 表示无任务) 3=本任务已推进行数 4=完结标记
+constexpr uint32_t SFLOW_SEG_FLOW_W = 0U;
+constexpr uint32_t SFLOW_SEG_FLOW_R = 1U;
+constexpr uint32_t SFLOW_SEG_TASK_IDX = 2U;
+constexpr uint32_t SFLOW_SEG_OWN_OFF = 3U;
+constexpr uint32_t SFLOW_SEG_FIN = 4U;
 
 // 每核进度码（DFX 上报，用于定位卡在哪个阶段；S/F/O 三组共用同一编码空间）
 constexpr int32_t DFX_PROGRESS_S_BEGIN = 10;     // S 组发送循环开始
@@ -434,7 +447,8 @@ __aicore__ inline void WinDumpRecvTimeout(GM_ADDR area, GM_ADDR dfxSeg, GM_ADDR 
     if (stallSeg != nullptr && stallCores > 0U) {
         uint32_t sampleCoreLimit = (stallCores > DFX_STALL_SAMPLE_MAX) ? DFX_STALL_SAMPLE_MAX : stallCores;
         for (uint32_t c = 0; c < sampleCoreLimit; ++c) {
-            int32_t snapWord0 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + c * DFX_SNAP_WORDS) * 4U);
+            int32_t snapWord0 =
+                ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + DFX_SNAP_STATUS_WORD + c * DFX_SNAP_WORDS) * RAIL_I32_BYTES);
             if (snapWord0 == 0) {
                 continue; // 无快照 = 该核已完结（或从未 idle）
             }
@@ -445,9 +459,12 @@ __aicore__ inline void WinDumpRecvTimeout(GM_ADDR area, GM_ADDR dfxSeg, GM_ADDR 
             if (bad && firstBadCore < 0) {
                 firstBadCore = static_cast<int32_t>(c);
                 badSnapWord0 = snapWord0;
-                badSnapWord1 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 1U + c * DFX_SNAP_WORDS) * 4U);
-                badSnapWord2 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 2U + c * DFX_SNAP_WORDS) * 4U);
-                badSnapWord3 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 3U + c * DFX_SNAP_WORDS) * 4U);
+                badSnapWord1 = ReadCnt(
+                    stallSeg, (DFX_SCALAR_SLOTS + DFX_SNAP_FIRST_BAD_WORD + c * DFX_SNAP_WORDS) * RAIL_I32_BYTES);
+                badSnapWord2 =
+                    ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + DFX_SNAP_STAGED_WORD + c * DFX_SNAP_WORDS) * RAIL_I32_BYTES);
+                badSnapWord3 =
+                    ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + DFX_SNAP_DRAIN_WORD + c * DFX_SNAP_WORDS) * RAIL_I32_BYTES);
             }
         }
     }
@@ -455,8 +472,8 @@ __aicore__ inline void WinDumpRecvTimeout(GM_ADDR area, GM_ADDR dfxSeg, GM_ADDR 
                    "recv timeout: area=%llu, write=%d, read=%u, done=%d, fProg=%d/%d, "
                    "stallCnt=%d, bad=[c=%d w0=%d f=%d st=%d dr=%d eofV=%d]",
                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(area)), writeRows, readRows, done, fProgress0,
-                   fProgress1, stallCnt, firstBadCore, badSnapWord0, badSnapWord1, badSnapWord2, badSnapWord3 & 0xFFFF,
-                   badSnapWord3 >> 16);
+                   fProgress1, stallCnt, firstBadCore, badSnapWord0, badSnapWord1, badSnapWord2,
+                   badSnapWord3 & DFX_W3_LOW_HALF_MASK, badSnapWord3 >> DFX_W3_BAD_EOF_SHIFT);
 }
 
 // ConsumeFn: void(GM_ADDR blockGM, uint32_t rows)，块内行连续、含 32B 头；
