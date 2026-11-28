@@ -30,6 +30,12 @@
 #include "adv_api/hcomm/hcomm.h"
 #endif
 
+#if defined(ASCENDC_OOM) && ASCENDC_OOM == 1
+#ifndef OOM_CHECK_ADDR_RANGE
+#define OOM_CHECK_ADDR_RANGE OOMCheckAddrRange
+#endif
+#endif
+
 namespace NsDistributeBarrierExtend {
 using namespace AscendC;
 using namespace Mc2Barrier;
@@ -86,6 +92,9 @@ public:
         if (tiling->distributeBarrierInfo.isInputElasticInfo) {
             InitElasticInfo(elasticInfo, pipe);
         }
+#if defined(ASCENDC_OOM) && ASCENDC_OOM == 1
+        CheckOomWindowRanges();
+#endif
         InitState();
         if (!isElastic_) {
             begin_ = GetTimeUs();
@@ -108,6 +117,37 @@ public:
     }
 
 private:
+#if defined(ASCENDC_OOM) && ASCENDC_OOM == 1
+    __aicore__ inline void CheckOomPeerWindows(uint32_t phase)
+    {
+        const uint32_t count = phase == 0U ? localSize_ : railSize_;
+        const uint32_t first = WorkerFirst(aivId_ - 1U, count);
+        const uint32_t end = WorkerFirst(aivId_, count);
+        const auto* peers = reinterpret_cast<__gm__ Peer*>(context_ + 1) + (phase == 0U ? 0U : localSize_);
+        const uint64_t windowBytes = Mc2Barrier::WindowBytes(localSize_, railSize_);
+        for (uint32_t i = first; i < end; ++i) {
+            if (!IsActive(i, phase)) {
+                continue;
+            }
+            const auto& peer = peers[i];
+            if (peer.rank != context_->rank) {
+                OOM_CHECK_ADDR_RANGE<uint8_t>(reinterpret_cast<__gm__ uint8_t*>(peer.window), windowBytes);
+            }
+        }
+    }
+
+    __aicore__ inline void CheckOomWindowRanges()
+    {
+        const uint64_t windowBytes = Mc2Barrier::WindowBytes(localSize_, railSize_);
+        OOM_CHECK_ADDR_RANGE<uint8_t>(reinterpret_cast<__gm__ uint8_t*>(context_->window), windowBytes);
+        if (aivId_ == 0U) {
+            return;
+        }
+        CheckOomPeerWindows(0U);
+        CheckOomPeerWindows(1U);
+    }
+#endif
+
     __aicore__ inline void CheckContext(const DistributeBarrierTilingData* tiling)
     {
         const auto& info = tiling->distributeBarrierInfo;

@@ -25,6 +25,8 @@
 namespace Mc2BarrierUt {
 constexpr uint32_t FLAG_BYTES = 32U;
 constexpr uint32_t HCOMM_BUFFER_BYTES = 512U;
+constexpr uint32_t OOM_UT_MAX_CORES = 8U;
+constexpr uint32_t OOM_UT_MAX_RECORDS = 16U;
 
 enum class Transport {
     CTP,
@@ -52,6 +54,17 @@ struct CommState {
     Failure failure = Failure::NONE;
 };
 
+struct OomRangeRecord {
+    uint64_t address = 0;
+    uint64_t bytes = 0;
+    uint32_t core = 0;
+};
+
+struct OomRangeState {
+    OomRangeRecord records[OOM_UT_MAX_CORES][OOM_UT_MAX_RECORDS]{};
+    uint32_t counts[OOM_UT_MAX_CORES]{};
+};
+
 struct Channel {
     Transport protocol;
     uint8_t* source;
@@ -68,11 +81,26 @@ struct Channel {
 };
 
 extern CommState* g_commState;
+extern OomRangeState* g_oomRangeState;
 int32_t Init(Transport protocol, uint32_t bytes);
 int32_t Lock(Transport protocol, uint64_t handle);
 int32_t Unlock(Transport protocol, uint64_t handle);
 int32_t Write(Transport protocol, uint64_t handle, uint8_t* dst, uint8_t* src, uint64_t bytes);
 int32_t Drain(Transport protocol, uint64_t handle);
+
+template <typename T>
+__aicore__ inline void OomCheckAddrRange(const __gm__ T* address, uint64_t bytes)
+{
+    OomRangeState* state = g_oomRangeState;
+    if (state == nullptr) {
+        return;
+    }
+    const uint32_t core = AscendC::GetBlockIdx();
+    const uint32_t index = state->counts[core]++;
+    if (index < OOM_UT_MAX_RECORDS) {
+        state->records[core][index] = {reinterpret_cast<uint64_t>(address), bytes, core};
+    }
+}
 
 #if ASC_DEVKIT_VERSION_NUM >= MC2_BARRIER_HCOMM_MIN_VERSION
 template <Transport protocol>
@@ -132,5 +160,9 @@ inline void InitDistributeBarrierTilingData(uint8_t* tiling, DistributeBarrierTi
 #define GET_TILING_DATA_WITH_STRUCT(DistributeBarrierTilingData, tilingData, tilingArg) \
     DistributeBarrierTilingData tilingData; \
     InitDistributeBarrierTilingData(tilingArg, &tilingData)
+
+#if defined(MC2_BARRIER_OOM_UT) && MC2_BARRIER_OOM_UT == 1
+#define OOM_CHECK_ADDR_RANGE Mc2BarrierUt::OomCheckAddrRange
+#endif
 
 #endif
