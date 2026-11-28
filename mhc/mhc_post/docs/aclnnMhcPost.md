@@ -33,7 +33,7 @@
   x_{l+1} = (H_{l}^{res})^{T} \times x_l + h_{l}^{out} \otimes H_{t}^{post}
   $$
 
-  当hRes默认时（仅Ascend 950支持）：
+  当hRes缺省时（仅Ascend 950支持）：
 
   $$
   x_{l+1} = x_l + h_{l}^{out} \otimes H_{t}^{post}
@@ -111,7 +111,7 @@ aclnnStatus aclnnMhcPost(
     <tr>
       <td>hOut</td>
       <td>输入</td>
-      <td>Atten/MLP层的输出。</td>
+      <td>Attention/MLP层的输出。</td>
       <td>数据类型与x相同。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
@@ -136,7 +136,7 @@ aclnnStatus aclnnMhcPost(
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>[B,S,N,D]、[T,N,D]</td>
-      <td>-</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
@@ -195,11 +195,6 @@ aclnnStatus aclnnMhcPost(
           <tr>
               <td>x、hRes（非空时）、hOut、hPost、out的数据类型或shape不匹配。</td>
           </tr>
-            <tr>
-              <td>ACLNN_ERR_INNER_NULLPTR</td>
-              <td>561103</td>
-              <td>n不等于4；d不在[1, 100000]范围内；d不能被128整除。</td>
-          </tr>
       </tbody>
   </table>
 
@@ -249,6 +244,7 @@ aclnnStatus aclnnMhcPost(
 ## 约束说明
 
 - aclnnMhcPost默认确定性实现。
+- 参数校验通过后，若x、hOut、hPost中任一为空张量，或hRes不为nullptr且为空张量，两段式接口均返回成功，workspaceSize为0，不生成计算任务，且不写入out；调用方需自行跳过输出消费。
 
 <!-- npu="950" id7 -->
 - <term>Ascend 950PR&950DT系列产品</term>：hRes支持传入nullptr，此时退化为直接残差连接。
@@ -259,7 +255,7 @@ aclnnStatus aclnnMhcPost(
   | 规格项   | 规格               | 规格说明                                |
   | :------- | :----------------- | :------------------------------------- |
   | n        | 4                  | 固定为4                              |
-  | d        | 范围1到100000       | 128的倍数                             |
+  | d        | 大于0且小于100000       | 128的倍数                             |
 
 <!-- end id8 -->
 
@@ -360,9 +356,9 @@ int main() {
     // 2. To construct input and output, it is necessary to customize the construction according to the API interface.
     // Example: BSND format (B, S, n, D)
     std::vector<int64_t> xShape = {1, 1024, 4, 5120};   // BSND
-    std::vector<int64_t> hResShape = {1, 1024, 4, 4};   // BSND
+    std::vector<int64_t> hResShape = {1, 1024, 4, 4};   // BSNN
     std::vector<int64_t> hOutShape = {1, 1024, 5120};   // BSD
-    std::vector<int64_t> hPostShape = {1, 1024, 4};     // BSn
+    std::vector<int64_t> hPostShape = {1, 1024, 4};     // BSN
     std::vector<int64_t> outShape = {1, 1024, 4, 5120};  // BSND
 
     void *xDeviceAddr = nullptr;
