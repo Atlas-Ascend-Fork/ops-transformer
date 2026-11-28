@@ -153,9 +153,10 @@ ge::graphStatus ShapeVerify(gert::TilingContext* context, int64_t batchSize, int
     auto gradHResShape = gradHResShapePtr->GetStorageShape();
     // BSND: BSNN (4D: B,S,N,N) 或 BSN! (3D: B,S,N!)
     // TND:  TNN (3D: T,N,N)   或 TN!  (2D: T,N!)
-    // BSNN/TNN: factN = N²; BSN!/TN!: factN = N!
-    int64_t nnDimThreshold = isTND ? 3 : 4;
-    int64_t expectedFactN = (gradHResShape.GetDimNum() >= static_cast<size_t>(nnDimThreshold)) ? factNNsq : factNFact;
+    // 布局形式由 phi fusionSize 决定: F=N²+2N → BSNN/TNN(factN=N²); F=N!+2N → BSN!/TN!(factN=N!)
+    // gradHRes 残差维度须与 fusionSize 自洽: factN = fusionSize - 2*n
+    bool isBSNNForm = (fusionSize == factNNsq + 2 * n);
+    int64_t expectedFactN = isBSNNForm ? factNNsq : factNFact;
     if (isTND) {
         // TND: 3D [T,N,N] (TNN) 或 2D [T,N!] (TN!)
         OP_CHECK_IF(gradHResShape.GetDimNum() != 3 && gradHResShape.GetDimNum() != 2,
@@ -175,6 +176,15 @@ ge::graphStatus ShapeVerify(gert::TilingContext* context, int64_t batchSize, int
                     ("The shape of grad_h_res must be [T, N, N] = [" + std::to_string(totalLength) + ", " +
                      std::to_string(n) + ", " + std::to_string(n) + "]")
                         .c_str()),
+                return ge::GRAPH_FAILED);
+            // 3D(TNN) 要求 phi fusionSize = N² + 2N
+            OP_CHECK_IF(
+                !isBSNNForm,
+                OPS_REPORT_VECTOR_INNER_ERR(
+                    opName,
+                    "ShapeVerify failed, phi fusionSize(%ld) is inconsistent with gradHRes TNN form (3D requires "
+                    "fusionSize=N^2+2*N=%ld), but fusionSize indicates BSN! form (N!+2*N=%ld)",
+                    fusionSize, factNNsq + 2 * n, factNFact + 2 * n),
                 return ge::GRAPH_FAILED);
         } else {
             // TN!: [T, N!]
@@ -210,6 +220,15 @@ ge::graphStatus ShapeVerify(gert::TilingContext* context, int64_t batchSize, int
                              std::to_string(seqLength) + ", " + std::to_string(n) + ", " + std::to_string(n) + "]")
                                 .c_str()),
                         return ge::GRAPH_FAILED);
+            // 4D(BSNN) 要求 phi fusionSize = N² + 2N
+            OP_CHECK_IF(
+                !isBSNNForm,
+                OPS_REPORT_VECTOR_INNER_ERR(
+                    opName,
+                    "ShapeVerify failed, phi fusionSize(%ld) is inconsistent with gradHRes BSNN form (4D requires "
+                    "fusionSize=N^2+2*N=%ld), but fusionSize indicates BSN! form (N!+2*N=%ld)",
+                    fusionSize, factNNsq + 2 * n, factNFact + 2 * n),
+                return ge::GRAPH_FAILED);
         } else {
             // BSN!: [B, S, N!]
             OP_CHECK_IF(
@@ -485,10 +504,8 @@ ge::graphStatus TilingMhcPreBackwardArch22(gert::TilingContext* context)
     // 从 gradHRes 维度判断布局:
     // BSND: 4D=BSNN(B,S,N,N), 3D=BSN!(B,S,N!)
     // TND:  3D=TNN(T,N,N),    2D=TN!(T,N!)
-    auto gradHResShapePtrTiling = context->GetInputShape(GRAD_H_RES_IDX);
-    int64_t bsnnThreshold = isTND ? 3 : 4;
-    int64_t isBSNN =
-        (gradHResShapePtrTiling->GetStorageShape().GetDimNum() >= static_cast<size_t>(bsnnThreshold)) ? 1 : 0;
+    // 布局形式由 phi fusionSize 决定(与 ShapeVerify 一致): F=N²+2N → BSNN(factN=N²); F=N!+2N → BSN!(factN=N!)
+    int64_t isBSNN = (fusionSize == n * n + 2 * n) ? 1 : 0;
 
     int64_t c0 = 256; // must be VL
     int64_t c1 = c / c0;

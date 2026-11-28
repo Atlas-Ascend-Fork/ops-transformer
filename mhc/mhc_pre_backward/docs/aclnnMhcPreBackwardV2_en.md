@@ -87,7 +87,7 @@
       \end{aligned}
       $$
 
-  - Residual connection backward (H_res):
+  - Residual connection backward (H_res, where H\_res\_2 denotes the [B,S,N,N] view of H\_res\_1):
     - Forward formula:
 
       $$
@@ -171,8 +171,8 @@
 
       $$
       \begin{aligned}
-      x\_rs\_grad\_inv &= - \left(\frac{inv\_rms\_grad \cdot {inv\_rms}^3}{N*D}\right) \cdot x\_rs \\
-      x\_rs\_grad &= x\_grad\_mm + x\_rs\_grad\_inv \\
+      x\_grad\_inv &= - \left(\frac{inv\_rms\_grad \cdot {inv\_rms}^3}{N*D}\right) \cdot x \\
+      x\_rs\_grad &= x\_grad\_mm + x\_grad\_inv \\
       x\_grad\_vec1 &= \text{Reshape}(x\_rs\_grad, [B,S,N,D]) \\
       x\_grad &= x\_grad\_vec3 + x\_grad\_vec1
       \end{aligned}

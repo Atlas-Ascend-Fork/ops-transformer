@@ -336,6 +336,14 @@ static bool MhcPreBackwardCheckBSNDShape(const AclnnMhcPreBackwardParams& params
         if (!CheckShapeDims(gradHResShape, gradHResDims, 4, "gradHRes shape must be [B, S, N, N]")) {
             return false;
         }
+        // F 须与 gradHRes 形式自洽: BSNN 形式的残差数为 N², fusionSize(F) = N² + 2N
+        if (fusionSize != numsResidual * numsResidual + 2 * numsResidual) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "phi fusionSize(%lu) is inconsistent with gradHRes BSNN form: "
+                    "expect fusionSize = N^2 + 2*N(%lu)",
+                    fusionSize, numsResidual * numsResidual + 2 * numsResidual);
+            return false;
+        }
     } else if (gradHResShape.GetDimNum() == 3) {
         // [B, S, N!] (BSN! 形式) - 仅 A2 支持, A5 只支持 BSNN
         if (!IsAscend910BPlatform()) {
@@ -344,6 +352,14 @@ static bool MhcPreBackwardCheckBSNDShape(const AclnnMhcPreBackwardParams& params
         }
         const uint64_t gradHResDims[] = {batch, sequence, factN};
         if (!CheckShapeDims(gradHResShape, gradHResDims, 3, "gradHRes shape must be [B, S, N, N] or [B, S, N!]")) {
+            return false;
+        }
+        // F 须与 gradHRes 形式自洽: BSN! 形式的残差数为 N!, fusionSize(F) = N! + 2N
+        if (fusionSize != factN + 2 * numsResidual) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "phi fusionSize(%lu) is inconsistent with gradHRes BSN! form: "
+                    "expect fusionSize = N! + 2*N(%lu); or use BSNN 4D form with fusionSize = N^2 + 2*N(%lu)",
+                    fusionSize, factN + 2 * numsResidual, numsResidual * numsResidual + 2 * numsResidual);
             return false;
         }
     } else {
@@ -411,19 +427,35 @@ static bool MhcPreBackwardCheckTNDShape(const AclnnMhcPreBackwardParams& params,
     uint64_t factN = Factorial(numsResidual); // BSN! 形式的 factN = N!
     auto& gradHResShape = params.gradHRes->GetViewShape();
     if (gradHResShape.GetDimNum() == 3) {
-        // [T, N, N] (BSNN 形式) - 所有平台都支持, factN = N²
+        // [T, N, N] (TNN 形式) - 所有平台都支持, factN = N²
         const uint64_t gradHResDims[] = {t, numsResidual, numsResidual};
         if (!CheckShapeDims(gradHResShape, gradHResDims, 3, "gradHRes shape must be [T, N, N]")) {
             return false;
         }
+        // F 须与 gradHRes 形式自洽: TNN 形式的残差数为 N², fusionSize(F) = N² + 2N
+        if (fusionSize != numsResidual * numsResidual + 2 * numsResidual) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "phi fusionSize(%lu) is inconsistent with gradHRes TNN form: "
+                    "expect fusionSize = N^2 + 2*N(%lu)",
+                    fusionSize, numsResidual * numsResidual + 2 * numsResidual);
+            return false;
+        }
     } else {
-        // [T, N!] (BSN! 形式) - 仅 A2 支持, A5 只支持 BSNN
+        // [T, N!] (TN! 形式) - 仅 A2 支持, A5 只支持 TNN
         if (!IsAscend910BPlatform()) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "gradHRes shape [T, N!] (BSN!) is only supported on A2 platform");
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "gradHRes shape [T, N!] (TN!) is only supported on A2 platform");
             return false;
         }
         const uint64_t gradHResDims[] = {t, factN};
         if (!CheckShapeDims(gradHResShape, gradHResDims, 2, "gradHRes shape must be [T, N, N] or [T, N!]")) {
+            return false;
+        }
+        // F 须与 gradHRes 形式自洽: TN! 形式的残差数为 N!, fusionSize(F) = N! + 2N
+        if (fusionSize != factN + 2 * numsResidual) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                    "phi fusionSize(%lu) is inconsistent with gradHRes TN! form: "
+                    "expect fusionSize = N! + 2*N(%lu); or use TNN 3D form with fusionSize = N^2 + 2*N(%lu)",
+                    fusionSize, factN + 2 * numsResidual, numsResidual * numsResidual + 2 * numsResidual);
             return false;
         }
     }

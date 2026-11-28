@@ -28,15 +28,15 @@
  *  反向计算流程（函数 → 公式编号）:
  *    GetHcScaleAndHcBase()    → 加载 α=[α_pre, α_post, α_res] 和 bias
  *    ComputeGradPre()         → [1] 输出组合梯度: H_pre_grad = Reduce(H_in_grad ⊙ x, -1)
- *                               同时保存 x*grad_y 到 workspace 供 phi_grad 使用
+ *                               同时保存 x_rs*grad_y 到 workspace 供 phi_grad 使用
  *    ComputeGradHHat2()       → [2] Sigmoid门控反向(H_pre):  H_pre_2_grad = H_pre_grad ⊙ s ⊙ (1-s)
  *                               [3] Sigmoid门控反向(H_post): H_post_2_grad = H_post_grad⊙(H_post⊙(1-H_post/2))
  *                               [4] 残差连接反向(H_res):     H_res_2_grad = H_res_grad · α_res
  *                               [5] RMSNorm Fusion反向:      H_mix_grad = H_mix_tmp_grad · inv_rms
  *                                                           inv_rms_grad = sum(H_mix_tmp_grad ⊙ H_mix)
- *                               [8] RMS归一化梯度:           x_rs_grad_inv = -(inv_rms_grad·inv_rms³/(N·D))·x_rs
+ *                               [8] RMS归一化梯度:           x_grad_inv = -(inv_rms_grad·inv_rms³/(N·D))·x
  *    ComputeGradX1()          → [1] x_grad_vec3 = H_in_grad × H_pre
- *                               [8] x_grad_vec1 = Reshape(x_rs_grad_inv + x_rs_grad)
+ *                               [8] x_grad_vec1 = Reshape(x_grad_inv + x_rs_grad)
  *                               [6] x_grad_mm   = (H_mix_grad @ phi) * gamma  (AIC侧ProcessMatmul1)
  *                               最终: x_grad = x_grad_vec3 + x_grad_vec1 + x_grad_mm
  *    ComputeScaleBias()       → [2][3][4] bias_grad = sum(H_2_grad), α_grad = sum(H_2_grad ⊙ H_1)
@@ -460,7 +460,7 @@ __aicore__ inline void MhcPreBackwardKernelArch22<TYPE_X, T, DETERMINISTIC>::Com
     //   5. [公式2][3] Sigmoid 门控反向: s*(1-s) * grad → H_pre_2_grad, H_post_2_grad
     //   6. [公式5] RMSNorm Fusion 反向: H_mix_grad = H_mix_tmp_grad * inv_rms
     //                                   inv_rms_grad = sum(H_mix_tmp_grad ⊙ H_mix)
-    //   7. [公式8] RMS归一化梯度: x_rs_grad_inv = -(inv_rms_grad * inv_rms³ / (N*D))
+    //   7. [公式8] RMS归一化梯度: x_grad_inv = -(inv_rms_grad * inv_rms³ / (N*D))
     //   8. 输出 H_mix_grad 供 AIC 侧 matmul 使用
     // ============================================================================
 
@@ -598,7 +598,7 @@ __aicore__ inline void MhcPreBackwardKernelArch22<TYPE_X, T, DETERMINISTIC>::Com
     PipeBarrier<PIPE_V>();
 
     // --- [公式8] RMS归一化梯度计算 ---
-    // x_rs_grad_inv = -(inv_rms_grad * inv_rms³ / (N*D)) * x_rs
+    // x_grad_inv = -(inv_rms_grad * inv_rms³ / (N*D)) * x
     // 此处先计算 gradRsqrtLocal_ = -(inv_rms_grad * inv_rms³) / (N*D)
     // rsqrtTempLocal_ = inv_rms_grad * inv_rms
     Mul(rsqrtTempLocal_, rsqrtTempLocal_, rsqrtLocal_, tileTaskCount);
@@ -612,7 +612,7 @@ __aicore__ inline void MhcPreBackwardKernelArch22<TYPE_X, T, DETERMINISTIC>::Com
 
     PipeBarrier<PIPE_V>();
     // gradRsqrtLocal_ = -(inv_rms_grad * inv_rms³) / (N*D)
-    // 后续在 ComputeGradX1 中: x_rs_grad_inv = gradRsqrtLocal_ * x_rs (通过 MulAddDst)
+    // 后续在 ComputeGradX1 中: x_grad_inv = gradRsqrtLocal_ * x (通过 MulAddDst)
     Muls(gradRsqrtLocal_, rsqrtTempLocal_, float(-1) / (n_ * c_), tileTaskCount);
 
     // --- [公式5] H_mix_grad = H_mix_tmp_grad * inv_rms ---
@@ -672,7 +672,7 @@ __aicore__ inline void MhcPreBackwardKernelArch22<TYPE_X, T, DETERMINISTIC>::Com
     // ============================================================================
     // 本函数实现最终 x_grad 的组装，对应公式:
     //   [公式1] x_grad_vec3 = H_in_grad × H_pre         (输出组合梯度反向)
-    //   [公式8] x_grad_vec1 = x_rs_grad_inv = -(inv_rms_grad·inv_rms³/(N·D))·x_rs  (RMS归一化梯度)
+    //   [公式8] x_grad_vec1 = x_grad_inv = -(inv_rms_grad·inv_rms³/(N·D))·x  (RMS归一化梯度)
     //   [公式6] x_grad_mm   = (H_mix_grad @ phi) * gamma  (矩阵乘法反向，AIC侧ProcessMatmul1)
     //   最终: x_grad = x_grad_vec3 + x_grad_vec1 + x_grad_mm
     //   注意: gamma_grad 和 grad_x_post 融合在 host 侧或其它路径处理
@@ -738,12 +738,12 @@ __aicore__ inline void MhcPreBackwardKernelArch22<TYPE_X, T, DETERMINISTIC>::Com
         }
 
         PipeBarrier<PIPE_V>();
-        // --- [公式8] x_grad_vec1 = x_rs_grad_inv = -(inv_rms_grad·inv_rms³/(N·D))·x_rs ---
+        // --- [公式8] x_grad_vec1 = x_grad_inv = -(inv_rms_grad·inv_rms³/(N·D))·x ---
         // dRsqrtBrcbLocal_ 已在 Process() 中从 gradRsqrtLocal_ 广播得到
         // dRsqrtBrcbLocal_ = -(inv_rms_grad * inv_rms³) / (N*D)  (来自 ComputeGradHHat2)
         // MulAddDst: gradXCastLocal_ += x * dRsqrtBrcbLocal_
         //   即 x_grad = x_grad_vec3 + x * (-(inv_rms_grad·inv_rms³/(N·D)))
-        //             = x_grad_vec3 + x_rs_grad_inv
+        //             = x_grad_vec3 + x_grad_inv
         for (int32_t loopIdN = 0; loopIdN < n_; loopIdN += 1) {
             for (int32_t loopOffsetC0 = 0; loopOffsetC0 < copyLen; loopOffsetC0 += ELEMENTS_SIZE_PER_REPEAT) {
                 uint64_t mask =
@@ -1215,7 +1215,7 @@ __aicore__ inline void MhcPreBackwardKernelArch22<TYPE_X, T, DETERMINISTIC>::Pro
 
                     offset += brcbAlign * 8 * sizeof(float);
 
-                    // 广播 x_rs_grad_inv 到 D 维度，供 ComputeGradX1 计算 x_grad_vec1
+                    // 广播 x_grad_inv 到 D 维度，供 ComputeGradX1 计算 x_grad_vec1
                     const uint32_t srcRsqrtShape[2] = {static_cast<uint32_t>(tileTaskCount), 1};
                     const uint32_t dstRsqrtShape[2] = {static_cast<uint32_t>(tileTaskCount), ELEMENTS_SIZE_PER_BLOCK};
                     Brcb(dRsqrtBrcbLocal_, gradRsqrtLocal_, brcbAlign,

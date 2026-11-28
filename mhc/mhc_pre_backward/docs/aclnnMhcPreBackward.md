@@ -81,7 +81,7 @@
       \end{aligned}
       $$
 
-  - 残差连接反向（H_res）：
+  - 残差连接反向（H_res，其中 H\_res\_2 即 H\_res\_1 的 [B,S,N,N] 视图形式）：
     - 正向公式：
 
       $$
@@ -165,8 +165,8 @@
 
       $$
       \begin{aligned}
-      x\_rs\_grad\_inv &= - \left(\frac{inv\_rms\_grad \cdot {inv\_rms}^3}{N*D}\right) \cdot x\_rs \\
-      x\_rs\_grad &= x\_grad\_mm + x\_rs\_grad\_inv \\
+      x\_grad\_inv &= - \left(\frac{inv\_rms\_grad \cdot {inv\_rms}^3}{N*D}\right) \cdot x \\
+      x\_rs\_grad &= x\_grad\_mm + x\_grad\_inv \\
       x\_grad\_vec1 &= \text{Reshape}(x\_rs\_grad, [B,S,N,D]) \\
       x\_grad &= x\_grad\_vec3 + x\_grad\_vec1
       \end{aligned}
