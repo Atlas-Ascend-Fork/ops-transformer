@@ -599,14 +599,23 @@ def _with_transposed_storage(tensor, dim0, dim1):
     """Give a dense CSV tensor transposed strides without changing logical values."""
     import torch
 
-    if tensor.stride(dim0) < tensor.stride(dim1):
+    first, second = sorted((dim0 % tensor.ndim, dim1 % tensor.ndim))
+    if tensor.stride(first) < tensor.stride(second):
         return tensor
     source = tensor.transpose(dim0, dim1).clone(memory_format=torch.contiguous_format)
     return source.transpose(dim0, dim1)
 
 
 def _hook_preprocess(*args, **meta):
-    trans = meta["f_trans"] and not meta.get("f_graph_source")
+    routing_graph = (
+        meta["f_family"] == "routing"
+        and meta.get("f_graph_source")
+        and meta["f_trans"]
+        and meta["f_format"] == "FRACTAL_NZ_C0_32"
+        and meta["f_types"][0] == "float8_e4m3fn"
+        and meta["f_types"][1] == "float4_e2m1"
+    )
+    trans = meta["f_trans"] and (routing_graph or not meta.get("f_graph_source"))
     nd = meta["f_format"] == "ND"
     swiglu_trans = trans and meta["f_family"] == "swiglu"
     if nd and not swiglu_trans:
@@ -619,6 +628,10 @@ def _hook_preprocess(*args, **meta):
         scales = args[meta["f_ports"]["ws"]]
         for i, scale in enumerate(scales):
             scales[i] = _with_transposed_storage(scale, -3, -2)
+    if routing_graph:
+        # Graph CSVs carry the packed source layout; eager needs API views.
+        scale = args[meta["f_ports"]["ws"]]
+        scale.data = scale.transpose(-3, -2)
     port = meta["f_ports"]["w"]
     value = args[port]
     listed = isinstance(value, (list, tuple))
@@ -629,7 +642,11 @@ def _hook_preprocess(*args, **meta):
         if nd:
             results.append(_with_transposed_storage(tensor, -1, -2))
             continue
-        source = tensor.transpose(-1, -2).contiguous() if trans else tensor
+        source = (
+            tensor.transpose(-1, -2).contiguous()
+            if trans and not routing_graph
+            else tensor
+        )
         if wd.startswith("float4") and meta["f_format"] == "FRACTAL_NZ_C0_32":
             hint = 296 if wd == "float4_e2m1" else 297
             converted = torch_npu.npu_format_cast(
@@ -695,8 +712,8 @@ def _hook_golden(*args, _routing_trace=None, **meta):
             meta["f_trans"],
             c0,
             "int4" if wd == "int4" else "",
-            meta["f_shape"][1],
-            meta["f_shape"][2],
+            meta["f_shape"][-2],
+            meta["f_shape"][-1],
         )
         w = np.stack(decoded) if len(decoded) > 1 else decoded[0]
     else:

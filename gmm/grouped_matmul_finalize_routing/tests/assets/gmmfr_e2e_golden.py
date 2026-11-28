@@ -21,8 +21,37 @@ finally:
     sys.path.pop(0)
 
 
+class PreparedRoutingGraph(RoutingGraph):
+    """Keep packed NZ graph inputs contiguous and trace transposes in forward.
+
+    The eager preprocessor exposes transposed API views. Restore their source
+    layout before tracing so TorchAir does not clone a discontiguous NZ input.
+    """
+
+    def __init__(self, w, scale=None, w_dtype=None, x_dtype=None):
+        super().__init__()
+        self._w_dtype = w_dtype
+        self._x_dtype = x_dtype
+        if w_dtype == self._fp4_e2m1 and x_dtype != self._fp4_e2m1:
+            w = w.transpose(-1, -2)
+            scale = scale.transpose(-3, -2)
+        self.register_buffer("weight", w, persistent=False)
+        self.register_buffer("weight_scale", scale, persistent=False)
+
+    def forward(self, x, group_list, **kwargs):
+        return super().forward(
+            x,
+            self.weight,
+            group_list,
+            scale=self.weight_scale,
+            w_dtype=self._w_dtype,
+            x_dtype=self._x_dtype,
+            **kwargs,
+        )
+
+
 E2ESpec = _make_spec("routing", "e2e")
-E2ESpec.torch_graph = RoutingGraph
+E2ESpec.torch_graph = PreparedRoutingGraph
 
 
 __spec__ = {
