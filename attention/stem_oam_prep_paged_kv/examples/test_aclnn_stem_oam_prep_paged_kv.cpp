@@ -83,9 +83,9 @@ int main()
     int64_t maxKvBlocks = 2;
     int64_t stemBlockSize = 128;
     int64_t stemStride = 16;
-    int64_t maxKb = 2;
+    int64_t maxKb = 1;
     int64_t kflatDim = stemStride * dimQk;
-    char* kvLayout = "BNBD";
+    char kvLayout[] = "BNBD";
 
     std::vector<int64_t> kCacheShape = {totalBlocks, numKvHeads, 64, dimQk};
     std::vector<int64_t> kvIndicesShape = {batch, maxKvBlocks};
@@ -113,7 +113,7 @@ int main()
 
     std::vector<uint8_t> hostKCache(GetShapeSize(kCacheShape), 1);
     std::vector<uint8_t> hostVCache(GetShapeSize(kCacheShape), 1);
-    std::vector<int32_t> hostKvIndices({0, 1, 2, 3, 4, 5, 6, 7});
+    std::vector<int32_t> hostKvIndices({0, 1});
     std::vector<int64_t> hostKvSeqLens({128});
     std::vector<float> hostKScaleCache(GetShapeSize(kScaleCacheShape), 1.0f);
     std::vector<float> hostVScale(numKvHeads, 1.0f);

@@ -19,7 +19,7 @@ English | [简体中文](./README.md)
 
 - The inputs and outputs support the following data scenarios:
 
-    ```
+    ```text
     kCache:[total_blocks, kvBlockSize, H_kv, 128] or [total_blocks, H_kv, kvBlockSize, 128]
     vCache:[total_blocks, kvBlockSize, H_kv, 128] or [total_blocks, H_kv, kvBlockSize, 128]
     kvIndices:[batch, max_kv_blocks]
@@ -77,7 +77,7 @@ English | [简体中文](./README.md)
       <td>kvSeqLens</td>
       <td>Input</td>
       <td>KV sequence length of each batch. Empty lists are not supported. The shape is [batch], and the maximum KV sequence length is 262144.</td>
-      <td>INT32</td>
+      <td>INT64</td>
       <td>ND</td>
     </tr>
     <tr>
@@ -97,7 +97,7 @@ English | [简体中文](./README.md)
     <tr>
       <td>lambdaMag</td>
       <td>Attribute</td>
-      <td>V bias multiplier. Value range: (0,1]. Default value: 0.3.</td>
+      <td>V bias multiplier. Value range: [0,1]. Default value: 0.3.</td>
       <td>FLOAT</td>
       <td>-</td>
     </tr>

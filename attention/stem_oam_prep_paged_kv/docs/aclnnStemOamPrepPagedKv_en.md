@@ -27,6 +27,9 @@
 - Description: Stem OAM (Output-Aware Metric) is the pre-scoring module of the dynamic sparse attention mechanism for large model inference. It extracts K/V data from the Paged KV Cache, computes through K Processing (per-token K-scale × group sum + anti-diagonal flip) and V Processing (per-head vScale × L2 Norm → Log → Global Normalize → ReLU → Block Average), and outputs kFlat and vBias for Stem OAM score computation.
 
 - Formula:
+
+Let B = stemBlockSize, S = stemStride, D = 128 (the last dimension of kvCache), and λ = lambdaMag. K/V are processed per (b, h), with the sequence length padded to a multiple of B.
+
 Stage 1: De-page + Cast FP32 + kScaleCache Gather
 
 $$
@@ -34,11 +37,15 @@ K\_dense[b], V\_dense[b], kscale\_per\_row[b] = Cast\big(gather(kcache[kv\_indic
 $$
 
 $$
-k\_padded[b] = \lceil kv\_len[b] / B \rceil \times B, \quad num\_Kb[b] = k\_padded[b] / B, \quad R = B / S
+k\_padded[b] = \lceil kv\_len[b] / B \rceil \times B, \quad num\_Kb[b] = k\_padded[b] / B, \quad R = B / S, \quad k\_down\_len[b] = k\_padded[b] / S
 $$
 
 $$
 K\_scaled[b, h] = K\_dense[b, h, :] \times kscale\_per\_row[b, h, :] \quad (\text{per-token per-head, broadcast on dim})
+$$
+
+$$
+K\_blocks[b,h] = reshape(K\_scaled[b,h],\ [num\_Kb[b], R, S, D]), \quad V\_rows[b,h] = reshape(V\_dense[b,h],\ [k\_down\_len[b], S, D])
 $$
 
 Stage 2: K Processing (Weighted Group Sum + Anti-diagonal Flip)
@@ -60,11 +67,11 @@ Stage 3: V Processing
 **Step 3a: L2 Norm + Max Pool + Log**
 
 $$
-norms[b,h,idx,s,:] = \| V\_rows[b,h,idx,s,:] \times vScale[h] \|_2 =  \sqrt{\sum_d (V\_rows[idx,s,d] \times vScale[h])^2}
+norms[b,h,idx,s] = \| V\_rows[b,h,idx,s,:] \times vScale[h] \|_2 =  \sqrt{\sum_d (V\_rows[b,h,idx,s,d] \times vScale[h])^2}
 $$
 
 $$
-v\_norm\_down[b,h,idx] = \max_{s} norms[b,h,idx,s,:] \quad (\text{zero beyond } kv\_len)
+v\_norm\_down[b,h,idx] = \max_{s} norms[b,h,idx,s] \quad (\text{zero beyond } kv\_len)
 $$
 
 $$
@@ -186,7 +193,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0pky">Input</td>
       <td class="tg-0pky">Length of the KV sequence in each batch.</td>
       <td class="tg-0pky">Empty lists are not supported.<br>shape:[batch], maximum KV sequence length is 262144.</td>
-      <td class="tg-0pky">INT32</td>
+      <td class="tg-0pky">INT64</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">1</td>
       <td class="tg-0pky">x</td>
@@ -331,9 +338,19 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td>kvLayout/stemBlockSize/stemStride does not meet the constraints.</td>
     </tr>
     <tr>
-      <td>ACLNN_ERR_INNER</td>
+      <td>ACLNN_ERR_RUNTIME_ERROR</td>
       <td>361001</td>
-      <td>Internal error, such as Tiling computation failure or Kernel search failure.</td>
+      <td>Exception when the API internally calls an NPU runtime interface.</td>
+    </tr>
+    <tr>
+      <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+      <td>561002</td>
+      <td>Internal exception: an exception occurs when the API performs NPU kernel tiling.</td>
+    </tr>
+    <tr>
+      <td>ACLNN_ERR_INNER_FIND_KERNEL_ERROR</td>
+      <td>561003</td>
+      <td>Internal exception: the API fails to find the NPU kernel (possibly because the operator binary package is not installed).</td>
     </tr>
   </tbody>
   </table>
@@ -447,9 +464,13 @@ The following sample code is for reference only. For details about compilation a
   int main() {
     int32_t deviceId = 0;
     aclrtStream stream;
+    // Initialize the ACL environment and create a stream.
     auto ret = Init(deviceId, &stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("Init acl failed. ERROR: %d\n", ret); return ret);
 
+    // Operator parameters: batch=1, 8 physical blocks, 4 KV heads, D=128, BNBD layout.
+    // maxKvBlocks=2 means the per-batch block index table has 2 slots (up to 2 physical blocks).
+    // maxKb = ceil(max(kvSeqLens)/stemBlockSize) = ceil(128/128) = 1, i.e. the 3rd dim of kFlat/vBias.
     int64_t batch = 1;
     int64_t totalBlocks = 8;
     int64_t numKvHeads = 4;
@@ -457,10 +478,13 @@ The following sample code is for reference only. For details about compilation a
     int64_t maxKvBlocks = 2;
     int64_t stemBlockSize = 128;
     int64_t stemStride = 16;
-    int64_t maxKb = 2;
+    int64_t maxKb = 1;
     int64_t kflatDim = stemStride * dimQk;
-    char *kvLayout = "BNBD";
+    // kvLayout is a string attribute; initialize it as a char array to match the char* parameter.
+    char kvLayout[] = "BNBD";
 
+    // Tensor shapes (BNBD layout: kCache/vCache are [totalBlocks, H_kv, kvBlockSize, D]).
+    // kFlat is the BF16 output of [batch, H_kv, maxKb, stemStride*D]; vBias is the FP32 output of [batch, H_kv, maxKb].
     std::vector<int64_t> kCacheShape = {totalBlocks, numKvHeads, 64, dimQk};
     std::vector<int64_t> kvIndicesShape = {batch, maxKvBlocks};
     std::vector<int64_t> kScaleCacheShape = {totalBlocks, numKvHeads, 64, 1};
@@ -485,15 +509,20 @@ The following sample code is for reference only. For details about compilation a
     aclTensor* kFlat = nullptr;
     aclTensor* vBias = nullptr;
 
+    // Build host-side data: kvIndices is the block index table (element count matches shape [batch, maxKvBlocks];
+    // physical blocks 0 and 1 are used here); kvSeqLens holds the per-batch actual KV lengths (int64 array),
+    // whose values must not exceed maxKvBlocks*64=128.
     std::vector<uint8_t> hostKCache(GetShapeSize(kCacheShape), 1);
     std::vector<uint8_t> hostVCache(GetShapeSize(kCacheShape), 1);
-    std::vector<int32_t> hostKvIndices({0, 1, 2, 3, 4, 5, 6, 7});
+    std::vector<int32_t> hostKvIndices({0, 1});
     std::vector<int64_t> hostKvSeqLens({128});
     std::vector<float> hostKScaleCache(GetShapeSize(kScaleCacheShape), 1.0f);
     std::vector<float> hostVScale(numKvHeads, 1.0f);
     std::vector<uint16_t> hostKFlat(GetShapeSize(kFlatShape), 0);
     std::vector<float> hostVBias(GetShapeSize(vBiasShape), 0.0f);
 
+    // Create device-side tensors: kCache/vCache are FP8_E4M3FN, kvIndices is INT32,
+    // kScaleCache/vScale are FP32 (required on the FP8 path), kFlat is BF16, and vBias is FP32.
     ret = CreateAclTensor(hostKCache, kCacheShape, &kCacheDeviceAddr, aclDataType::ACL_FLOAT8_E4M3FN, &kCache, aclFormat::ACL_FORMAT_ND);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
     ret = CreateAclTensor(hostVCache, kCacheShape, &vCacheDeviceAddr, aclDataType::ACL_FLOAT8_E4M3FN, &vCache, aclFormat::ACL_FORMAT_ND);
@@ -510,6 +539,7 @@ The following sample code is for reference only. For details about compilation a
     ret = CreateAclTensor(hostVBias, vBiasShape, &vBiasDeviceAddr, aclDataType::ACL_FLOAT, &vBias, aclFormat::ACL_FORMAT_ND);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
 
+    // Phase 1 of the two-phase interface: validates inputs, returns the executor and the required workspace size.
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor;
     ret = aclnnStemOamPrepPagedKvGetWorkspaceSize(
@@ -518,17 +548,22 @@ The following sample code is for reference only. For details about compilation a
         kFlat, vBias, &workspaceSize, &executor);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("GetWorkspaceSize failed. ERROR: %d\n", ret); return ret);
 
+    // Allocate workspace on the device according to the size returned by phase 1.
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
       ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
       CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
+    // Phase 2 of the two-phase interface: submits the computation task to the specified stream.
     ret = aclnnStemOamPrepPagedKv(workspaceAddr, workspaceSize, executor, stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnStemOamPrepPagedKv failed. ERROR: %d\n", ret); return ret);
 
+    // Synchronize the stream to wait for the computation to finish.
     ret = aclrtSynchronizeStream(stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSynchronizeStream failed. ERROR: %d\n", ret); return ret);
 
+    // Copy the kFlat result back: BF16 values are copied as uint16_t and converted to float for printing
+    // the first 10 elements; verify the values against the formula in actual use.
     auto size = GetShapeSize(kFlatShape);
     std::vector<uint16_t> resultData(size, 0);
     ret = aclrtMemcpy(resultData.data(), resultData.size() * sizeof(resultData[0]), kFlatDeviceAddr,

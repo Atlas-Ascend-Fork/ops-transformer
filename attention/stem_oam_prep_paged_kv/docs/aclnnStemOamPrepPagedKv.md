@@ -25,6 +25,9 @@
 - 接口功能：Stem OAM (Output-Aware Metric) 大模型推理动态稀疏注意力机制的前置评分模块。从Paged KV Cache 中提取 K/V 数据，经 K Processing (per-token K-scale × group sum + anti-diagonal flip) 和 V Processing (per-head vScale × L2 Norm → Log → Global Normalize → ReLU → Block Average) 计算，输出 kFlat 和 vBias 供 Stem OAM score computation 使用。
 
 - 计算公式：
+
+记 B = stemBlockSize，S = stemStride，D = 128（kvCache 最后一维），λ = lambdaMag。K/V 按 (b, h) 处理，序列长度补齐到 B 的整数倍后参与计算。
+
 阶段1：De-page + Cast FP32 + kScaleCache Gather
 
 $$
@@ -32,11 +35,15 @@ K\_dense[b], V\_dense[b], kscale\_per\_row[b] = Cast\big(gather(kcache[kv\_indic
 $$
 
 $$
-k\_padded[b] = \lceil kv\_len[b] / B \rceil \times B, \quad num\_Kb[b] = k\_padded[b] / B, \quad R = B / S
+k\_padded[b] = \lceil kv\_len[b] / B \rceil \times B, \quad num\_Kb[b] = k\_padded[b] / B, \quad R = B / S, \quad k\_down\_len[b] = k\_padded[b] / S
 $$
 
 $$
 K\_scaled[b, h] = K\_dense[b, h, :] \times kscale\_per\_row[b, h, :] \quad (\text{per-token per-head, broadcast on dim})
+$$
+
+$$
+K\_blocks[b,h] = reshape(K\_scaled[b,h],\ [num\_Kb[b], R, S, D]), \quad V\_rows[b,h] = reshape(V\_dense[b,h],\ [k\_down\_len[b], S, D])
 $$
 
 阶段2：K Processing(Weighted Group Sum + Anti-diagonal Flip)
@@ -58,11 +65,11 @@ $$
 **Step 3a: L2 Norm + Max Pool + Log**
 
 $$
-norms[b,h,idx,s,:] = \| V\_rows[b,h,idx,s,:] \times vScale[h] \|_2 =  \sqrt{\sum_d (V\_rows[idx,s,d] \times vScale[h])^2}
+norms[b,h,idx,s] = \| V\_rows[b,h,idx,s,:] \times vScale[h] \|_2 =  \sqrt{\sum_d (V\_rows[b,h,idx,s,d] \times vScale[h])^2}
 $$
 
 $$
-v\_norm\_down[b,h,idx] = \max_{s} norms[b,h,idx,s,:] \quad (\text{zero beyond } kv\_len)
+v\_norm\_down[b,h,idx] = \max_{s} norms[b,h,idx,s] \quad (\text{zero beyond } kv\_len)
 $$
 
 $$
@@ -153,7 +160,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0pky">kCache（aclTensor*）</td>
       <td class="tg-0pky">输入</td>
       <td class="tg-0pky">Paged K cache。</td>
-      <td class="tg-0pky">不支持空Tensor。<br>两种布局，由kvLayout指定，当前仅支持"BNBD"：<br>"BBND"为[total_blocks, kvBlockSize, H_kv, D=128], <br>"BNBD"为[total_blocks, H_kv, kvBlockSize, D=128]。<br>支持前三维非连续，最后一维必须连续，H_kv最大值为8。</td>
+      <td class="tg-0pky">不支持空Tensor。<br>两种布局，由kvLayout指定，当前仅支持"BNBD"：<br>"BBND"为[total_blocks, kvBlockSize, H_kv, D=128]，<br>"BNBD"为[total_blocks, H_kv, kvBlockSize, D=128]。<br>支持前三维非连续，最后一维必须连续，H_kv最大值为8。</td>
       <td class="tg-0pky">FLOAT8_E4M3FN</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">4</td>
@@ -173,7 +180,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0pky">kvIndices（aclTensor*）</td>
       <td class="tg-0pky">输入</td>
       <td class="tg-0pky">每batch KV Block index数组</td>
-      <td class="tg-0pky">不支持空Tensor。<br>shape:[batch, max_kv_blocks], batch最大值为16, max_kv_blocks最大值2048</td>
+      <td class="tg-0pky">不支持空Tensor。<br>shape:[batch, max_kv_blocks]，batch最大值为16，max_kv_blocks最大值2048</td>
       <td class="tg-0pky">INT32</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">2</td>
@@ -183,8 +190,8 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0pky">kvSeqLens（aclIntArray*）</td>
       <td class="tg-0pky">输入</td>
       <td class="tg-0pky">每batch KV序列长度。</td>
-      <td class="tg-0pky">不支持空列表。<br>shape:[batch], kv序列长度最大值262144</td>
-      <td class="tg-0pky">INT32</td>
+      <td class="tg-0pky">不支持空列表。<br>shape:[batch]，kv序列长度最大值262144</td>
+      <td class="tg-0pky">INT64</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">1</td>
       <td class="tg-0pky">x</td>
@@ -193,7 +200,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0pky">kScaleCacheOptional（aclTensor*）</td>
       <td class="tg-0pky">输入</td>
       <td class="tg-0pky">Per-token per-head K scale。</td>
-      <td class="tg-0pky">kCache数据类型为FP8时必填，其他类型可省略（传nullptr）。<br>两种布局，由kvLayout指定，当前仅支持"BNBD"：<br>"BBND"为[total_blocks, kvBlockSize, H_kv, 1],<br>"BNBD"为[total_blocks, H_kv, kvBlockSize, 1]。<br>支持前三维非连续，最后一维必须连续。</td>
+      <td class="tg-0pky">kCache数据类型为FP8时必填，其他类型可省略（传nullptr）。<br>两种布局，由kvLayout指定，当前仅支持"BNBD"：<br>"BBND"为[total_blocks, kvBlockSize, H_kv, 1]，<br>"BNBD"为[total_blocks, H_kv, kvBlockSize, 1]。<br>支持前三维非连续，最后一维必须连续。</td>
       <td class="tg-0pky">FLOAT</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">4</td>
@@ -253,7 +260,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0lax">kFlat（aclTensor*）</td>
       <td class="tg-0lax">输出</td>
       <td class="tg-0lax">K group sum + anti-diagonal flip结果。</td>
-      <td class="tg-0lax">不支持空Tensor。<br>shape为[batch, H_kv, max_Kb, kflat_dim]，其中kflat_dim=stemStride*D, <br>max_Kb依赖kvSeqLens输入计算获得。</td>
+      <td class="tg-0lax">不支持空Tensor。<br>shape为[batch, H_kv, max_Kb, kflat_dim]，其中kflat_dim=stemStride*D，<br>max_Kb依赖kvSeqLens输入计算获得。</td>
       <td class="tg-0lax">BFLOAT16</td>
       <td class="tg-0lax">ND</td>
       <td class="tg-0lax">4</td>
@@ -263,7 +270,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td class="tg-0lax">vBias（aclTensor*）</td>
       <td class="tg-0lax">输出</td>
       <td class="tg-0lax">V block bias结果。</td>
-      <td class="tg-0lax">不支持空Tensor。<br>shape为[batch, H_kv, max_Kb], max_Kb依赖kvSeqLens输入计算获得。</td>
+      <td class="tg-0lax">不支持空Tensor。<br>shape为[batch, H_kv, max_Kb]，max_Kb依赖kvSeqLens输入计算获得。</td>
       <td class="tg-0lax">FLOAT</td>
       <td class="tg-0lax">ND</td>
       <td class="tg-0lax">3</td>
@@ -329,9 +336,19 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td>kvLayout/stemBlockSize/stemStride不满足约束。</td>
     </tr>
     <tr>
-      <td>ACLNN_ERR_INNER</td>
+      <td>ACLNN_ERR_RUNTIME_ERROR</td>
       <td>361001</td>
-      <td>内部错误，如Tiling计算失败或Kernel查找失败。</td>
+      <td>API内部调用NPU runtime的接口异常。</td>
+    </tr>
+    <tr>
+      <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+      <td>561002</td>
+      <td>内部异常：API内部做NPU kernel的tiling时发生异常。</td>
+    </tr>
+    <tr>
+      <td>ACLNN_ERR_INNER_FIND_KERNEL_ERROR</td>
+      <td>561003</td>
+      <td>内部异常：API内部做查找NPU kernel异常（可能因为算子二进制包未安装）。</td>
     </tr>
   </tbody>
   </table>
@@ -445,9 +462,13 @@ aclnnStatus aclnnStemOamPrepPagedKv(
   int main() {
     int32_t deviceId = 0;
     aclrtStream stream;
+    // 初始化acl环境并创建Stream。
     auto ret = Init(deviceId, &stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("Init acl failed. ERROR: %d\n", ret); return ret);
 
+    // 算子参数：本例为 batch=1、8个物理块、4个KV头、D=128、BNBD布局。
+    // maxKvBlocks=2 表示每batch的block索引表有2个槽位，最多引用2个物理块。
+    // maxKb = ceil(max(kvSeqLens)/stemBlockSize) = ceil(128/128) = 1，即kFlat/vBias的第3维。
     int64_t batch = 1;
     int64_t totalBlocks = 8;
     int64_t numKvHeads = 4;
@@ -455,10 +476,13 @@ aclnnStatus aclnnStemOamPrepPagedKv(
     int64_t maxKvBlocks = 2;
     int64_t stemBlockSize = 128;
     int64_t stemStride = 16;
-    int64_t maxKb = 2;
+    int64_t maxKb = 1;
     int64_t kflatDim = stemStride * dimQk;
-    char *kvLayout = "BNBD";
+    // kvLayout为字符串属性，用字符数组初始化以匹配接口的char*入参。
+    char kvLayout[] = "BNBD";
 
+    // 各张量shape（BNBD布局：kCache/vCache为[totalBlocks, H_kv, kvBlockSize, D]）。
+    // kFlat为[batch, H_kv, maxKb, stemStride*D]的BF16输出，vBias为[batch, H_kv, maxKb]的FP32输出。
     std::vector<int64_t> kCacheShape = {totalBlocks, numKvHeads, 64, dimQk};
     std::vector<int64_t> kvIndicesShape = {batch, maxKvBlocks};
     std::vector<int64_t> kScaleCacheShape = {totalBlocks, numKvHeads, 64, 1};
@@ -483,15 +507,19 @@ aclnnStatus aclnnStemOamPrepPagedKv(
     aclTensor* kFlat = nullptr;
     aclTensor* vBias = nullptr;
 
+    // 构造Host侧数据：kvIndices为block索引表（元素个数与shape[batch, maxKvBlocks]一致，本例取第0、1个物理块）；
+    // kvSeqLens为每batch实际KV长度（int64数组），取值需不超过maxKvBlocks*64=128。
     std::vector<uint8_t> hostKCache(GetShapeSize(kCacheShape), 1);
     std::vector<uint8_t> hostVCache(GetShapeSize(kCacheShape), 1);
-    std::vector<int32_t> hostKvIndices({0, 1, 2, 3, 4, 5, 6, 7});
+    std::vector<int32_t> hostKvIndices({0, 1});
     std::vector<int64_t> hostKvSeqLens({128});
     std::vector<float> hostKScaleCache(GetShapeSize(kScaleCacheShape), 1.0f);
     std::vector<float> hostVScale(numKvHeads, 1.0f);
     std::vector<uint16_t> hostKFlat(GetShapeSize(kFlatShape), 0);
     std::vector<float> hostVBias(GetShapeSize(vBiasShape), 0.0f);
 
+    // 创建Device侧张量：kCache/vCache为FP8_E4M3FN，kvIndices为INT32，
+    // kScaleCache/vScale为FP32（FP8路径必填），kFlat为BF16，vBias为FP32。
     ret = CreateAclTensor(hostKCache, kCacheShape, &kCacheDeviceAddr, aclDataType::ACL_FLOAT8_E4M3FN, &kCache, aclFormat::ACL_FORMAT_ND);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
     ret = CreateAclTensor(hostVCache, kCacheShape, &vCacheDeviceAddr, aclDataType::ACL_FLOAT8_E4M3FN, &vCache, aclFormat::ACL_FORMAT_ND);
@@ -508,6 +536,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
     ret = CreateAclTensor(hostVBias, vBiasShape, &vBiasDeviceAddr, aclDataType::ACL_FLOAT, &vBias, aclFormat::ACL_FORMAT_ND);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
 
+    // 两段式接口第一段：完成入参校验，返回执行器与所需workspace大小。
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor;
     ret = aclnnStemOamPrepPagedKvGetWorkspaceSize(
@@ -516,17 +545,21 @@ aclnnStatus aclnnStemOamPrepPagedKv(
         kFlat, vBias, &workspaceSize, &executor);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("GetWorkspaceSize failed. ERROR: %d\n", ret); return ret);
 
+    // 按第一段返回的大小在Device侧申请workspace。
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
       ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
       CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
+    // 两段式接口第二段：下发计算任务到指定Stream。
     ret = aclnnStemOamPrepPagedKv(workspaceAddr, workspaceSize, executor, stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnStemOamPrepPagedKv failed. ERROR: %d\n", ret); return ret);
 
+    // 同步Stream等待计算完成。
     ret = aclrtSynchronizeStream(stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSynchronizeStream failed. ERROR: %d\n", ret); return ret);
 
+    // 拷回kFlat结果：BF16按uint16_t位拷回后转换为float打印前10个元素，实际使用时按计算公式校验数值。
     auto size = GetShapeSize(kFlatShape);
     std::vector<uint16_t> resultData(size, 0);
     ret = aclrtMemcpy(resultData.data(), resultData.size() * sizeof(resultData[0]), kFlatDeviceAddr,

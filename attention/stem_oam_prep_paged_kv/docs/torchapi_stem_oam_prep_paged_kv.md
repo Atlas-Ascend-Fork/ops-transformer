@@ -52,8 +52,9 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
     v_cache,
     kv_indices,
     kv_seq_lens,
-    k_scale_cache,
-    v_scale,
+    *,
+    k_scale_cache=None,
+    v_scale=None,
     lambda_mag=0.3,
     kv_layout="BNBD",
     stem_block_size=128,
@@ -67,10 +68,10 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | k_cache | Tensor | 必选 | Paged K cache。不支持空Tensor。kv_layout="BBND"时shape为[total_blocks, kv_block_size, H_kv, 128]，kv_layout="BNBD"时shape为[total_blocks, H_kv, kv_block_size, 128]。支持前三维非连续（stride>shape），最后一维必须连续，H_kv最大值为8。 | float8_e4m3fn | 4 |
 | v_cache | Tensor | 必选 | Paged V cache。不支持空Tensor。shape与k_cache一致。 | 与k_cache保持一致 | 4 |
-| kv_indices | Tensor | 必选 | 每batch KV Block index数组。不支持空Tensor。shape[1]=max_kv_blocks，batch最大值为16，max_kv_blocks最大值2048。 | int32 | 2 |
+| kv_indices | Tensor | 必选 | 每batch KV Block index数组。不支持空Tensor，必须为连续Tensor。shape[1]=max_kv_blocks，batch最大值为16，max_kv_blocks最大值2048。 | int32 | 2 |
 | kv_seq_lens | list[int] | 必选 | 每batch KV序列长度。不支持空列表。kv序列长度最大值262144。该值用于派生kv_indices第二维max_kv_blocks及输出shape中max_Kb。 | int32 | 1 |
-| k_scale_cache | Tensor | 可选 | Per-token per-head K scale。k_cache数据类型为FP8时必填，其他类型可省略。随kv_layout变化：kv_layout="BBND"：[total_blocks, kv_block_size, H_kv, 1]，kv_layout="BNBD"：[total_blocks, H_kv, kv_block_size, 1]。支持前三维非连续（stride>shape），最后一维必须连续。 | float32 | 4 |
-| v_scale | Tensor | 可选 | Per-head V scale。k_cache数据类型为FP8时必填，其他类型可省略。 | float32 | 1（[H_kv]） |
+| k_scale_cache | Tensor | 必选 | Per-token per-head K scale。当前仅支持FP8输入路径，k_cache数据类型为FP8时必填。随kv_layout变化：kv_layout="BBND"：[total_blocks, kv_block_size, H_kv, 1]，kv_layout="BNBD"：[total_blocks, H_kv, kv_block_size, 1]。支持前三维非连续（stride>shape），最后一维必须连续。 | float32 | 4 |
+| v_scale | Tensor | 必选 | Per-head V scale。当前仅支持FP8输入路径，k_cache数据类型为FP8时必填。必须为连续Tensor。 | float32 | 1（[H_kv]） |
 | lambda_mag | float | 可选 | V bias乘数，取值范围[0,1]，默认0.3。 | float | - |
 | kv_layout | str | 可选 | KV Cache布局，"BBND"表示[total_blocks, kv_block_size, H_kv, 128]，"BNBD"表示[total_blocks, H_kv, kv_block_size, 128]。当前仅支持"BNBD"，默认"BNBD"。 | str | - |
 | stem_block_size | int | 可选 | Stem block大小，%32==0且≤256，默认128。 | int | - |
@@ -130,7 +131,7 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
 
     # 构造kv_indices和kv_seq_lens
     kv_indices = torch.randint(0, total_blocks, (batch, max_kv_blocks), dtype=torch.int32, device="npu")
-    kv_seq_lens = (128,)
+    kv_seq_lens = [128]
 
     # 构造k_scale_cache和v_scale
     k_scale_cache_shape = (total_blocks, num_kv_heads, kv_block_size, 1)
@@ -186,7 +187,7 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
 
     # 构造kv_indices和kv_seq_lens
     kv_indices = torch.randint(0, total_blocks, (batch, max_kv_blocks), dtype=torch.int32, device="npu")
-    kv_seq_lens = (128,)
+    kv_seq_lens = [128]
 
     # 构造k_scale_cache和v_scale
     k_scale_cache_shape = (total_blocks, num_kv_heads, kv_block_size, 1)
@@ -197,7 +198,6 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
         def __init__(self):
             super(StemOamPrepPagedKvNetwork, self).__init__()
 
-        @torch._dynamo.disable
         def forward(self, k_cache, v_cache, kv_indices, k_scale_cache, v_scale,
                     kv_seq_lens, lambda_mag, kv_layout,
                     stem_block_size, stem_stride):

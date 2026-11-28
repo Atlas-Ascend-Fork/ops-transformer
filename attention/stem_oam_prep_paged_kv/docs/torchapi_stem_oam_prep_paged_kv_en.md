@@ -54,8 +54,9 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
     v_cache,
     kv_indices,
     kv_seq_lens,
-    k_scale_cache,
-    v_scale,
+    *,
+    k_scale_cache=None,
+    v_scale=None,
     lambda_mag=0.3,
     kv_layout="BNBD",
     stem_block_size=128,
@@ -69,10 +70,10 @@ cann_ops_transformer.stem_oam_prep_paged_kv(
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | k_cache | Tensor | Required | Paged K cache. Does not support empty tensors. When kv_layout="BBND", the shape is [total_blocks, kv_block_size, H_kv, 128]; when kv_layout="BNBD", the shape is [total_blocks, H_kv, kv_block_size, 128]. The first three dimensions can be non-contiguous (stride>shape), the last dimension must be contiguous, and the maximum value of H_kv is 8. | float8_e4m3fn | 4 |
 | v_cache | Tensor | Required | Paged V cache. Does not support empty tensors. The shape is the same as that of k_cache. | Same as k_cache | 4 |
-| kv_indices | Tensor | Required | Array of KV block indices for each batch. Does not support empty tensors. shape[1]=max_kv_blocks. The maximum value of batch is 16, and the maximum value of max_kv_blocks is 2048. | int32 | 2 |
+| kv_indices | Tensor | Required | Array of KV block indices for each batch. Does not support empty tensors and must be a contiguous tensor. shape[1]=max_kv_blocks. The maximum value of batch is 16, and the maximum value of max_kv_blocks is 2048. | int32 | 2 |
 | kv_seq_lens | list[int] | Required | KV sequence length for each batch. Does not support empty lists. The maximum value of the KV sequence length is 262144. This value is used to derive max_kv_blocks (the second dimension of kv_indices) and max_Kb in the output shape. | int32 | 1 |
-| k_scale_cache | Tensor | Optional | Per-token per-head K scale. Required when the data type of k_cache is FP8, and can be omitted for other types. Changes with kv_layout: kv_layout="BBND": [total_blocks, kv_block_size, H_kv, 1]; kv_layout="BNBD": [total_blocks, H_kv, kv_block_size, 1]. The first three dimensions can be non-contiguous (stride>shape), and the last dimension must be contiguous. | float32 | 4 |
-| v_scale | Tensor | Optional | Per-head V scale. Required when the data type of k_cache is FP8, and can be omitted for other types. | float32 | 1 ([H_kv]) |
+| k_scale_cache | Tensor | Required | Per-token per-head K scale. Only the FP8 input path is currently supported, and it is required when the data type of k_cache is FP8. Changes with kv_layout: kv_layout="BBND": [total_blocks, kv_block_size, H_kv, 1]; kv_layout="BNBD": [total_blocks, H_kv, kv_block_size, 1]. The first three dimensions can be non-contiguous (stride>shape), and the last dimension must be contiguous. | float32 | 4 |
+| v_scale | Tensor | Required | Per-head V scale. Only the FP8 input path is currently supported, and it is required when the data type of k_cache is FP8. Must be a contiguous tensor. | float32 | 1 ([H_kv]) |
 | lambda_mag | float | Optional | V bias multiplier. Value range: [0,1]. Default: 0.3. | float | - |
 | kv_layout | str | Optional | KV cache layout. "BBND" indicates [total_blocks, kv_block_size, H_kv, 128], and "BNBD" indicates [total_blocks, H_kv, kv_block_size, 128]. Currently, only "BNBD" is supported. Default: "BNBD". | str | - |
 | stem_block_size | int | Optional | Stem block size. %32==0 and ≤256. Default: 128. | int | - |
@@ -132,7 +133,7 @@ Defaults to a deterministic implementation.
 
     # Construct kv_indices and kv_seq_lens.
     kv_indices = torch.randint(0, total_blocks, (batch, max_kv_blocks), dtype=torch.int32, device="npu")
-    kv_seq_lens = (128,)
+    kv_seq_lens = [128]
 
     # Construct k_scale_cache and v_scale.
     k_scale_cache_shape = (total_blocks, num_kv_heads, kv_block_size, 1)
@@ -188,7 +189,7 @@ Defaults to a deterministic implementation.
 
     # Construct kv_indices and kv_seq_lens.
     kv_indices = torch.randint(0, total_blocks, (batch, max_kv_blocks), dtype=torch.int32, device="npu")
-    kv_seq_lens = (128,)
+    kv_seq_lens = [128]
 
     # Construct k_scale_cache and v_scale.
     k_scale_cache_shape = (total_blocks, num_kv_heads, kv_block_size, 1)
@@ -199,7 +200,6 @@ Defaults to a deterministic implementation.
         def __init__(self):
             super(StemOamPrepPagedKvNetwork, self).__init__()
 
-        @torch._dynamo.disable
         def forward(self, k_cache, v_cache, kv_indices, k_scale_cache, v_scale,
                     kv_seq_lens, lambda_mag, kv_layout,
                     stem_block_size, stem_stride):

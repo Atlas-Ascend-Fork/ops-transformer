@@ -17,7 +17,7 @@
 
 - 输入输出支持以下数据场景：
 
-    ```
+    ```text
     kCache:[total_blocks, kvBlockSize, H_kv, 128] 或 [total_blocks, H_kv, kvBlockSize, 128]
     vCache:[total_blocks, kvBlockSize, H_kv, 128] 或 [total_blocks, H_kv, kvBlockSize, 128]
     kvIndices:[batch, max_kv_blocks]
@@ -67,15 +67,15 @@
     <tr>
       <td>kvIndices</td>
       <td>输入</td>
-      <td>每batch KV Block index数组。不支持空Tensor。shape:[batch, max_kv_blocks], max_kv_blocks最大值2048。</td>
+      <td>每batch KV Block index数组。不支持空Tensor。shape:[batch, max_kv_blocks]，max_kv_blocks最大值2048。</td>
       <td>INT32</td>
       <td>ND</td>
     </tr>
     <tr>
       <td>kvSeqLens</td>
       <td>输入</td>
-      <td>每batch KV序列长度。不支持空列表。shape:[batch], kv序列长度最大值262144。</td>
-      <td>INT32</td>
+      <td>每batch KV序列长度。不支持空列表。shape:[batch]，kv序列长度最大值262144。</td>
+      <td>INT64</td>
       <td>ND</td>
     </tr>
     <tr>
@@ -95,7 +95,7 @@
     <tr>
       <td>lambdaMag</td>
       <td>属性</td>
-      <td>V bias 乘数。取值范围: (0,1]。默认 0.3。</td>
+      <td>V bias 乘数。取值范围: [0,1]。默认 0.3。</td>
       <td>FLOAT</td>
       <td>-</td>
     </tr>
@@ -130,7 +130,7 @@
     <tr>
       <td>vBias</td>
       <td>输出</td>
-      <td>V block bias结果。不支持空Tensor。shape为[batch, H_kv, max_Kb], max_Kb依赖kvSeqLens输入计算获得。</td>
+      <td>V block bias结果。不支持空Tensor。shape为[batch, H_kv, max_Kb]，max_Kb依赖kvSeqLens输入计算获得。</td>
       <td>FLOAT</td>
       <td>ND</td>
     </tr>
