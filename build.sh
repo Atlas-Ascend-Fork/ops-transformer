@@ -2531,7 +2531,7 @@ function build_pr_ut_exclude_mc2()
     fi
     CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_UT_OPS_TEST_CI_PR=ON"
     CUSTOM_OPTION="${CUSTOM_OPTION} -DTESTS_UT_OPS_TEST=${TEST_EXCLUDE_MC2}"
-    process_soc_input "ascend310p,ascend910b,ascend950,ascend350"
+    process_soc_input "ascend310p,ascend910b,ascend950,ascend350,mc62"
     set_compute_unit_option_ut
     build_ut ${BUILD}
 }
