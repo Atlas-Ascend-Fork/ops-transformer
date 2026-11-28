@@ -470,7 +470,7 @@ ge::graphStatus FusedFloydAttentionTilingBase::GetShapeAttrsInfo()
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout() || !AnalyzeOptionalInput(),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
 
     alignedS1 = AlignUp(s1Size, FRACTAL_NUM);
     alignedS2 = AlignUp(s2Size, FRACTAL_NUM);
@@ -596,8 +596,9 @@ bool FusedFloydAttentionTilingBase::AnalyzeDtype()
             isHighPercision = false;
             break;
         default:
-            OPS_REPORT_VECTOR_INNER_ERR(opName, "not support input dtype: %s for now",
-                                        ge::TypeUtils::DataTypeToSerialString(inputDtype).c_str());
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                opName, "query", ge::TypeUtils::DataTypeToSerialString(inputDtype),
+                "not support input dtype: " + ge::TypeUtils::DataTypeToSerialString(inputDtype) + " for now");
             return false;
     }
 
@@ -633,7 +634,9 @@ bool FusedFloydAttentionTilingBase::AnalyzeLayout()
     auto& attenShape = context_->GetInputShape(ATTENTION_MASK_INPUT_INDEX)->GetStorageShape();
 
     OP_CHECK_IF(!Analyze4DimLayout(queryShape, keyShape, attenShape),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "Get unsupported layout: %s", inputLayout), return false);
+                OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(opName, "query.layout", inputLayout,
+                                                       std::string("Get unsupported layout: ") + inputLayout),
+                return false);
     return true;
 }
 
@@ -681,7 +684,9 @@ bool FusedFloydAttentionTilingBase::AnalyzeOptionalInput()
             attenMaskShapeType = ATTEN_B_N2_G_S1_S2;
         }
     } else {
-        OP_LOGE(context_, "get unsupported atten_mask shape, dims is %lu!", attenMaskDimNum);
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+            context_->GetNodeName(), "atten_mask", std::to_string(attenMaskDimNum),
+            "get unsupported atten_mask shape, dims is " + std::to_string(attenMaskDimNum));
         return false;
     }
 
@@ -927,7 +932,8 @@ bool FusedFloydAttentionTilingBase::CaclBmmBatch(int64_t tmpS1BasicBlock, int64_
 
     int64_t loops = CeilDiv(batchData, static_cast<int64_t>(aicoreParams_.l1Size));
     if (loops <= 0) {
-        OP_LOGE(context_, "Function CaclBmmBatch failed.");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "bmm batch", std::to_string(batchData),
+                                              "Function CaclBmmBatch failed");
         return false;
     }
     int32_t bmm1Num = n2BasicBlock / loops;

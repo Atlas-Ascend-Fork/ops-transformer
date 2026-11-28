@@ -78,7 +78,8 @@ static ge::graphStatus CheckParams(gert::TilingContext* context)
         context->GetInputShape(VALUE1_INPUT_INDEX) != nullptr && context->GetInputShape(KEY2_INPUT_INDEX) != nullptr &&
         context->GetInputShape(VALUE2_INPUT_INDEX) && context->GetAttrs() != nullptr) {
         if (CheckBaseInput(context) == ge::GRAPH_FAILED) {
-            OP_LOGE(context, "CheckBaseInput failed, atten_mask or other inputs are invalid.");
+            OP_LOGE_WITHOUT_REPORT(context->GetNodeName(),
+                                   "CheckBaseInput failed, atten_mask or other inputs are invalid.");
             return ge::GRAPH_FAILED;
         }
     }
@@ -125,8 +126,11 @@ static bool IsEmptyInput(gert::TilingContext* context)
         OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return false);
         uint32_t coreNum = compileInfoPtr->aivNum;
         OP_CHECK_IF((coreNum <= 0), OP_LOGE(context, "platform info is invalid, coreNum=%u.", coreNum), return false);
-        OP_CHECK_IF((kernelType != ge::DT_FLOAT16 && kernelType != ge::DT_BF16),
-                    OP_LOGE(context, "kernelType is invalid, kernelType is %d", kernelType), return false);
+        OP_CHECK_IF(
+            (kernelType != ge::DT_FLOAT16 && kernelType != ge::DT_BF16),
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "kernelType", std::to_string(kernelType),
+                                                  "kernelType is invalid, kernelType is " + std::to_string(kernelType)),
+            return false);
         uint32_t attentionOutFormerNum;          // attentionOut的主核
         uint32_t attentionOutTailNum;            // attentionOut的尾核
         uint32_t softmaxMaxFormerNum;            // softmaxMax 和 softmaxSum的主核
