@@ -15,6 +15,7 @@
 
 #include <vector>
 #include <array>
+#include <cstring>
 #include "gtest/gtest.h"
 #include "../../../op_host/op_api/aclnn_nsa_selected_attention.h"
 #include "op_api_ut_common/tensor_desc.h"
@@ -209,5 +210,67 @@ TEST_F(nsa_selected_attention_opapi_ut, required_null_parameters_return_param_nu
                       kSelectedBlockCount, tensors[4], tensors[5], tensors[6], i == 10 ? nullptr : &workspaceSize,
                       i == 11 ? nullptr : &executor),
                   ACLNN_ERR_PARAM_NULLPTR);
+    }
+}
+
+TEST_F(nsa_selected_attention_opapi_ut, rejects_invalid_parameters_before_empty_output_shortcut)
+{
+    struct Case {
+        const char* name;
+        aclDataType dtype;
+        aclDataType indexType;
+        int64_t mode;
+        int64_t blockSize;
+        int64_t blockCount;
+        bool empty;
+        const char* layout;
+        aclnnStatus expected;
+    };
+    const Case cases[] = {
+        {"issue base", ACL_FLOAT16, ACL_INT32, 2, 16, 1, false, "TND", ACLNN_SUCCESS},
+        {"bf16", ACL_BF16, ACL_INT32, 0, 16, 1, false, "TND", ACLNN_SUCCESS},
+        {"issue fp32", ACL_FLOAT, ACL_INT32, 2, 16, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"issue int64 indices", ACL_FLOAT16, ACL_INT64, 2, 16, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"issue sparse mode", ACL_FLOAT16, ACL_INT32, 5, 16, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"issue zero count", ACL_FLOAT16, ACL_INT32, 2, 16, 0, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"issue layout", ACL_FLOAT16, ACL_INT32, 2, 16, 1, false, "BSND", ACLNN_ERR_PARAM_INVALID},
+        {"issue empty layout", ACL_FLOAT16, ACL_INT32, 2, 16, 1, true, "BSND", ACLNN_ERR_PARAM_INVALID},
+        {"valid empty output", ACL_FLOAT16, ACL_INT32, 2, 16, 1, true, "TND", ACLNN_SUCCESS},
+        {"empty fp32", ACL_FLOAT, ACL_INT32, 2, 16, 1, true, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"empty int64 indices", ACL_FLOAT16, ACL_INT64, 2, 16, 1, true, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"empty sparse mode", ACL_FLOAT16, ACL_INT32, 5, 16, 1, true, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"empty zero count", ACL_FLOAT16, ACL_INT32, 2, 16, 0, true, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"zero block size", ACL_FLOAT16, ACL_INT32, 2, 0, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"negative block size", ACL_FLOAT16, ACL_INT32, 2, -16, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"unaligned block size", ACL_FLOAT16, ACL_INT32, 2, 17, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"large block size", ACL_FLOAT16, ACL_INT32, 2, 144, 1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"negative count", ACL_FLOAT16, ACL_INT32, 2, 16, -1, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"large count", ACL_FLOAT16, ACL_INT32, 2, 16, 129, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"selection equals 8192", ACL_FLOAT16, ACL_INT32, 2, 64, 128, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"selection above 8192", ACL_FLOAT16, ACL_INT32, 2, 128, 128, false, "TND", ACLNN_ERR_PARAM_INVALID},
+        {"valid max block size", ACL_FLOAT16, ACL_INT32, 2, 128, 1, false, "TND", ACLNN_SUCCESS},
+        {"valid max count", ACL_FLOAT16, ACL_INT32, 2, 16, 128, false, "TND", ACLNN_SUCCESS},
+    };
+
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        const int64_t outTokens = c.empty ? 0 : 64;
+        auto q = TensorDesc({64, 1, 192}, c.dtype, ACL_FORMAT_ND);
+        auto k = TensorDesc({4096, 1, 192}, c.dtype, ACL_FORMAT_ND);
+        auto v = TensorDesc({4096, 1, 128}, c.dtype, ACL_FORMAT_ND);
+        auto indices = TensorDesc({64, 1, c.blockCount > 0 ? c.blockCount : 1}, c.indexType, ACL_FORMAT_ND);
+        auto lengthsQ = IntArrayDesc(vector<int64_t>{64});
+        auto lengthsKv = IntArrayDesc(vector<int64_t>{4096});
+        auto max = TensorDesc({outTokens, 1, 8}, ACL_FLOAT, ACL_FORMAT_ND);
+        auto sum = TensorDesc({outTokens, 1, 8}, ACL_FLOAT, ACL_FORMAT_ND);
+        auto out = TensorDesc({outTokens, 1, 128}, c.dtype, ACL_FORMAT_ND);
+        char layout[5] = {};
+        strcpy(layout, c.layout);
+        auto ut = OP_API_UT(aclnnNsaSelectedAttention,
+                            INPUT(q, k, v, indices, nullptr, lengthsQ, lengthsKv, 0.0721687836, 1, layout, c.mode,
+                                  c.blockSize, c.blockCount),
+                            OUTPUT(max, sum, out));
+        uint64_t workspaceSize = 0;
+        EXPECT_EQ(ut.TestGetWorkspaceSize(&workspaceSize), c.expected);
     }
 }

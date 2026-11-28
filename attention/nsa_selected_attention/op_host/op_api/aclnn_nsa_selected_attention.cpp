@@ -10,6 +10,7 @@
 
 #include "nsa_selected_attention.h"
 #include "aclnn_nsa_selected_attention.h"
+#include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/pad.h"
 #include "aclnn_kernels/reshape.h"
@@ -136,8 +137,13 @@ aclnnStatus AnalysisAxis(const aclTensor* query, const aclTensor* key, const acl
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus InputDtypeCheck(const aclTensor* query, const aclTensor* key, const aclTensor* value)
+aclnnStatus InputDtypeCheck(const aclTensor* query, const aclTensor* key, const aclTensor* value,
+                            const aclTensor* topkIndices, const aclTensor* attenMaskOptional,
+                            const aclTensor* softmaxMaxOut, const aclTensor* softmaxSumOut,
+                            const aclTensor* attentionOut)
 {
+    const std::initializer_list<DataType> supportedDtypes = {DataType::DT_FLOAT16, DataType::DT_BF16};
+    OP_CHECK_DTYPE_NOT_SUPPORT(query, supportedDtypes, return ACLNN_ERR_PARAM_INVALID);
     auto vDtype = value->GetDataType();
     auto kDtype = key->GetDataType();
     auto qDtype = query->GetDataType();
@@ -146,6 +152,14 @@ aclnnStatus InputDtypeCheck(const aclTensor* query, const aclTensor* key, const 
                 op::ToString(DataType(qDtype)).GetString(), op::ToString(DataType(kDtype)).GetString(),
                 op::ToString(DataType(vDtype)).GetString());
         return ACLNN_ERR_PARAM_INVALID;
+    }
+    OP_CHECK_DTYPE_NOT_MATCH(topkIndices, DataType::DT_INT32, return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK_DTYPE_NOT_MATCH(softmaxMaxOut, DataType::DT_FLOAT, return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK_DTYPE_NOT_MATCH(softmaxSumOut, DataType::DT_FLOAT, return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK_DTYPE_NOT_MATCH(attentionOut, qDtype, return ACLNN_ERR_PARAM_INVALID);
+    if (attenMaskOptional != nullptr) {
+        const std::initializer_list<DataType> maskDtypes = {DataType::DT_BOOL, DataType::DT_UINT8};
+        OP_CHECK_DTYPE_NOT_SUPPORT(attenMaskOptional, maskDtypes, return ACLNN_ERR_PARAM_INVALID);
     }
     return ACLNN_SUCCESS;
 }
@@ -268,6 +282,18 @@ aclnnStatus aclnnNsaSelectedAttentionGetWorkspaceSize(
                scaleValue, headNum, inputLayout, sparseMode, selectedBlockSize, selectedBlockCount),
         DFX_OUT(softmaxMaxOut, softmaxSumOut, attentionOut));
 
+    CHECK_RET(InputDtypeCheck(query, key, value, topkIndices, attenMaskOptional, softmaxMaxOut, softmaxSumOut,
+                              attentionOut) == ACLNN_SUCCESS,
+              ACLNN_ERR_PARAM_INVALID);
+    if (strcmp(inputLayout, "TND") != 0 || (sparseMode != 0 && sparseMode != 2) || selectedBlockSize < 16 ||
+        selectedBlockSize > 128 || selectedBlockSize % 16 != 0 || selectedBlockCount < 1 || selectedBlockCount > 128 ||
+        selectedBlockSize * selectedBlockCount >= 8192) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "Invalid layout[%s], sparseMode[%ld], selectedBlockSize[%ld] or selectedBlockCount[%ld].", inputLayout,
+                sparseMode, selectedBlockSize, selectedBlockCount);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
@@ -276,12 +302,6 @@ aclnnStatus aclnnNsaSelectedAttentionGetWorkspaceSize(
         *workspaceSize = 0;
         uniqueExecutor.ReleaseTo(executor);
         return ACLNN_SUCCESS;
-    }
-    if (strcmp(inputLayout, "TND") != 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Layout %s is not TND, invalid shape, please check", inputLayout);
-        *workspaceSize = 0;
-        uniqueExecutor.ReleaseTo(executor);
-        return ACLNN_ERR_PARAM_INVALID;
     }
     NSAShapeInfo shapeInfo;
     CHECK_RET(AnalysisInput(query, key, value, topkIndices, inputLayout, shapeInfo, actualSeqQLenOptional,
