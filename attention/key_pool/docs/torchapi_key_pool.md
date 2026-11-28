@@ -134,7 +134,7 @@ torch.ops.cann_ops_transformer.key_pool(
 | sin | Tensor | 可选 | RoPE 正弦参数。当前版本保留接口，必须为空。 | bfloat16 | 当前版本不适用 |
 | cu_seqlens | Tensor | 可选 | TH 场景中各 Batch 在 `hidden_states` 首轴上的累计 token 边界。数据格式为 ND，不支持非连续 Tensor；BSH 场景必须为空。 | int32 | TH：`[B+1]` |
 | seqused | Tensor | 可选 | 预留的有效序列长度参数，当前版本必须为空。 | int32 | 预留 |
-| cmp_ratio | int | 可选 | 压缩率，即每个压缩组包含的 token 数。默认值为 `4`。 | - | - |
+| cmp_ratio | int | 可选 | 压缩率，即每个压缩组包含的 token 数。默认值为 `4`，取值范围为 `[2, 128]` 内的整数。Atlas A2/A3 系列产品仅支持 `2/4/8/16/32/64/128`。 | - | - |
 | norm_eps | float | 可选 | LayerNorm 的 epsilon，默认值为 `1e-6`，必须大于 0。 | - | - |
 | rotary_mode | int | 可选 | RoPE 模式入口，默认值为 `1`。仅支持 `0/1`，当前版本不执行 RoPE。 | - | - |
 
@@ -172,7 +172,6 @@ BSH 的有效输出位于 `pooled_key[b, :valid_count[b]]`；TH 按 Batch 顺序
   `[1,block_num-1]`；未使用的表项可保留 0。
 - `hidden_states` 为 BSH 时，`cu_seqlens` 必须为空；为 TH 时，必须提供
   合法的 `[B+1]` 前缀和数组，首元素为 0，末元素为 `T`，且单调不减。
-- `cmp_ratio` 仅支持 `2/4/8/16/32/64/128`，默认值为 `4`。
 - `norm_eps` 必须大于 0，默认值为 `1e-6`。
 - `rotary_mode` 仅支持 `0/1`，当前版本不执行 RoPE。
 - `norm_weight` 和 `norm_bias` 必须同时提供或同时为空。

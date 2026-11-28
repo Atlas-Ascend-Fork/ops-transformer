@@ -115,7 +115,7 @@ ge::graphStatus SetKeyPoolShapeDim(const KeyPoolProtoShapeParam& shapeParam, ger
 
 ge::graphStatus InferDataTypeKeyPool(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE(context->GetNodeName(), "Context is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context == nullptr, OP_LOGE("KeyPool", "Context is nullptr."), return ge::GRAPH_FAILED);
     OP_LOGI(context->GetNodeName(), "Enter KeyPool inferDataType impl.");
 
     context->SetOutputDataType(POOLED_KEY_OUTPUT_INDEX, context->GetRequiredInputDataType(HIDDEN_STATES_INPUT_INDEX));
@@ -125,7 +125,7 @@ ge::graphStatus InferDataTypeKeyPool(gert::InferDataTypeContext* context)
 
 ge::graphStatus InferShapeKeyPool(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE(context->GetNodeName(), "Context is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context == nullptr, OP_LOGE("KeyPool", "Context is nullptr."), return ge::GRAPH_FAILED);
     OP_LOGI(context->GetNodeName(), "Enter KeyPool infershape impl.");
 
     KeyPoolProtoShapeParam shapeParam{};

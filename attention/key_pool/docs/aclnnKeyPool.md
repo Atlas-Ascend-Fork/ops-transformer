@@ -252,7 +252,7 @@ aclnnStatus aclnnKeyPool(
     <td>cmpRatio（int64_t）</td>
     <td>输入</td>
     <td>公式中的cmpRatio，表示压缩率，即每组参与池化的token数。</td>
-    <td>取值范围为{2,4,8,16,32,64,128}。</td>
+    <td>默认值为4，取值范围为[2, 128]内的整数。Atlas A2/A3系列产品仅支持2/4/8/16/32/64/128。</td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -262,7 +262,7 @@ aclnnStatus aclnnKeyPool(
     <td>normEps（double）</td>
     <td>输入</td>
     <td>表示LayerNorm的epsilon。</td>
-    <td>默认值为1e-6，取值必须大于0。</td>
+    <td>默认值为1e-6。接口类型为double，tiling按float32读取；转换后必须大于0。</td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -282,7 +282,7 @@ aclnnStatus aclnnKeyPool(
     <td>stateCacheStrideDim0（int64_t）</td>
     <td>输入</td>
     <td>表示stateCache第0轴的stride。</td>
-    <td>由调用方根据stateCache的实际stride传入。</td>
+    <td>由调用方传入stateCache第0轴的实际步长（单位为元素），有效值大于或等于block_size×2×D。</td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -371,9 +371,9 @@ aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/co
     <td>必选参数中存在空指针。</td>
   </tr>
   <tr>
-    <td rowspan="4">ACLNN_ERR_PARAM_INVALID</td>
-    <td rowspan="4">161002</td>
-    <td>输入输出Tensor的数据类型、shape或数据格式不在支持范围内。</td>
+    <td rowspan="5">ACLNN_ERR_INNER_TILING_ERROR</td>
+    <td rowspan="5">561002</td>
+    <td>tiling校验发现输入输出Tensor的数据类型、shape或数据格式不在支持范围内。</td>
   </tr>
   <tr>
     <td>cmpRatio或normEps的取值不在支持范围内。</td>
@@ -385,9 +385,7 @@ aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/co
     <td>normWeightOptional与normBiasOptional未同时提供。</td>
   </tr>
   <tr>
-    <td>ACLNN_ERR_INNER_TILING_ERROR</td>
-    <td>561002</td>
-    <td>tiling发生异常，入参dtype、shape或属性组合错误；包括rotaryMode不为0/1，或cosOptional、sinOptional任一非空。</td>
+    <td>其他tiling错误，包括rotaryMode不为0/1，或cosOptional、sinOptional任一非空。</td>
   </tr>
   <tr>
     <td>ACLNN_ERR_RUNTIME_ERROR</td>
@@ -446,7 +444,7 @@ aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/co
   - BSH场景`cuSeqlensOptional`必须为空；
   - TH场景必须提供合法的`cuSeqlensOptional`前缀和数组，首元素为0，
     末元素为`T`，且单调不减。
-- `cmpRatio`仅支持`2/4/8/16/32/64/128`；`normEps`必须大于0；
+- `normEps`必须大于0；
   `rotaryMode`仅支持`0/1`。
 - `normWeightOptional`和`normBiasOptional`必须同时提供或同时为空。
 - `cosOptional`和`sinOptional`必须同时为空，当前不支持RoPE；
@@ -454,7 +452,6 @@ aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/co
 - 支持BSH场景的`B=0`或`S=0`，以及TH场景的`T=0`。
   当BSH场景的`B=0`或`S=0`，或TH场景的`T=0`，且输出为空Tensor时，接口可直接返回成功，
   不会因`cosOptional`、`sinOptional`或`sequsedOptional`传入Tensor而返回`561002`。
-- `cmpRatio`的默认值为4，取值范围是`2/4/8/16/32/64/128`。
 - `normEps`的默认值为`1e-6`，取值范围是大于0。
 - `rotaryMode`的默认值为1，取值范围是`0/1`，当前不执行RoPE。
 

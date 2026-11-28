@@ -58,7 +58,7 @@ TensorDesc Empty(ge::DataType dtype)
 gert::TilingContextPara MakePara(const std::string& layout, ge::DataType dtype, int64_t batch, int64_t sequence,
                                  int64_t hidden, int64_t headDim, int64_t cmpRatio, int64_t blockSize,
                                  int64_t maxBlocks, bool withNorm = false, int64_t rotaryMode = 1, bool withCos = false,
-                                 bool withSin = false, bool emptyRope = false)
+                                 bool withSin = false, bool emptyRope = false, float normEps = 1e-6F)
 {
     const int64_t tokenCount = layout == "BSH" ? batch * sequence : sequence;
     const int64_t blockNum = std::max<int64_t>(1, batch * maxBlocks);
@@ -84,7 +84,7 @@ gert::TilingContextPara MakePara(const std::string& layout, ge::DataType dtype, 
                                                       Desc({outputCapacity, headDim}, dtype)};
     std::vector<OpAttr> attrs{
         {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(cmpRatio)},
-        {"norm_eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-6F)},
+        {"norm_eps", Ops::Transformer::AnyValue::CreateFrom<float>(normEps)},
         {"rotary_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(rotaryMode)},
         {"state_cache_stride_dim0", Ops::Transformer::AnyValue::CreateFrom<int64_t>(blockSize * 2 * headDim)},
     };
@@ -170,4 +170,18 @@ TEST(KeyPoolTilingArch35, RejectsRopeInputs)
             }
         }
     }
+}
+
+TEST(KeyPoolTilingArch35, RejectsNanNormEps)
+{
+    auto para = MakePara("BSH", ge::DT_BF16, 2, 16, 2048, 128, 8, 8, 2, true, 1, false, false, false,
+                         std::numeric_limits<float>::quiet_NaN());
+    ExecuteTestCase(para, ge::GRAPH_FAILED, 0);
+}
+
+TEST(KeyPoolTilingArch35, AcceptsPositiveInfinityNormEps)
+{
+    auto para = MakePara("BSH", ge::DT_BF16, 2, 16, 2048, 128, 8, 8, 2, true, 1, false, false, false,
+                         std::numeric_limits<float>::infinity());
+    ExecuteTestCase(para, ge::GRAPH_SUCCESS, 0);
 }

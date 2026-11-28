@@ -394,7 +394,7 @@ ge::graphStatus KeyPoolTiling::CheckSinglePara() const
         ge::GRAPH_SUCCESS != CheckSingleParaCmpRatio()) {
         return ge::GRAPH_FAILED;
     }
-    OP_CHECK_IF(context_->normEps != nullptr && *context_->normEps <= 0.0f,
+    OP_CHECK_IF(context_->normEps != nullptr && !(*context_->normEps > 0.0f),
                 OP_LOGE(context_->opName, "norm_eps must be greater than 0, but got %f", *context_->normEps),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from key_pool_golden import run_key_pool_golden
 from key_pool_public_loader import load_key_pool_public_api
 
 
-def generate_data():
+def generate_data(a5_full_load_only: bool = False):
     """Generate all KeyPool tensors and attributes for representative cases."""
     torch.manual_seed(20260823)
     hidden_size = 4096
@@ -45,6 +46,15 @@ def generate_data():
             False,
         ),
     )
+    if a5_full_load_only:
+        # BSH, B=1, S=4, LayerNorm off, and default split-K give a 64-column
+        # vector slice of D=128 on A5, including a slice starting at column 64.
+        # FP32 APE is therefore 16 KiB per slice for ratio 64 and 32 KiB for 128.
+        # The first two new tokens complete a pool; the other two update the cache.
+        case_specs = (
+            ("a5_full_load_ape_16k", "BSH", (4,), (62,), 64, 32, True, False),
+            ("a5_full_load_ape_32k", "BSH", (4,), (126,), 128, 32, True, False),
+        )
 
     for (
         name,
@@ -291,8 +301,15 @@ def compare_precision(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--a5-full-load",
+        action="store_true",
+        help="Run the A5 FULL_LOAD APE boundary cases",
+    )
+    args = parser.parse_args()
     failures = 0
-    for case in generate_data():
+    for case in generate_data(a5_full_load_only=args.a5_full_load):
         actual_inputs = {
             key: value.clone() if isinstance(value, torch.Tensor) else value
             for key, value in case.items()

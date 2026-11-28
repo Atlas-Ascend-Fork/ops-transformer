@@ -13,6 +13,7 @@
 #include <limits>
 
 #include "../../../../op_host/arch22/compressor_tiling_arch22.h"
+#include "experiment/metadef/common/util/error_manager/error_manager.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 
@@ -804,33 +805,52 @@ TEST_F(CompressorTilingArch22, test_bad_state_cache_stride)
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, std::numeric_limits<uint64_t>::max());
 }
 
-// Non-x empty tensor (wkv empty) -> EZ0009 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON
-TEST_F(CompressorTilingArch22, test_empty_wkv)
+// Reject each independently empty tensor while x is nonempty.
+TEST_F(CompressorTilingArch22, test_empty_non_x_inputs)
 {
-    optiling::CompressorCompileInfo compileInfo = {};
-    gert::TilingContextPara tilingContextPara(
-        "Compressor",
-        {
-            {{{2, 8, 4096}, {2, 8, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
-            {{{0, 4096}, {0, 4096}}, ge::DT_BF16, ge::FORMAT_ND}, // wkv empty
-            {{{1024, 4096}, {1024, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
-            {{{4, 128, 2048}, {4, 128, 2048}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            {{{4, 1024}, {4, 1024}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            {{{2, 8}, {2, 8}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
-        },
-        {
-            {{{2, 2, 512}, {2, 2, 512}}, ge::DT_BF16, ge::FORMAT_ND},
-            {{{4, 128, 2048}, {4, 128, 2048}}, ge::DT_FLOAT, ge::FORMAT_ND},
-        },
-        {
-            {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(4)},
-            {"coff", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
-            {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
-            {"state_cache_stride_dim0", Ops::Transformer::AnyValue::CreateFrom<int64_t>(262144)},
-        },
-        &compileInfo, "Ascend910_93", Compressor_tiling_A3SocInfo, 4096);
-    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, std::numeric_limits<uint64_t>::max());
+    const char* const expectedParams[] = {"wkv", "wgate", "state_cache", "ape", "state_block_table"};
+    for (size_t emptyIndex : {1U, 2U, 3U, 4U, 5U}) {
+        const char* expectedParam = expectedParams[emptyIndex - 1];
+        SCOPED_TRACE(expectedParam);
+        ErrorManager::GetInstance().GetRawErrorMessages();
+        optiling::CompressorCompileInfo compileInfo = {};
+        gert::TilingContextPara tilingContextPara(
+            "Compressor",
+            {
+                {{{2, 8, 4096}, {2, 8, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+                {{{emptyIndex == 1U ? 0 : 1024, 4096}, {emptyIndex == 1U ? 0 : 1024, 4096}},
+                 ge::DT_BF16,
+                 ge::FORMAT_ND},
+                {{{emptyIndex == 2U ? 0 : 1024, 4096}, {emptyIndex == 2U ? 0 : 1024, 4096}},
+                 ge::DT_BF16,
+                 ge::FORMAT_ND},
+                {{{emptyIndex == 3U ? 0 : 4, 128, 2048}, {emptyIndex == 3U ? 0 : 4, 128, 2048}},
+                 ge::DT_FLOAT,
+                 ge::FORMAT_ND},
+                {{{emptyIndex == 4U ? 0 : 4, 1024}, {emptyIndex == 4U ? 0 : 4, 1024}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                {{{emptyIndex == 5U ? 0 : 2, 8}, {emptyIndex == 5U ? 0 : 2, 8}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
+            },
+            {
+                {{{2, 2, 512}, {2, 2, 512}}, ge::DT_BF16, ge::FORMAT_ND},
+                {{{4, 128, 2048}, {4, 128, 2048}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            },
+            {
+                {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(4)},
+                {"coff", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+                {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+                {"state_cache_stride_dim0", Ops::Transformer::AnyValue::CreateFrom<int64_t>(262144)},
+            },
+            &compileInfo, "Ascend910_93", Compressor_tiling_A3SocInfo, 4096);
+        ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, std::numeric_limits<uint64_t>::max());
+        const auto errors = ErrorManager::GetInstance().GetRawErrorMessages();
+        ASSERT_EQ(errors.size(), 1U);
+        EXPECT_EQ(errors.front().error_id, "EZ0009");
+        const auto& fields = errors.front().args_map;
+        const auto param = fields.find("param_name");
+        ASSERT_NE(param, fields.end());
+        EXPECT_EQ(param->second, expectedParam);
+    }
 }

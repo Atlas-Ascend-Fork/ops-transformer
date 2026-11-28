@@ -144,8 +144,8 @@ private:
                                              uint32_t dStartIdx, uint32_t globalSeqIdx, uint32_t dDealSize);
     __aicore__ inline void SoftmaxDN(const LocalTensor<T>& scoreLocal, uint32_t tcDealSize, uint32_t dDealSize);
     __aicore__ inline void RoundToHiddenDtype(const LocalTensor<T>& srcLocal, uint32_t elementCount);
-    __aicore__ inline void AddApeToPooledScore(const LocalTensor<T>& scoreLocal, uint32_t poolCount,
-                                               uint32_t dDealSize);
+    __aicore__ inline void AddApeToPooledScore(const LocalTensor<T>& scoreLocal, uint32_t poolCount, uint32_t dDealSize,
+                                               uint32_t dStartIdx, bool isApeFullLoad);
     __aicore__ inline void KvMulReduceScore(const LocalTensor<T>& kvLocal, const LocalTensor<T>& scoreLocal,
                                             const LocalTensor<T>& dstLocal, uint32_t tcDealSize, uint32_t dDealSize);
     __aicore__ inline void CopyOutVec1ResToOutput(const LocalTensor<T>& comperssoredUb, const Vec1SliceInfo& sliceInfo,
@@ -985,11 +985,21 @@ __aicore__ inline void KeyPoolBlockVectorFullLoad<COMP>::RoundToHiddenDtype(cons
 
 template <typename COMP>
 __aicore__ inline void KeyPoolBlockVectorFullLoad<COMP>::AddApeToPooledScore(const LocalTensor<T>& scoreLocal,
-                                                                             uint32_t poolCount, uint32_t dDealSize)
+                                                                             uint32_t poolCount, uint32_t dDealSize,
+                                                                             uint32_t dStartIdx, bool isApeFullLoad)
 {
     uint32_t poolElementCount = cmpRatio_ * dDealSize;
     for (uint32_t pool = 0; pool < poolCount; pool++) {
-        AddVF(scoreLocal[pool * poolElementCount], apeUb, cmpRatio_, dDealSize, dDealSize);
+        if (isApeFullLoad) {
+            AddVF(scoreLocal[pool * poolElementCount], apeUb, cmpRatio_, dDealSize, dDealSize);
+            continue;
+        }
+        const uint32_t rowsPerLoad = BUFFER_SIZE_BYTE_16K / (dDealSize * sizeof(T));
+        for (uint32_t row = 0; row < cmpRatio_; row += rowsPerLoad) {
+            const uint32_t rows = min(rowsPerLoad, cmpRatio_ - row);
+            AddApe<false>(scoreLocal, rows, dDealSize, dDealSize, dDealSize, pool * poolElementCount + row * dDealSize,
+                          static_cast<uint64_t>(row) * constInfo_.headDim + dStartIdx);
+        }
     }
 }
 
@@ -1064,7 +1074,8 @@ __aicore__ inline void KeyPoolBlockVectorFullLoad<COMP>::DealVec1BaseBlock(
         inputQue2.FreeTensor(normScratch);
     }
     if (statisticInfo.key_poolScCnt > 0) {
-        AddApeToPooledScore(scoreLocal, statisticInfo.key_poolScCnt, dDealSize);
+        const bool isApeFullLoad = cmpRatio_ * dBaseSize * sizeof(T) <= BUFFER_SIZE_BYTE_16K;
+        AddApeToPooledScore(scoreLocal, statisticInfo.key_poolScCnt, dDealSize, dStartIdx + dBaseOffset, isApeFullLoad);
         PipeBarrier<PIPE_V>();
         SoftmaxDN(scoreLocal, statisticInfo.key_poolScCnt, dDealSize);
         PipeBarrier<PIPE_V>();

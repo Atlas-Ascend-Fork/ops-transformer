@@ -372,8 +372,21 @@ ge::graphStatus CompressorTiling::CheckEmptyTensor() const
             context_->stateCache.shape->GetStorageShape().GetShapeSize() == 0 ||
             (context_->ape.shape != nullptr && context_->ape.shape->GetStorageShape().GetShapeSize() == 0) ||
             context_->stateBlockTable.shape->GetStorageShape().GetShapeSize() == 0) {
-            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->opName, "x", "0",
-                                                  "Only input tensor x dim B or S or T supports to be 0");
+            std::string emptyParaName = X_NAME;
+            if (context_->wkv.shape->GetStorageShape().GetShapeSize() == 0) {
+                emptyParaName = WKV_NAME;
+            } else if (context_->wgate.shape->GetStorageShape().GetShapeSize() == 0) {
+                emptyParaName = WGATE_NAME;
+            } else if (context_->stateCache.shape->GetStorageShape().GetShapeSize() == 0) {
+                emptyParaName = STATE_CACHE_NAME;
+            } else if (context_->ape.shape != nullptr && context_->ape.shape->GetStorageShape().GetShapeSize() == 0) {
+                emptyParaName = APE_NAME;
+            } else if (context_->stateBlockTable.shape->GetStorageShape().GetShapeSize() == 0) {
+                emptyParaName = STATE_BLOCK_TABLE_NAME;
+            }
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                context_->opName, emptyParaName, "0",
+                emptyParaName + " shape size is 0, only x dim B or S (BSH) / T (TH) supports to be 0");
             return ge::GRAPH_FAILED;
         }
         context_->templateId = TemplateId::NORMAL;
