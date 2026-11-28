@@ -129,6 +129,7 @@ static ge::graphStatus CheckTensorDataType(const gert::TilingContext* context)
     const char* nodeName = context->GetNodeName();
 
     auto commContextDesc = context->GetInputDesc(COMM_CONTEXT_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, commContextDesc);
     OP_TILING_CHECK(commContextDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "commContext",
                                                           Ops::Base::ToString(commContextDesc->GetDataType()).c_str(),
@@ -136,6 +137,7 @@ static ge::graphStatus CheckTensorDataType(const gert::TilingContext* context)
                     return ge::GRAPH_FAILED);
 
     auto indicesDesc = context->GetInputDesc(INDICES_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, indicesDesc);
     OP_TILING_CHECK(indicesDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "indices",
                                                           Ops::Base::ToString(indicesDesc->GetDataType()).c_str(),
@@ -143,6 +145,7 @@ static ge::graphStatus CheckTensorDataType(const gert::TilingContext* context)
                     return ge::GRAPH_FAILED);
 
     auto fetchedDesc = context->GetOutputDesc(FETCHED_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, fetchedDesc);
     ge::DataType fetchedDtype = fetchedDesc->GetDataType();
     OP_TILING_CHECK(
         !IsContains(OUTPUT_DTYPE_LIST, fetchedDtype),
@@ -286,6 +289,7 @@ static ge::graphStatus CheckTensorFormat(const gert::TilingContext* context)
     const char* nodeName = context->GetNodeName();
 
     auto commContextDesc = context->GetInputDesc(COMM_CONTEXT_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, commContextDesc);
     ge::Format commContextFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(commContextDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         commContextFormat != ge::FORMAT_ND,
@@ -293,12 +297,14 @@ static ge::graphStatus CheckTensorFormat(const gert::TilingContext* context)
         return ge::GRAPH_FAILED);
 
     auto indicesDesc = context->GetInputDesc(INDICES_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, indicesDesc);
     ge::Format indicesFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(indicesDesc->GetStorageFormat()));
     OP_TILING_CHECK(indicesFormat != ge::FORMAT_ND,
                     OP_LOGE_FOR_INVALID_FORMAT(nodeName, "indices", Ops::Base::ToString(indicesFormat).c_str(), "ND"),
                     return ge::GRAPH_FAILED);
 
     auto fetchedDesc = context->GetOutputDesc(FETCHED_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, fetchedDesc);
     ge::Format fetchedFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(fetchedDesc->GetStorageFormat()));
     OP_TILING_CHECK(fetchedFormat != ge::FORMAT_ND,
                     OP_LOGE_FOR_INVALID_FORMAT(nodeName, "fetched", Ops::Base::ToString(fetchedFormat).c_str(), "ND"),
@@ -365,6 +371,7 @@ static ge::graphStatus CheckAttrParams(const gert::TilingContext* context)
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     auto fetchedDesc = context->GetOutputDesc(FETCHED_INDEX);
     const gert::StorageShape* fetchedShape = context->GetOutputShape(FETCHED_INDEX);
@@ -372,6 +379,7 @@ static ge::graphStatus CheckAttrParams(const gert::TilingContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, fetchedShape);
 
     auto hiddenSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_HIDDEN_SIZE_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, hiddenSizePtr);
     OP_TILING_CHECK(*hiddenSizePtr <= 0,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "hidden_size", std::to_string(*hiddenSizePtr).c_str(), "> 0"),
                     return ge::GRAPH_FAILED);
@@ -387,6 +395,7 @@ static ge::graphStatus CheckAttrParams(const gert::TilingContext* context)
                     return ge::GRAPH_FAILED);
 
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numEntriesPerRankPtr);
     OP_TILING_CHECK(*numEntriesPerRankPtr <= 0 || *numEntriesPerRankPtr > INT32_MAX,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "num_entries_per_rank",
                                               std::to_string(*numEntriesPerRankPtr).c_str(), "[1, INT32_MAX]"),
@@ -403,6 +412,7 @@ static ge::graphStatus CheckTrainingAttrs(const gert::TilingContext* context, in
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     auto numMaxTokensPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_MAX_TOKENS_PER_RANK_INDEX);
     OP_TILING_CHECK(numMaxTokensPerRankPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "num_max_tokens_per_rank"),
@@ -741,6 +751,7 @@ static ge::graphStatus SetCommonTilingData(const gert::TilingContext* context, E
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     tilingData.numTokens = numTokens;
     tilingData.rankSize = 0;
@@ -754,12 +765,15 @@ static ge::graphStatus SetCommonTilingData(const gert::TilingContext* context, E
     tilingData.sortTmpUbSize = 0;
 
     auto hiddenSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_HIDDEN_SIZE_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, hiddenSizePtr);
     tilingData.hiddenDim = *hiddenSizePtr;
 
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numEntriesPerRankPtr);
     tilingData.numEntriesPerRank = static_cast<int32_t>(*numEntriesPerRankPtr);
 
     auto fetchedDesc = context->GetOutputDesc(FETCHED_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, fetchedDesc);
     ge::DataType fetchedDtype = fetchedDesc->GetDataType();
     int64_t hiddenDim = tilingData.hiddenDim;
     int64_t bytesPerElem = ge::GetSizeByDataType(fetchedDtype);
@@ -867,6 +881,7 @@ static ge::graphStatus SetTrainingTilingData(const gert::TilingContext* context,
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     auto permOutShape = context->GetOutputShape(PERM_OUT_INDEX);
     auto sendCountsOutShape = context->GetOutputShape(SEND_COUNTS_OUT_INDEX);
@@ -1548,6 +1563,7 @@ static ge::graphStatus CheckRailRanksPerSupernode(const gert::TilingContext* con
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     auto ranksPerSupernodePtr = attrs->GetAttrPointer<int64_t>(ATTR_RANKS_PER_SUPERNODE);
     OP_TILING_CHECK(ranksPerSupernodePtr == nullptr || *ranksPerSupernodePtr <= 0,
@@ -1691,6 +1707,7 @@ static ge::graphStatus SetRailBaseTilingData(const gert::TilingContext* context,
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     tilingData.numTokens = numTokens;
     tilingData.rankSize = worldSize; // 分轨语义：world
@@ -1700,6 +1717,7 @@ static ge::graphStatus SetRailBaseTilingData(const gert::TilingContext* context,
     tilingData.numSfPacks = numSfPacks;
 
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numEntriesPerRankPtr);
     tilingData.numEntriesPerRank = static_cast<int32_t>(*numEntriesPerRankPtr);
     // int32 空间校验：entry id 空间按 world 口径
     OP_TILING_CHECK(tilingData.numEntriesPerRank < 0 ||
@@ -1712,6 +1730,7 @@ static ge::graphStatus SetRailBaseTilingData(const gert::TilingContext* context,
                     return ge::GRAPH_FAILED);
 
     auto fetchedDesc = context->GetOutputDesc(OUT_FETCHED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, fetchedDesc);
     ge::DataType fetchedDtype = fetchedDesc->GetDataType();
     int64_t bytesPerElem = ge::GetSizeByDataType(fetchedDtype);
     OP_TILING_CHECK(tilingData.hiddenDim > INT64_MAX / bytesPerElem,
@@ -1732,9 +1751,11 @@ static ge::graphStatus SetRailSfTilingData(const gert::TilingContext* context, E
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     if (numSfPacks > 0) {
         auto fetchedSfDesc = context->GetOutputDesc(OUT_FETCHED_SF);
+        OP_CHECK_NULL_WITH_CONTEXT(context, fetchedSfDesc);
         tilingData.sfElemSize = ge::GetSizeByDataType(fetchedSfDesc->GetDataType());
         OP_TILING_CHECK(tilingData.sfElemSize <= 0 || numSfPacks > INT64_MAX / tilingData.sfElemSize,
                         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(

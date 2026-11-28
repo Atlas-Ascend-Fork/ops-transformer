@@ -123,6 +123,7 @@ static ge::graphStatus CheckTensorPtrNullptr(const gert::TilingContext* context)
 static ge::graphStatus CheckCommContextDtype(const gert::TilingContext* context, const char* nodeName)
 {
     auto commContextDesc = context->GetInputDesc(IN_COMM_CONTEXT);
+    OP_CHECK_NULL_WITH_CONTEXT(context, commContextDesc);
     OP_TILING_CHECK(commContextDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "commContext",
                                                           Ops::Base::ToString(commContextDesc->GetDataType()).c_str(),
@@ -135,6 +136,7 @@ static ge::graphStatus CheckCommContextDtype(const gert::TilingContext* context,
 static ge::graphStatus CheckGradFetchedDtype(const gert::TilingContext* context, const char* nodeName)
 {
     auto gradDesc = context->GetInputDesc(IN_GRAD_FETCHED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradDesc);
     OP_TILING_CHECK(!IsContains(GRAD_DTYPE_LIST, gradDesc->GetDataType()),
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         nodeName, "gradFetched", Ops::Base::ToString(gradDesc->GetDataType()).c_str(),
@@ -147,6 +149,7 @@ static ge::graphStatus CheckGradFetchedDtype(const gert::TilingContext* context,
 static ge::graphStatus CheckCountsDtype(const gert::TilingContext* context, const char* nodeName)
 {
     auto permDesc = context->GetInputDesc(IN_PERM);
+    OP_CHECK_NULL_WITH_CONTEXT(context, permDesc);
     OP_TILING_CHECK(
         permDesc->GetDataType() != ge::DT_INT32,
         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "perm", Ops::Base::ToString(permDesc->GetDataType()).c_str(),
@@ -154,6 +157,7 @@ static ge::graphStatus CheckCountsDtype(const gert::TilingContext* context, cons
         return ge::GRAPH_FAILED);
 
     auto sendCountsDesc = context->GetInputDesc(IN_SEND_COUNTS);
+    OP_CHECK_NULL_WITH_CONTEXT(context, sendCountsDesc);
     OP_TILING_CHECK(sendCountsDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "sendCounts",
                                                           Ops::Base::ToString(sendCountsDesc->GetDataType()).c_str(),
@@ -161,6 +165,7 @@ static ge::graphStatus CheckCountsDtype(const gert::TilingContext* context, cons
                     return ge::GRAPH_FAILED);
 
     auto recvCountsDesc = context->GetInputDesc(IN_RECV_COUNTS);
+    OP_CHECK_NULL_WITH_CONTEXT(context, recvCountsDesc);
     OP_TILING_CHECK(recvCountsDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "recvCounts",
                                                           Ops::Base::ToString(recvCountsDesc->GetDataType()).c_str(),
@@ -173,12 +178,14 @@ static ge::graphStatus CheckCountsDtype(const gert::TilingContext* context, cons
 static ge::graphStatus CheckEntryDtype(const gert::TilingContext* context, const char* nodeName)
 {
     auto recvLocalEntryDesc = context->GetInputDesc(IN_RECV_LOCAL_ENTRY);
+    OP_CHECK_NULL_WITH_CONTEXT(context, recvLocalEntryDesc);
     OP_TILING_CHECK(recvLocalEntryDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         nodeName, "recvLocalEntry", Ops::Base::ToString(recvLocalEntryDesc->GetDataType()).c_str(),
                         "The dtype of recvLocalEntry must be DT_INT32."),
                     return ge::GRAPH_FAILED);
     auto numRecvDesc = context->GetInputDesc(IN_NUM_RECV);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numRecvDesc);
     OP_TILING_CHECK(numRecvDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "numRecv",
                                                           Ops::Base::ToString(numRecvDesc->GetDataType()).c_str(),
@@ -191,6 +198,7 @@ static ge::graphStatus CheckEntryDtype(const gert::TilingContext* context, const
 static ge::graphStatus CheckGradUniqueDtype(const gert::TilingContext* context, const char* nodeName)
 {
     auto gradUniqueDesc = context->GetOutputDesc(OUT_GRAD_UNIQUE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradUniqueDesc);
     OP_TILING_CHECK(!IsContains(GRAD_DTYPE_LIST, gradUniqueDesc->GetDataType()),
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         nodeName, "gradUniqueOut", Ops::Base::ToString(gradUniqueDesc->GetDataType()).c_str(),
@@ -203,6 +211,7 @@ static ge::graphStatus CheckGradUniqueDtype(const gert::TilingContext* context, 
 static ge::graphStatus CheckUniqueOutputsDtype(const gert::TilingContext* context, const char* nodeName)
 {
     auto uniqueLocalEntryDesc = context->GetOutputDesc(OUT_UNIQUE_LOCAL_ENTRY);
+    OP_CHECK_NULL_WITH_CONTEXT(context, uniqueLocalEntryDesc);
     OP_TILING_CHECK(
         uniqueLocalEntryDesc->GetDataType() != ge::DT_INT32,
         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "uniqueLocalEntryOut",
@@ -211,6 +220,7 @@ static ge::graphStatus CheckUniqueOutputsDtype(const gert::TilingContext* contex
         return ge::GRAPH_FAILED);
 
     auto numUniqueDesc = context->GetOutputDesc(OUT_NUM_UNIQUE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numUniqueDesc);
     OP_TILING_CHECK(numUniqueDesc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(nodeName, "numUniqueOut",
                                                           Ops::Base::ToString(numUniqueDesc->GetDataType()).c_str(),
@@ -489,6 +499,7 @@ static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_
 static ge::graphStatus CheckMainInputsFormat(const gert::TilingContext* context, const char* nodeName)
 {
     auto commContextDesc = context->GetInputDesc(IN_COMM_CONTEXT);
+    OP_CHECK_NULL_WITH_CONTEXT(context, commContextDesc);
     ge::Format commContextFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(commContextDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         commContextFormat != ge::FORMAT_ND,
@@ -496,6 +507,7 @@ static ge::graphStatus CheckMainInputsFormat(const gert::TilingContext* context,
         return ge::GRAPH_FAILED);
 
     auto gradFetchedDesc = context->GetInputDesc(IN_GRAD_FETCHED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradFetchedDesc);
     ge::Format gradFetchedFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(gradFetchedDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         gradFetchedFormat != ge::FORMAT_ND,
@@ -503,12 +515,14 @@ static ge::graphStatus CheckMainInputsFormat(const gert::TilingContext* context,
         return ge::GRAPH_FAILED);
 
     auto permDesc = context->GetInputDesc(IN_PERM);
+    OP_CHECK_NULL_WITH_CONTEXT(context, permDesc);
     ge::Format permFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(permDesc->GetStorageFormat()));
     OP_TILING_CHECK(permFormat != ge::FORMAT_ND,
                     OP_LOGE_FOR_INVALID_FORMAT(nodeName, "perm", Ops::Base::ToString(permFormat).c_str(), "ND"),
                     return ge::GRAPH_FAILED);
 
     auto sendCountsDesc = context->GetInputDesc(IN_SEND_COUNTS);
+    OP_CHECK_NULL_WITH_CONTEXT(context, sendCountsDesc);
     ge::Format sendCountsFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(sendCountsDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         sendCountsFormat != ge::FORMAT_ND,
@@ -521,6 +535,7 @@ static ge::graphStatus CheckMainInputsFormat(const gert::TilingContext* context,
 static ge::graphStatus CheckAuxInputsFormat(const gert::TilingContext* context, const char* nodeName)
 {
     auto recvCountsDesc = context->GetInputDesc(IN_RECV_COUNTS);
+    OP_CHECK_NULL_WITH_CONTEXT(context, recvCountsDesc);
     ge::Format recvCountsFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(recvCountsDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         recvCountsFormat != ge::FORMAT_ND,
@@ -528,6 +543,7 @@ static ge::graphStatus CheckAuxInputsFormat(const gert::TilingContext* context, 
         return ge::GRAPH_FAILED);
 
     auto recvLocalEntryDesc = context->GetInputDesc(IN_RECV_LOCAL_ENTRY);
+    OP_CHECK_NULL_WITH_CONTEXT(context, recvLocalEntryDesc);
     ge::Format recvLocalEntryFormat =
         static_cast<ge::Format>(ge::GetPrimaryFormat(recvLocalEntryDesc->GetStorageFormat()));
     OP_TILING_CHECK(
@@ -535,6 +551,7 @@ static ge::graphStatus CheckAuxInputsFormat(const gert::TilingContext* context, 
         OP_LOGE_FOR_INVALID_FORMAT(nodeName, "recvLocalEntry", Ops::Base::ToString(recvLocalEntryFormat).c_str(), "ND"),
         return ge::GRAPH_FAILED);
     auto numRecvDesc = context->GetInputDesc(IN_NUM_RECV);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numRecvDesc);
     ge::Format numRecvFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(numRecvDesc->GetStorageFormat()));
     OP_TILING_CHECK(numRecvFormat != ge::FORMAT_ND,
                     OP_LOGE_FOR_INVALID_FORMAT(nodeName, "numRecv", Ops::Base::ToString(numRecvFormat).c_str(), "ND"),
@@ -546,6 +563,7 @@ static ge::graphStatus CheckAuxInputsFormat(const gert::TilingContext* context, 
 static ge::graphStatus CheckOutputsFormat(const gert::TilingContext* context, const char* nodeName)
 {
     auto gradUniqueDesc = context->GetOutputDesc(OUT_GRAD_UNIQUE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradUniqueDesc);
     ge::Format gradUniqueFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(gradUniqueDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         gradUniqueFormat != ge::FORMAT_ND,
@@ -553,6 +571,7 @@ static ge::graphStatus CheckOutputsFormat(const gert::TilingContext* context, co
         return ge::GRAPH_FAILED);
 
     auto uniqueLocalEntryDesc = context->GetOutputDesc(OUT_UNIQUE_LOCAL_ENTRY);
+    OP_CHECK_NULL_WITH_CONTEXT(context, uniqueLocalEntryDesc);
     ge::Format uniqueLocalEntryFormat =
         static_cast<ge::Format>(ge::GetPrimaryFormat(uniqueLocalEntryDesc->GetStorageFormat()));
     OP_TILING_CHECK(uniqueLocalEntryFormat != ge::FORMAT_ND,
@@ -561,6 +580,7 @@ static ge::graphStatus CheckOutputsFormat(const gert::TilingContext* context, co
                     return ge::GRAPH_FAILED);
 
     auto numUniqueDesc = context->GetOutputDesc(OUT_NUM_UNIQUE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numUniqueDesc);
     ge::Format numUniqueFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(numUniqueDesc->GetStorageFormat()));
     OP_TILING_CHECK(
         numUniqueFormat != ge::FORMAT_ND,
@@ -687,6 +707,7 @@ static ge::graphStatus CalcHiddenBytesLayout(const gert::TilingContext* context,
 {
     // hiddenBytes 按输入 dtype（gradFetched）算，作为 a2a 交换 stride
     auto gradFetchedDesc = context->GetInputDesc(IN_GRAD_FETCHED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradFetchedDesc);
     ge::DataType inputDtype = gradFetchedDesc->GetDataType();
     bytesPerElem = ge::GetSizeByDataType(inputDtype);
     OP_TILING_CHECK(tilingData.hiddenDim > INT64_MAX / bytesPerElem,
@@ -698,6 +719,7 @@ static ge::graphStatus CalcHiddenBytesLayout(const gert::TilingContext* context,
     tilingData.inputDtype = static_cast<int32_t>(inputDtype);
 
     auto gradUniqueDesc = context->GetOutputDesc(OUT_GRAD_UNIQUE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradUniqueDesc);
     tilingData.outputDtype = static_cast<int32_t>(gradUniqueDesc->GetDataType());
     if (tilingData.outputDtype != static_cast<int32_t>(ge::DT_FLOAT)) {
         int64_t flushCastNeed =
@@ -877,6 +899,7 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
 
     tilingData.numTokens = numTokens;
     tilingData.rankSize = rankSize;
@@ -884,6 +907,7 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
     tilingData.hiddenDim = hiddenDim;
 
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numEntriesPerRankPtr);
     tilingData.numEntriesPerRank = static_cast<int32_t>(*numEntriesPerRankPtr);
     // entry id 空间为 int32（rankId*numEntriesPerRank + 局部序号），乘积不得越界（SEC-2.1）
     OP_TILING_CHECK(tilingData.numEntriesPerRank < 0 ||
@@ -899,6 +923,7 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
         OP_LOGE_WITHOUT_REPORT(nodeName, "CalcHiddenBytesLayout failed."), return ge::GRAPH_FAILED);
 
     auto commBufferSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_COMM_BUFFER_SIZE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, commBufferSizePtr);
     tilingData.commBufferSize = *commBufferSizePtr;
 
     uint32_t statusBytes;
@@ -1563,7 +1588,9 @@ static ge::graphStatus SetRailBaseLayout(const gert::TilingContext* context, con
                                          int64_t& bytesPerElem)
 {
     auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK);
+    OP_CHECK_NULL_WITH_CONTEXT(context, numEntriesPerRankPtr);
     tilingData.numEntriesPerRank = static_cast<int32_t>(*numEntriesPerRankPtr);
     // int32 空间校验：entry id 空间按 world 口径
     OP_TILING_CHECK(tilingData.numEntriesPerRank < 0 ||
@@ -1576,6 +1603,7 @@ static ge::graphStatus SetRailBaseLayout(const gert::TilingContext* context, con
                     return ge::GRAPH_FAILED);
 
     auto gradFetchedDesc = context->GetInputDesc(IN_GRAD_FETCHED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradFetchedDesc);
     ge::DataType inputDtype = gradFetchedDesc->GetDataType();
     bytesPerElem = ge::GetSizeByDataType(inputDtype);
     OP_TILING_CHECK(tilingData.hiddenDim > INT64_MAX / bytesPerElem,
@@ -1589,9 +1617,11 @@ static ge::graphStatus SetRailBaseLayout(const gert::TilingContext* context, con
     tilingData.inputDtype = static_cast<int32_t>(inputDtype);
 
     auto gradUniqueDesc = context->GetOutputDesc(OUT_GRAD_UNIQUE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, gradUniqueDesc);
     tilingData.outputDtype = static_cast<int32_t>(gradUniqueDesc->GetDataType());
 
     auto commBufferSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_COMM_BUFFER_SIZE);
+    OP_CHECK_NULL_WITH_CONTEXT(context, commBufferSizePtr);
     tilingData.commBufferSize = *commBufferSizePtr;
     return ge::GRAPH_SUCCESS;
 }
