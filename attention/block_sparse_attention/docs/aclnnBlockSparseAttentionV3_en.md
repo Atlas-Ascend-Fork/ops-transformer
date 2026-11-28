@@ -48,11 +48,11 @@
   - qInputLayout: "TND" "BNSD" "BSND"
   - kvInputLayout: "TND" "BNSD" "BSND"
 
-- **MXFP4 feature description (supported only on Ascend 950PR&950DT products)**
+- **MX quantization (supported only on Ascend 950PR&950DT products)**
 
-  This API supports inputs of the MXFP4 data type (FLOAT4_E2M1) to improve computing efficiency and reduce memory usage. When MXFP4 inputs are used, provide the corresponding quantization scale factor for dequantization.
+  This API supports MXFP4 (quantMode=2/3), MXFP8 (quantMode=4), and mixed MXFP8 QK / MXFP4 PV (QK8PV4, quantMode=6/7). Supply FLOAT8_E8M0 dequantization scales for these modes.
 
-- <summary><a id="quantization-scale-factor-of-the-mxfp4-quantization-mode"></a><strong>Quantization Scale Factor of the MXFP4 Quantization Mode</strong></summary>
+- <summary><a id="quantization-scale-factor-of-the-mxfp4-quantization-mode"></a><strong>MX quantization scales (quantMode=2/3/4/6/7)</strong></summary>
 
   - qDequantScaleOptional:
 
@@ -78,7 +78,7 @@
 
       - BNSD:[B, Nkv, CeilDiv(Skv, 64), D, 2];
       - BSND:[B, CeilDiv(Skv, 64), Nkv, D, 2];
-      - TND: [BTkv//64, Nkv, D, 2].
+      - TND: [BTkv, Nkv, D, 2].
 
       $$
       BTkv = \sum_{b=0}^{B-1} \left\lceil \frac{Skv_b}{64} \right\rceil
@@ -210,9 +210,10 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>Represents the actual sparse pattern.</td>
       <td>        Optional Input (required in the current version)
         <ul>
-          <li>The shape is [batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY)].</li>
+          <li>The shape is [batch, headNum, qBlockNum, kvBlockNum]. qBlockNum and kvBlockNum must cover the Q and KV blocks obtained by dividing the sequence lengths by blockShapeX and blockShapeY, respectively, and rounding up.</li>
+          <li>TND uses the maximum of each actual sequence length array. BNSD and BSND use the S dimensions of Q and K. If both actual sequence length arrays are supplied, the maximum of each array can also be used.</li>
           <li>Indicates which blocks need to participate in the computation (1) and which blocks do not (0) after block-based division.</li>
-          <li>If nullptr is passed in, block sparse computation is not enabled, that is, the attention scores between all tokens are computed.</li>
+          <li>Pass a valid blockSparseMaskOptional tensor. The operator rejects nullptr.</li>
         </ul>
       </td>
       <td>INT8</td>
@@ -236,8 +237,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>Sparse block shape array.</td>
       <td>        Used together with blockSparseMaskOptional:
         <ul>
-          <li>When blockSparseMaskOptional is configured: If this input is configured, the operator obtains the sparse block size from it. If not, the operator defaults the sparse block size to [128,128].</li>
-          <li>When blockSparseMaskOptional is not configured: This input is ignored regardless of its configuration.</li>
+          <li>Specifies the sparse block size. If omitted, the default is [128,128].</li>
         </ul>
         When this input is configured: It must contain two elements [blockShapeX, blockShapeY]
         <ul>
@@ -303,7 +303,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         When this input is configured:
         <ul>
             <li>When quantMode=1, the shape is [batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), 1].</li>
-            <li>quantMode=2/3, see the constraints in <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scaling Factor of the MXFP4 Quantization Mode</a>.</li>
+            <li>quantMode=2/3/4/6/7, see the constraints in <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scaling Factor of the MXFP4 Quantization Mode</a>.</li>
         </ul>
       </td>
       <td>FLOAT32, FLOAT8_E8M0</td>
@@ -323,7 +323,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         When this input is configured:
         <ul>
             <li>When quantMode=1, the shape is [batch, kvHeadNum, ceilDiv(maxKVSeqLength, blockShapeY), 1].</li>
-            <li>For quantMode=2/3, see the constraints in <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scaling Factor of the MXFP4 Quantization Mode</a>.</li>
+            <li>For quantMode=2/3/4/6/7, see the constraints in <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scaling Factor of the MXFP4 Quantization Mode</a>.</li>
         </ul>
       </td>
       <td>FLOAT32, FLOAT8_E8M0</td>
@@ -343,7 +343,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         When this input is configured:
         <ul>
           <li>When quantMode=1, the shape is [batch, kvHeadNum, ceilDiv(maxKVSeqLength, blockShapeY), 1].</li>
-         <li>When quantMode=2/3, see <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scale Factor of the MXFP4 Quantization Mode</a> for constraints.</li>
+         <li>When quantMode=2/3/4/6/7, see <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scale Factor of the MXFP4 Quantization Mode</a> for constraints.</li>
         </ul>
       </td>
       <td>FLOAT32, FLOAT8_E8M0</td>
@@ -427,7 +427,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         <ul>
           <li>0: Indicates that both online softmax and rescale use the fp32 data type. Suitable for use cases that require high computation precision.</li>
           <li>1: Can be configured only when the input query, key, and value are all of the fp16 data type. Indicates that both online softmax and rescale use the fp16 data type. This value delivers better performance but lower precision, and numeric overflow may occur during computation. Determine whether to use this value based on the value range.</li>
-          <li>4: Indicates mixed-precision computation, which strikes a balance between performance and precision. online softmax uses the fp16/bf16 data type (the same as the data types of query, key, and value), and rescale uses the fp32 data type. Numeric overflow may occur in the online softmax phase. In MXFP4 quantization mode (quantMode=2/3), online softmax supports only the fp16 data type.</li>
+          <li>4: Indicates mixed-precision computation, which strikes a balance between performance and precision. In non-quantized modes, online softmax uses the FP16 or BF16 input data type, and rescale uses FP32. Numeric overflow may occur during online softmax. In MXFP4 modes (quantMode 2/3) and MXFP8 mode (quantMode 4), online softmax uses FP16.</li>
         </ul>
       </td>
       <td>INT64</td>
@@ -484,12 +484,16 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>quantMode (int64_t)</td>
       <td>Input</td>
       <td>Flag for selecting the quantization mode.</td>
-      <td>        Currently, only 0, 1, 2, and 3 are supported.
+      <td>        Supported values are 0 through 7.
         <ul>
           <li>0: no quantization.</li>
           <li>1: FP8 quantization.</li>
           <li>2: MXFP4 OCP quantization (the quantization scale is truncated down).</li>
           <li>3: MXFP4 CX quantization (custom quantization range, the quantization scale is truncated up).</li>
+          <li>4: MXFP8 OCP quantization.</li>
+          <li>5: HIF8 per-tensor quantization.</li>
+          <li>6: QK8PV4 OCP. Query and key use FLOAT8_E4M3FN. Value uses FLOAT4_E2M1.</li>
+          <li>7: QK8PV4 CX with the same Q/K/V data types as quantMode=6.</li>
           <li>For details, see <a href="#constraint_rule">Constraints</a>.</li>
         </ul>
       </td>
@@ -501,8 +505,8 @@ aclnnStatus aclnnBlockSparseAttentionV3(
     <tr>
       <td>dstTypeMax (double)</td>
       <td>Input</td>
-      <td>Custom quantization range passed in during MXFP4 CX quantization.</td>
-      <td>        This parameter can be set to 0.0 or [6.0, 12.0] only when quantMode is 2 or 3.
+      <td>Custom quantization range for MXFP4 CX and QK8PV4 CX.</td>
+      <td>        For quantMode 3 or 7, use 0.0 or a value in [6.0, 12.0]. For other modes, pass 0.0.
         <ul>
           <li>0.0: indicates that Amax(DType) is the maximum value of the quantization result data type.</li>
           <li>[6.0, 12.0]: a value in the range 6.0 to 12.0 indicates that Amax(DType) is the input value.</li>
@@ -517,7 +521,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>attentionOut (aclTensor*)</td>
       <td>Output</td>
       <td>attentionOut in the formula.</td>
-      <td>The data type and shape are the same as those of query.</td>
+      <td>The shape matches query. In non-quantized mode, the data type matches query. In quantized modes, the output type is FLOAT16 or BFLOAT16.</td>
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
       <td>3/4</td>
@@ -651,16 +655,16 @@ aclnnStatus aclnnBlockSparseAttentionV3(
 - qInputLayout currently supports only "TND", "BNSD", and "BSND".
 - kvInputLayout currently supports only "TND", "BNSD", and "BSND".
 - Currently, the InputLayout of query, key, and value must be consistent.
-- The data types of the input query, key, and value must be consistent, supporting FLOAT16 and BFLOAT16.
+- For quantMode=0–5, query, key, and value must have the same type. For quantMode=6/7, query and key must be FLOAT8_E4M3FN and value must be FLOAT4_E2M1.
 - The D axis of query, key, and value currently only supports being configured as 64 or 128.
 - If blockShapeOptional is passed in, it must contain two elements [blockShapeX, blockShapeY], and the values must be greater than 0. The multiple constraints on blockShapeX/blockShapeY for different products are as follows:
   <!-- npu="950" id7 -->
-  - On <term>Ascend 950PR&950DT products</term>: blockShapeY must be a multiple of 16; in MXFP4 quantization (quantMode=2/3), both blockShapeX and blockShapeY support only multiples of 64.
+  - On <term>Ascend 950PR&950DT products</term>: blockShapeY must be a multiple of 16; in MX quantization (quantMode=2/3/4/6/7), both blockShapeX and blockShapeY support only multiples of 64.
   <!-- end id7 -->
   <!-- npu="910b,A3" id8 -->
   - On <term>Atlas A2 products</term> and <term>Atlas A3 products</term>: blockShapeY must be a multiple of 128.
   <!-- end id8 -->
-- blockSparseMaskOptional currently must be passed in, and its shape must be [batch, headNum, ceilDiv(maxQS, blockShapeX), ceilDiv(maxKVS, blockShapeY)].
+- blockSparseMaskOptional is required. For the grid shape, see the parameter description.
 - attentionMaskOptional currently only supports passing nullptr.
 - actualSeqLengthsOptional is mandatory when qInputLayout is "TND"; actualSeqLengthsKvOptional is mandatory when kvInputLayout is "TND".
 - actualSeqLengthsOptional and actualSeqLengthsKvOptional currently must be configured together or not configured together. Configuring only one of them will be intercepted by the operator.
@@ -671,7 +675,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
 - softmaxLseFlag supports only the values 0 or 1, indicating that the softmaxLse output is disabled or enabled, respectively.
 - qSeqlen and kvSeqlen do not need to be divisible by blockShape. Non-aligned scenarios are supported, and the actual number of blocks is calculated by rounding up.
 - Let the headNum of the input query be N1 and the headNum of the input key and value be N2. Then N1 >= N2 && N1 % N2 == 0.
-- maskType currently only supports input 0, which indicates that no mask is applied.
+- maskType supports only 0, which means no additional attention mask is used.
 - blockSize currently only supports input 0, which indicates that paged cache is not supported.
 - preTokens and nextTokens currently only support passing in 2147483647, which indicates that all tokens before and after the current token participate in the attention computation, i.e., sliding window attention is not supported.
 - **quantMode=1 (FP8 static quantization mode) related constraints**:
@@ -716,6 +720,16 @@ aclnnStatus aclnnBlockSparseAttentionV3(
     - **CX Quantization Formula**
 
       $$ P_{\text{Scale}} = 2^{\lceil \log_2 \left( P_{\text{max}} / dstTypeMax \right) \rceil} = 2^{\lceil \log_2 P_{\text{max}} - \log_2 dstTypeMax \rceil} $$
+
+<!-- npu="950" id15 -->
+- **Constraints for quantMode=6/7 (QK8PV4 mixed quantization)**
+
+  - Supported only on <term>Ascend 950PR&950DT products</term>.
+  - Query and key use FLOAT8_E4M3FN. Value uses FLOAT4_E2M1. The value tensor descriptor uses the logical dimension D, and each D-element vector occupies D/2 bytes.
+  - Supply FLOAT8_E8M0 scales for Q, K, and V using the [MX quantization scale shapes](#quantization-scale-factor-of-the-mxfp4-quantization-mode).
+  - Set softmaxLseFlag to 0.
+  - When a Q block has no valid KV block, its attentionOut region retains the contents supplied by the caller.
+<!-- end id15 -->
 
 ## Example
 

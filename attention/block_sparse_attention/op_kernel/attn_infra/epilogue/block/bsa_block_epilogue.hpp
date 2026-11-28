@@ -44,6 +44,7 @@ class BlockEpilogue {
 #include "block_epilogue_compute_pscale_arch92_mxfp8.hpp"
 #elif defined(BSA_ARCH_35)
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_mask2idx_arch35.hpp"
+#include "../../../attn_infra/epilogue/block/bsa_block_epilogue_mask2idx_vf_arch35.hpp"
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_rescale_o_arch35_reg_high_prec.hpp"
 #include "../../../attn_infra/epilogue/block/block_epilogue_rescale_o_arch35_reg_high_prec_mxfp4.hpp"
 #include "../../../attn_infra/epilogue/block/block_epilogue_online_softmax_arch35_reg_high_prec_S_trans.hpp"

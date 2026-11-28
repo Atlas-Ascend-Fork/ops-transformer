@@ -34,11 +34,11 @@ namespace NpuArch::Epilogue::Block {
 
 using namespace MXFP4Kernel;
 
-template <MXQuantMode MX_QUANT_MODE_, class OutputType_, class LayoutS_, class ScaleType_>
-class BlockEpilogue<EpilogueOnlineSoftmaxBsaMX<true, MX_QUANT_MODE_>, OutputType_, Gemm::GemmType<half, LayoutS_>,
-                    ScaleType_> {
+template <MXQuantMode MX_QUANT_MODE_, class OutputType_, class LayoutS_, class ScaleType_, class PScaleSchedule_>
+class BlockEpilogue<EpilogueOnlineSoftmaxBsaMX<true, MX_QUANT_MODE_, PScaleSchedule_>, OutputType_,
+                    Gemm::GemmType<half, LayoutS_>, ScaleType_> {
 public:
-    using DispatchPolicy = EpilogueOnlineSoftmaxBsaMX<true, MX_QUANT_MODE_>;
+    using DispatchPolicy = EpilogueOnlineSoftmaxBsaMX<true, MX_QUANT_MODE_, PScaleSchedule_>;
     static constexpr MXQuantMode MX_QUANT_MODE = DispatchPolicy::MX_QUANT_MODE;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using ElementOutput = typename OutputType_::Element; // P
@@ -65,7 +65,7 @@ public:
         }
 
         // 常驻 buffer
-        for (uint32_t i = 0; i < MXFP4::UB_LOCAL_GROUP_MAX_CNT; i++) {
+        for (uint32_t i = 0; i < PScaleSchedule_::RING_TILES; i++) {
             localGroupMaxUBTensor[i] = resource.ubBuf.template GetBufferByByte<ElementMax>(
                 MXFP4::UB_LOCAL_GROUP_MAX_BUF_OFFSET + MXFP4::UB_LOCAL_GROUP_MAX_BUF_SIZE * i);
         }
@@ -263,14 +263,14 @@ public:
 
     __aicore__ inline uint32_t GetLocalGroupMaxBufIdx(uint32_t loop)
     {
-        return loop / 2 * 2 % MXFP4::UB_LOCAL_GROUP_MAX_CNT;
+        return loop / 2 * 2 % PScaleSchedule_::RING_TILES;
     }
 
 private:
     // UB tensors（FIXPIPE<->V 及常驻 buffer）
     AscendC::LocalTensor<ElementInput> sUBTensor[MXFP4::UB_S_BUF_CNT];                       // mm1Res(S)
     AscendC::LocalTensor<ElementDisguiseP> pUBTensor[MXFP4::UB_P_BUF_CNT];                   // vec1Res(P)
-    AscendC::LocalTensor<ElementMax> localGroupMaxUBTensor[MXFP4::UB_LOCAL_GROUP_MAX_CNT];   // LocalGroupMax
+    AscendC::LocalTensor<ElementMax> localGroupMaxUBTensor[PScaleSchedule_::RING_TILES];     // LocalGroupMax
     AscendC::LocalTensor<ElementMax> localGlobalMaxUBTensor[MXFP4::UB_LOCAL_GLOBAL_MAX_CNT]; // LocalGlobalMax
     AscendC::LocalTensor<ElementIndex> indexUBTensor;                                        // Index
     ElementInput NEG_LOG2_CX_;

@@ -2744,7 +2744,7 @@ TEST_F(block_sparse_attention_tiling_ut, A5_quantMode_invalid)
          {"preTokens", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2147483647)},
          {"nextTokens", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2147483647)},
          {"softmaxLseFlag", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
-         {"quantMode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(7)}},
+         {"quantMode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)}},
         &compileInfo, "Ascend950", 56, 262144, 16384);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
 }

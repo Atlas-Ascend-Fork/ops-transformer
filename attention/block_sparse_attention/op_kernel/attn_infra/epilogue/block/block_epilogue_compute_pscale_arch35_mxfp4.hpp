@@ -28,10 +28,12 @@ namespace NpuArch::Epilogue::Block {
 
 using namespace MXFP4Kernel;
 
-template <MXQuantMode MX_QUANT_MODE_, class ElementGroupMax_, class ElementDm_, class PScaleType_>
-class BlockEpilogue<EpilogueComputePScaleBsaMX<true, MX_QUANT_MODE_>, ElementGroupMax_, ElementDm_, PScaleType_> {
+template <MXQuantMode MX_QUANT_MODE_, class ElementGroupMax_, class ElementDm_, class PScaleType_,
+          class PScaleSchedule_>
+class BlockEpilogue<EpilogueComputePScaleBsaMX<true, MX_QUANT_MODE_, PScaleSchedule_>, ElementGroupMax_, ElementDm_,
+                    PScaleType_> {
 public:
-    using DispatchPolicy = EpilogueComputePScaleBsaMX<true, MX_QUANT_MODE_>;
+    using DispatchPolicy = EpilogueComputePScaleBsaMX<true, MX_QUANT_MODE_, PScaleSchedule_>;
     static constexpr MXQuantMode MX_QUANT_MODE = DispatchPolicy::MX_QUANT_MODE;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using ElementGroupMax = ElementGroupMax_;
@@ -51,10 +53,12 @@ public:
                 MXFP4::UB_PEER_GLOBAL_MAX_BUF_OFFSET + MXFP4::UB_PEER_GLOBAL_MAX_BUF_SIZE * i);
         }
         softmaxMaxUBTensor = resource.ubBuf.template GetBufferByByte<ElementGroupMax>(MXFP4::UB_SOFTMAX_MAX_BUF_OFFSET);
-        for (uint32_t i = 0; i < MXFP4::UB_LOCAL_GROUP_MAX_CNT; i++) {
+        for (uint32_t i = 0; i < PScaleSchedule_::RING_TILES; i++) {
             localGroupMaxUBTensor[i] = resource.ubBuf.template GetBufferByByte<ElementGroupMax>(
                 MXFP4::UB_LOCAL_GROUP_MAX_BUF_OFFSET + MXFP4::UB_LOCAL_GROUP_MAX_BUF_SIZE * i);
         }
+        // An empty second segment can start just past the ring. Alias an existing UB slot.
+        localGroupMaxUBTensor[PScaleSchedule_::RING_TILES] = localGroupMaxUBTensor[0];
         for (uint32_t i = 0; i < MXFP4::UB_LOCAL_GLOBAL_MAX_CNT; i++) {
             localGlobalMaxUBTensor[i] = resource.ubBuf.template GetBufferByByte<ElementGroupMax>(
                 MXFP4::UB_LOCAL_GLOBAL_MAX_BUF_OFFSET + MXFP4::UB_LOCAL_GLOBAL_MAX_BUF_SIZE * i);
@@ -78,7 +82,7 @@ public:
 
         // 如果当前s2只有一个softmax，就另外一个核不用做pscale操作
         if (tileInfo.kvsFirstTileStartVecCore != subBlockIdx && tileInfo.isTileGoupFirstTile) {
-            if (tileInfo.curKvsTileLoopIdx / TILE_GROUP_N == 0) {
+            if (tileInfo.curKvsTileLoopIdx / PScaleSchedule_::GROUP_TILES == 0) {
                 Mxfp4VF::ComputeOnlyPscaleCallVF<true, ElementGroupMax, MXFP4::QS_BASE_SIZE>(
                     localGlobalMax, peerGlobalMax, softmaxMaxOld, dm, static_cast<uint16_t>(subBlockIdx));
             } else {
@@ -103,7 +107,7 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(MXFP4::SYNC_P_BUF0_FLAG);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(MXFP4::SYNC_P_BUF1_FLAG);
 
-        if (tileInfo.curKvsTileLoopIdx / TILE_GROUP_N == 0) {
+        if (tileInfo.curKvsTileLoopIdx / PScaleSchedule_::GROUP_TILES == 0) {
             if (taskInfo.qsActBaseTileAlign64 == MXFP4::QS_BASE_SIZE) {
                 Mxfp4VF::ComputePscaleAndDmCallVF<MX_QUANT_MODE, true, ElementGroupMax, MXFP4::QS_BASE_SIZE>(
                     pscale1, pscale2, localGroupMax1, localGroupMax2, localGlobalMax, peerGlobalMax, softmaxMaxOld, dm,
@@ -189,7 +193,7 @@ private:
         // 这一轮pscale的任务loop在groupMax空间下发的groupMaxEndIdx，*2的原因是因为groupmax一片空间承载4*128
         uint32_t groupMaxEndIdx = groupMaxEndLoop * 2 % GROUP_MAX_SPACE_LEN + 1;
 
-        // toProcessGroupMaxLoopLen 求当前FD切核对应的Tile(16个softmax是一个tile)在每个核上有占用几片groupmax(4*128)空间
+        // 当前 PScale 分组内，本核需要读取的 group-max 槽数。
         uint16_t toProcessGroupMaxLoopLen =
             (curS2LoopIdx + 1) - (curS2LoopIdx / WHOLE_PROCESS_LOOP) * WHOLE_PROCESS_LOOP + isLoopFirstTaskVecCore;
         toProcessGroupMaxLoopLen = toProcessGroupMaxLoopLen / 2 * 2;
@@ -214,13 +218,13 @@ private:
     }
 
 private:
-    static constexpr uint32_t GROUP_MAX_SPACE_LEN = 20;
-    static constexpr uint32_t WHOLE_PROCESS_LOOP = 16;
+    static constexpr uint32_t GROUP_MAX_SPACE_LEN = PScaleSchedule_::RING_TILES;
+    static constexpr uint32_t WHOLE_PROCESS_LOOP = PScaleSchedule_::GROUP_TILES;
 
     AscendC::LocalTensor<ElementPScale> pscaleUBTensor[MXFP4::UB_P_SCALE_CNT];                    // pScale(复用P)
     AscendC::LocalTensor<ElementGroupMax> peerGlobalMaxUBTensor[MXFP4::UB_PEER_GLOBAL_MAX_CNT];   // peerGlobalMax
     AscendC::LocalTensor<ElementGroupMax> softmaxMaxUBTensor;                                     // softmaxMax
-    AscendC::LocalTensor<ElementGroupMax> localGroupMaxUBTensor[MXFP4::UB_LOCAL_GROUP_MAX_CNT];   // LocalGroupMax
+    AscendC::LocalTensor<ElementGroupMax> localGroupMaxUBTensor[GROUP_MAX_SPACE_LEN + 1];         // LocalGroupMax
     AscendC::LocalTensor<ElementGroupMax> localGlobalMaxUBTensor[MXFP4::UB_LOCAL_GLOBAL_MAX_CNT]; // LocalGlobalMax
     AscendC::LocalTensor<ElementDm> dmUBTensor[MXFP4::UB_UPDATE_SCALE_CNT];                       // updateScale
     ElementGroupMax LOG2_CX_CEIL_;

@@ -323,6 +323,111 @@ static_assert(L0C_QK_BUF_OFFSET + L0C_QK_BUF_CNT * L0C_QK_BUF_SIZE == L0C_PV_BUF
 static_assert(L0C_PV_BUF_OFFSET + L0C_PV_BUF_CNT * L0C_PV_BUF_SIZE <= 256 * KB_BYTE, "MXFP8 L0C exceeds 256KB");
 } // namespace MXFP8
 
+// QK MXFP8 + PV MXFP4.
+namespace QK_MXFP8_PV_MXFP4 {
+static constexpr uint32_t KB_BYTE = 1024;
+
+static constexpr uint32_t PSCALE_GROUP_TILES = 8;
+static constexpr uint32_t L1_P_BUF_CNT = PSCALE_GROUP_TILES + 4;
+static constexpr uint32_t L1_P_BUF_SIZE = 16 * KB_BYTE;
+static constexpr uint32_t L1_P_BUF_OFFSET = 0;
+
+static constexpr uint32_t L1_P_SCALE_BUF_CNT = L1_P_BUF_CNT;
+static constexpr uint32_t L1_P_SCALE_BUF_SIZE = 1280;
+static constexpr uint32_t L1_P_SCALE_BUF_OFFSET = L1_P_BUF_OFFSET + L1_P_BUF_CNT * L1_P_BUF_SIZE;
+
+static constexpr uint32_t L1_Q_BUF_CNT = 2;
+static constexpr uint32_t L1_Q_BUF_SIZE = 16 * KB_BYTE;
+static constexpr uint32_t L1_Q_BUF_OFFSET = L1_P_SCALE_BUF_OFFSET + L1_P_SCALE_BUF_CNT * L1_P_SCALE_BUF_SIZE;
+
+static constexpr uint32_t L1_Q_DESCALE_BUF_CNT = 2;
+static constexpr uint32_t L1_Q_DESCALE_BUF_SIZE = 512;
+static constexpr uint32_t L1_Q_DESCALE_BUF_OFFSET = L1_Q_BUF_OFFSET + L1_Q_BUF_CNT * L1_Q_BUF_SIZE;
+
+// QK, PV, and the PV seed take turns using the same data and scale slots.
+static constexpr uint32_t L1_KV_BUF_CNT = 6;
+static constexpr uint32_t L1_KV_BUF_SIZE = 32 * KB_BYTE;
+static constexpr uint32_t L1_KV_BUF_OFFSET = L1_Q_DESCALE_BUF_OFFSET + L1_Q_DESCALE_BUF_CNT * L1_Q_DESCALE_BUF_SIZE;
+
+static constexpr uint32_t L1_KV_DESCALE_BUF_SIZE = 2 * KB_BYTE;
+static constexpr uint32_t L1_KV_DESCALE_BUF_OFFSET = L1_KV_BUF_OFFSET + L1_KV_BUF_CNT * L1_KV_BUF_SIZE;
+
+static constexpr uint32_t L1_LOCAL_GLOBAL_MAX_BUF_CNT = 4;
+static constexpr uint32_t L1_LOCAL_GLOBAL_MAX_BUF_SIZE = 512;
+static constexpr uint32_t L1_LOCAL_GLOBAL_MAX_BUF_OFFSET =
+    L1_KV_DESCALE_BUF_OFFSET + L1_KV_BUF_CNT * L1_KV_DESCALE_BUF_SIZE;
+
+static constexpr uint32_t L1_ROW_SUM_SCALE_OFFSET =
+    L1_LOCAL_GLOBAL_MAX_BUF_OFFSET + L1_LOCAL_GLOBAL_MAX_BUF_CNT * L1_LOCAL_GLOBAL_MAX_BUF_SIZE;
+
+static constexpr uint32_t L0A_QK_BUF_CNT = 2;
+static constexpr uint32_t L0A_QK_BUF_SIZE = 16 * KB_BYTE;
+static constexpr uint32_t L0A_QK_BUF_OFFSET = 0;
+
+static constexpr uint32_t L0A_PV_BUF_CNT = 1;
+static constexpr uint32_t L0A_PV_BUF_SIZE = 18 * KB_BYTE;
+static constexpr uint32_t L0A_PV_BUF_OFFSET = 32 * KB_BYTE;
+
+static constexpr uint32_t L0B_QK_BUF_CNT = 2;
+static constexpr uint32_t L0B_QK_BUF_SIZE = 16 * KB_BYTE;
+static constexpr uint32_t L0B_QK_BUF_OFFSET = 0;
+
+static constexpr uint32_t L0B_PV_BUF_CNT = 1;
+static constexpr uint32_t L0B_PV_BUF_SIZE = 16 * KB_BYTE;
+static constexpr uint32_t L0B_PV_BUF_OFFSET = 32 * KB_BYTE;
+
+static constexpr uint32_t L0C_QK_BUF_CNT = 2;
+static constexpr uint32_t L0C_QK_BUF_SIZE = 64 * KB_BYTE;
+static constexpr uint32_t L0C_QK_BUF_OFFSET = 0;
+
+static constexpr uint32_t L0C_PV_BUF_CNT = 1;
+static constexpr uint32_t L0C_PV_BUF_SIZE = 72 * KB_BYTE;
+static constexpr uint32_t L0C_PV_BUF_OFFSET = 128 * KB_BYTE;
+
+static constexpr uint32_t BLOCK_SIZE = 32;
+
+static constexpr uint32_t V_SCALE_L0A_SIZE = (256 / 64) * ((128 + 16) / 16) * 32;
+
+static constexpr uint32_t mBaseSize = 128;
+
+static constexpr uint32_t CONST_32 = 32;
+static constexpr uint32_t CONST_64 = 64;
+static constexpr uint32_t CONST_128 = 128;
+
+static constexpr uint32_t ROW_SUM_PAD_NUM = 16;
+static constexpr uint32_t ROW_SUM_NUM = 128;
+
+static constexpr uint32_t NZ_C0_ELEMS = 16;
+static constexpr uint32_t FP4_C0_ELEMS = 64;
+
+static constexpr uint32_t PV_MMAD_M_DIM = ROW_SUM_NUM + ROW_SUM_PAD_NUM;
+
+static constexpr uint32_t S2_BASE_TILE_SIZE = 256;
+
+static constexpr uint16_t SEED_V_DATA_FILL = 0x6666;
+static constexpr uint16_t SEED_V_SCALE_FILL = 0x7D7D;
+static constexpr uint16_t ZERO_FILL_PATTERN = 0x0000;
+
+static constexpr uint32_t GM_MAX_BUFFER_LEN = 0x7FFFFFFFu;
+
+// MTE1_MTE2 and MTE2_MTE1: Q uses 0/1, shared K/V uses 2..7.
+static constexpr uint32_t Q_EVENT0 = 0;
+static constexpr uint32_t KV_EVENT0 = 2;
+static constexpr uint32_t L1_USED_BYTES = L1_ROW_SUM_SCALE_OFFSET + V_SCALE_L0A_SIZE;
+static_assert(L1_P_BUF_OFFSET + L1_P_BUF_CNT * L1_P_BUF_SIZE == L1_P_SCALE_BUF_OFFSET);
+static_assert(L1_P_SCALE_BUF_OFFSET + L1_P_SCALE_BUF_CNT * L1_P_SCALE_BUF_SIZE == L1_Q_BUF_OFFSET);
+static_assert(L1_Q_BUF_OFFSET + L1_Q_BUF_CNT * L1_Q_BUF_SIZE == L1_Q_DESCALE_BUF_OFFSET);
+static_assert(L1_Q_DESCALE_BUF_OFFSET + L1_Q_DESCALE_BUF_CNT * L1_Q_DESCALE_BUF_SIZE == L1_KV_BUF_OFFSET);
+static_assert(L1_USED_BYTES <= 512 * KB_BYTE);
+static_assert(L1_KV_BUF_SIZE >= PV_MMAD_M_DIM * S2_BASE_TILE_SIZE / 2, "K/V pool must hold PV seed");
+static_assert(L0A_QK_BUF_OFFSET + L0A_QK_BUF_CNT * L0A_QK_BUF_SIZE == L0A_PV_BUF_OFFSET);
+static_assert(L0A_PV_BUF_OFFSET + L0A_PV_BUF_CNT * L0A_PV_BUF_SIZE <= 64 * KB_BYTE);
+static_assert(L0B_QK_BUF_OFFSET + L0B_QK_BUF_CNT * L0B_QK_BUF_SIZE == L0B_PV_BUF_OFFSET);
+static_assert(L0B_PV_BUF_OFFSET + L0B_PV_BUF_CNT * L0B_PV_BUF_SIZE <= 64 * KB_BYTE);
+static_assert(L0C_QK_BUF_OFFSET + L0C_QK_BUF_CNT * L0C_QK_BUF_SIZE == L0C_PV_BUF_OFFSET);
+static_assert(L0C_PV_BUF_OFFSET + L0C_PV_BUF_SIZE <= 256 * KB_BYTE);
+} // namespace QK_MXFP8_PV_MXFP4
+
 } // namespace NpuArch::Gemm::Block
 
 #endif // BLOCK_MMAD_ARCH35_UTILS_HPP

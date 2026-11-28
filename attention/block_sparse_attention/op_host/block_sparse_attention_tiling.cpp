@@ -121,6 +121,8 @@ enum QuantMode : int64_t {
     MXFP4_CX_QUANT = 3,
     MXFP8_OCP_QUANT = 4,
     HIF8_PER_TENSOR_QUANT = 5,
+    QK_MXFP8_PV_MXFP4_OCP_QUANT = 6,
+    QK_MXFP8_PV_MXFP4_CX_QUANT = 7,
 };
 
 // 判断是否为 mxfp4 量化(OCP 或 CX)
@@ -132,9 +134,14 @@ static bool IsMxfp8Quant(int64_t qm)
 {
     return qm == MXFP8_OCP_QUANT;
 }
+static bool IsQk8Pv4Quant(int64_t qm)
+{
+    return qm == QK_MXFP8_PV_MXFP4_OCP_QUANT || qm == QK_MXFP8_PV_MXFP4_CX_QUANT;
+}
+
 static bool IsMxFullQuant(int64_t qm)
 {
-    return IsMxfp4Quant(qm) || IsMxfp8Quant(qm);
+    return IsMxfp4Quant(qm) || IsMxfp8Quant(qm) || IsQk8Pv4Quant(qm);
 }
 
 static bool IsHif8Quant(int64_t qm)
@@ -409,6 +416,18 @@ ge::graphStatus BSATiling::CheckQKVDtype(gert::TilingContext* bsaContext)
         }
     }
 
+    if (IsQk8Pv4Quant(quantMode_)) {
+        if (!isA5_ || dataType_ != ge::DT_FLOAT8_E4M3FN || kDataType != ge::DT_FLOAT8_E4M3FN ||
+            vDataType != ge::DT_FLOAT4_E2M1) {
+            OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
+                bsaContext->GetNodeName(), "query, key and value",
+                (DataTypeToString(dataType_) + ", " + DataTypeToString(kDataType) + ", " + DataTypeToString(vDataType))
+                    .c_str(),
+                "QK8PV4 requires Ascend950 with Q/K=FLOAT8_E4M3FN and V=FLOAT4_E2M1");
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
+    }
     if (dataType_ != kDataType || dataType_ != vDataType) {
         OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(bsaContext->GetNodeName(), "query, key and value",
                                                ("query=" + DataTypeToString(dataType_) + ", key=" +
@@ -931,6 +950,20 @@ ge::graphStatus BSATiling::ParseSparsePattern(gert::TilingContext* bsaContext)
             return ge::GRAPH_FAILED;
         }
     }
+    if (IsQk8Pv4Quant(quantMode_) &&
+        (!((qInputLayout_ == BSAQInputLayout::BNSD_Q && kvCacheLayout_ == BSAKvCacheLayout::BNSD_KV) ||
+           (qInputLayout_ == BSAQInputLayout::BSND_Q && kvCacheLayout_ == BSAKvCacheLayout::BSND_KV) ||
+           (qInputLayout_ == BSAQInputLayout::TND_Q && kvCacheLayout_ == BSAKvCacheLayout::TND_KV)) ||
+         (embeddingSize_ != 64 && embeddingSize_ != 128))) {
+        const auto* attrs = bsaContext->GetAttrs();
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            bsaContext->GetNodeName(), "qInputLayout, kvInputLayout and headDim",
+            (std::string(attrs->GetAttrPointer<char>(Q_INPUT_LAYOUT_INDEX)) + ", " +
+             attrs->GetAttrPointer<char>(KV_INPUT_LAYOUT_INDEX) + ", " + std::to_string(embeddingSize_))
+                .c_str(),
+            "QK8PV4 requires matching BNSD, BSND or TND layouts and a head dimension of 64 or 128");
+        return ge::GRAPH_FAILED;
+    }
     // HIF8 keeps a fixed 128x256 internal base tile, but sparse X/Y block
     // boundaries may be smaller and are handled through the existing Q/KV
     // tail and cross-block gather paths, requiring the Cube minimum alignment
@@ -1266,10 +1299,10 @@ ge::graphStatus BSATiling::ParseAttrs(gert::TilingContext* bsaContext)
     int64_t quantModeValue = (quantModePtr == nullptr) ? 0 : *quantModePtr;
     if (quantModeValue != NO_QUANT && quantModeValue != FP8_QUANT && quantModeValue != MXFP4_OCP_QUANT &&
         quantModeValue != MXFP4_CX_QUANT && quantModeValue != MXFP8_OCP_QUANT &&
-        quantModeValue != HIF8_PER_TENSOR_QUANT) {
+        quantModeValue != HIF8_PER_TENSOR_QUANT && !IsQk8Pv4Quant(quantModeValue)) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(bsaContext->GetNodeName(), "quantMode",
                                               std::to_string(quantModeValue).c_str(),
-                                              "the supported quantMode is 0/1/2/3/4/5");
+                                              "the supported quantMode is 0/1/2/3/4/5/6/7");
         return ge::GRAPH_FAILED;
     }
     quantMode_ = static_cast<uint32_t>(quantModeValue);
@@ -1370,8 +1403,16 @@ ge::graphStatus BSATiling::ParseAttrs(gert::TilingContext* bsaContext)
         return ge::GRAPH_FAILED;
     }
 
+    if (IsQk8Pv4Quant(quantMode_) && (!isA5_ || maskType_ != 0 || softmaxLseFlag_)) {
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            bsaContext->GetNodeName(), "quantMode, maskType and softmaxLseFlag",
+            (std::to_string(quantMode_) + ", " + std::to_string(maskType_) + ", " + std::to_string(softmaxLseFlag_))
+                .c_str(),
+            "QK8PV4 requires Ascend950, maskType=0 and softmaxLseFlag=0");
+        return ge::GRAPH_FAILED;
+    }
     // V3 新增:读取量化参数 quantMode / dstTypeMax
-    if (quantMode_ == MXFP4_CX_QUANT) {
+    if (quantMode_ == MXFP4_CX_QUANT || quantMode_ == QK_MXFP8_PV_MXFP4_CX_QUANT) {
         if (dstTypeMax_ == 0.0f) {
             dstTypeMax_ = MXFP4_DEFAULT_DST_TYPE_MAX_LOG2;
         } else {
@@ -1458,6 +1499,11 @@ static inline uint32_t CalcFp8KvBaseTile(uint32_t blockShapeY, uint32_t preferre
 
 void BSATiling::CalcBaseTileTilingParams950()
 {
+    if (IsQk8Pv4Quant(quantMode_)) {
+        qBaseTile_ = TILE_SIZE_128;
+        kvBaseTile_ = TILE_SIZE_256;
+        return;
+    }
     if (IsHif8Quant(quantMode_)) {
         // HIF8 materializes 64 Q lanes per AIV, including zero-padded tails.
         qBaseTile_ = isA6_ ? NUM_64 : TILE_SIZE_128;
@@ -1772,7 +1818,11 @@ uint64_t BSATiling::GenerateTilingKey(gert::TilingContext* bsaContext)
     } else if (dataType_ == ge::DT_BF16) {
         tilingKey += 22220ULL; // 22 for BF16 -> 9000000030000002 + 22220 = 9000000030022222
     }
-    if (quantMode_ == MXFP4_OCP_QUANT) {
+    if (quantMode_ == QK_MXFP8_PV_MXFP4_CX_QUANT) {
+        tilingKey += attentionOutDataType_ == ge::DT_FLOAT16 ? 81 : 80;
+    } else if (quantMode_ == QK_MXFP8_PV_MXFP4_OCP_QUANT) {
+        tilingKey += attentionOutDataType_ == ge::DT_FLOAT16 ? 71 : 70;
+    } else if (quantMode_ == MXFP4_OCP_QUANT) {
         if (attentionOutDataType_ == ge::DT_FLOAT16) {
             tilingKey += 31;
         } else {

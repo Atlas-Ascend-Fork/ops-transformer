@@ -12,6 +12,7 @@
 #include <string>
 #include <unordered_map>
 #include <acl/acl.h>
+#include "op_common/log/log.h"
 #include "opdev/common_types.h"
 #include "opdev/op_errno.h"
 #include "opdev/op_executor.h"
@@ -42,14 +43,25 @@ enum QuantMode : int64_t {
     MXFP4_CX_QUANT = 3,
     MXFP8_OCP_QUANT = 4,
     HIF8_PER_TENSOR_QUANT = 5,
+    QK_MXFP8_PV_MXFP4_OCP_QUANT = 6,
+    QK_MXFP8_PV_MXFP4_CX_QUANT = 7,
 };
 
-static bool CheckDataType(const aclTensor* query, const aclTensor* key, const aclTensor* value)
+static bool IsQk8Pv4Quant(int64_t quantMode)
+{
+    return quantMode == QK_MXFP8_PV_MXFP4_OCP_QUANT || quantMode == QK_MXFP8_PV_MXFP4_CX_QUANT;
+}
+
+static bool CheckDataType(const aclTensor* query, const aclTensor* key, const aclTensor* value, int64_t quantMode)
 {
     const DataType qDtype = query->GetDataType();
     const DataType kDtype = key->GetDataType();
     const DataType vDtype = value->GetDataType();
 
+    if (IsQk8Pv4Quant(quantMode)) {
+        return qDtype == DataType::DT_FLOAT8_E4M3FN && kDtype == DataType::DT_FLOAT8_E4M3FN &&
+               vDtype == DataType::DT_FLOAT4_E2M1;
+    }
     // V3 新增支持 DT_FLOAT4_E2M1 (mxfp4) 数据类型
     static const std::unordered_map<DataType, std::vector<DataType>> validKvType = {
         {DataType::DT_FLOAT16, {DataType::DT_FLOAT16}},
@@ -173,10 +185,20 @@ static bool CheckQuantModeAndDtype(int64_t quantMode, const aclTensor* query, co
         case MXFP8_OCP_QUANT: // quantMode=4: QKV=FP8_E4M3FN, scales=FP8_E8M0 (OCP only)
             return CheckQuantParams(query, key, value, qScale, kScale, vScale, DataType::DT_FLOAT8_E4M3FN,
                                     DataType::DT_FLOAT8_E8M0, quantMode, "FP8_E4M3FN", "FP8_E8M0");
+        case QK_MXFP8_PV_MXFP4_OCP_QUANT:
+        case QK_MXFP8_PV_MXFP4_CX_QUANT:
+            return query->GetDataType() == DataType::DT_FLOAT8_E4M3FN &&
+                   key->GetDataType() == DataType::DT_FLOAT8_E4M3FN &&
+                   value->GetDataType() == DataType::DT_FLOAT4_E2M1 &&
+                   CheckScaleMatchDtype(qScale, DataType::DT_FLOAT8_E8M0) &&
+                   CheckScaleMatchDtype(kScale, DataType::DT_FLOAT8_E8M0) &&
+                   CheckScaleMatchDtype(vScale, DataType::DT_FLOAT8_E8M0);
         case HIF8_PER_TENSOR_QUANT:
             return CheckHif8PerTensorParams(query, key, value, qScale, kScale, vScale, pScale);
         default:
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Invalid quantMode %ld, must be 0/1/2/3/4/5.", quantMode);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("aclnnBlockSparseAttentionV3GetWorkspaceSize", "quantMode",
+                                                  std::to_string(quantMode).c_str(),
+                                                  "the supported quantMode values are 0 through 7");
             return false;
     }
 }
@@ -224,7 +246,7 @@ static aclnnStatus ValidateParams(const aclTensor* query, const aclTensor* key, 
         return ACLNN_ERR_PARAM_NULLPTR;
     }
 
-    if (!CheckDataType(query, key, value)) {
+    if (!CheckDataType(query, key, value, quantMode)) {
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -346,7 +368,8 @@ static aclnnStatus MakeContiguous(const aclTensor*& query, const aclTensor*& key
             return ACLNN_ERR_PARAM_INVALID;
         }
 
-    } else if (quantMode == MXFP4_OCP_QUANT || quantMode == MXFP4_CX_QUANT || quantMode == MXFP8_OCP_QUANT) {
+    } else if (quantMode == MXFP4_OCP_QUANT || quantMode == MXFP4_CX_QUANT || quantMode == MXFP8_OCP_QUANT ||
+               IsQk8Pv4Quant(quantMode)) {
         // mxfp4(OCP/CX): scale 维度按 layout 校验, TND=4维, BNSD/BSND=5维
         qDequantScaleOptional = l0op::Contiguous(qDequantScaleOptional, executor);
         CHECK_RET(qDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
@@ -391,7 +414,6 @@ static aclnnStatus ValidateAdditionalParams(int64_t innerPrecise, int64_t quantM
         return ACLNN_ERR_PARAM_INVALID;
     }
 
-    // 只有 quantMode=2/3 (mxfp4 OCP/CX) 需要 dstTypeMax,合法取值:0 或 [6.0, 12.0]
     if (quantMode == MXFP4_CX_QUANT) {
         bool valid = (dstTypeMax == 0.0) || (dstTypeMax >= 6.0 && dstTypeMax <= 12.0);
         if (!valid) {
@@ -399,6 +421,13 @@ static aclnnStatus ValidateAdditionalParams(int64_t innerPrecise, int64_t quantM
                     dstTypeMax);
             return ACLNN_ERR_PARAM_INVALID;
         }
+    }
+
+    if (quantMode == QK_MXFP8_PV_MXFP4_CX_QUANT && dstTypeMax != 0.0 && !(dstTypeMax >= 6.0 && dstTypeMax <= 12.0)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("aclnnBlockSparseAttentionV3GetWorkspaceSize", "dstTypeMax",
+                                              std::to_string(dstTypeMax).c_str(),
+                                              "QK8PV4 CX requires dstTypeMax=0 or a value in [6, 12]");
+        return ACLNN_ERR_PARAM_INVALID;
     }
 
     OP_CHECK_NULL(attentionOut, return ACLNN_ERR_PARAM_NULLPTR);
@@ -410,7 +439,8 @@ static aclnnStatus ValidateAdditionalParams(int64_t innerPrecise, int64_t quantM
 static aclnnStatus ValidateMxfp4Constraints(int64_t quantMode, int64_t softmaxLseFlag, int64_t innerPrecise,
                                             const aclTensor* attenMaskOptional, const aclTensor* blockTableOptional)
 {
-    if (quantMode != MXFP4_OCP_QUANT && quantMode != MXFP4_CX_QUANT && quantMode != MXFP8_OCP_QUANT) {
+    if (quantMode != MXFP4_OCP_QUANT && quantMode != MXFP4_CX_QUANT && quantMode != MXFP8_OCP_QUANT &&
+        !IsQk8Pv4Quant(quantMode)) {
         return ACLNN_SUCCESS;
     }
     if (innerPrecise != 4) {

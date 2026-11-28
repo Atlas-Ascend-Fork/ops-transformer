@@ -41,13 +41,12 @@ public:
     static constexpr uint32_t SUB_VEC_NUM = 2;
     static constexpr uint32_t BLOCK_SIZE = 32;
 
-    __aicore__ inline BlockMmadTla(Arch::Resource<ArchTag>& resource)
+    template <int L1GlobalMaxOffset = MXFP4::L1_LOCAL_GLOBAL_MAX_BUF_OFFSET>
+    __aicore__ inline BlockMmadTla(Arch::Resource<ArchTag>& resource, tla::Int<L1GlobalMaxOffset> = {})
     {
-        // L1 区域顺序（与 QFA 一致）：P 数据 | P-scale | Q 数据 | Q-scale | KV(=V) 数据 | KV(=V)-scale
-        // localGlobalMaxL1 = 256*4
         for (uint32_t i = 0; i < MXFP4::L1_LOCAL_GLOBAL_MAX_BUF_CNT; i++) {
             localGlobalMaxL1[i] = resource.l1Buf.template GetBufferByByte<ElementLocalGlobalMax>(
-                MXFP4::L1_LOCAL_GLOBAL_MAX_BUF_OFFSET + MXFP4::L1_LOCAL_GLOBAL_MAX_BUF_SIZE * i);
+                L1GlobalMaxOffset + MXFP4::L1_LOCAL_GLOBAL_MAX_BUF_SIZE * i);
         }
     }
     __aicore__ inline ~BlockMmadTla() {}
@@ -75,7 +74,6 @@ public:
     }
 
 protected:
-    // MXFP4 专用：E8M0 scale 的 L1 buffer（V-scale 4 份，P-scale 20 份）+ MX 版 L1->L0 拷贝器
     AscendC::LocalTensor<half> localGlobalMaxL1[MXFP4::L1_LOCAL_GLOBAL_MAX_BUF_CNT];
 };
 

@@ -26,11 +26,11 @@
 namespace NpuArch::Epilogue::Block {
 using namespace MXFP4Kernel;
 template <class ElementO_, class ElementOTmp_, class ElementDm_, class TileCopy_, class OTmpSrcPos_, LseMode LSE_MODE_,
-          LseFormat LSE_FORMAT_>
-class BlockEpilogue<EpilogueAtlasA5BsaRescaleOMX<LSE_MODE_, LSE_FORMAT_, true>, ElementO_, ElementOTmp_, ElementDm_,
-                    TileCopy_, OTmpSrcPos_> {
+          LseFormat LSE_FORMAT_, class PScaleSchedule_>
+class BlockEpilogue<EpilogueAtlasA5BsaRescaleOMX<LSE_MODE_, LSE_FORMAT_, true, PScaleSchedule_>, ElementO_,
+                    ElementOTmp_, ElementDm_, TileCopy_, OTmpSrcPos_> {
 public:
-    using DispatchPolicy = EpilogueAtlasA5BsaRescaleOMX<LSE_MODE_, LSE_FORMAT_, true>;
+    using DispatchPolicy = EpilogueAtlasA5BsaRescaleOMX<LSE_MODE_, LSE_FORMAT_, true, PScaleSchedule_>;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using ElementO = ElementO_;
     using ElementOTmp = ElementOTmp_;
@@ -65,7 +65,7 @@ public:
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         AscendC::LocalTensor<ElementDm> dm = dmUBTensor[tileInfo.updateScaleIdx];
 
-        if (tileInfo.curKvsTileLoopIdx / TILE_GROUP_N == 0) {
+        if (tileInfo.curKvsTileLoopIdx < PScaleSchedule_::GROUP_TILES) {
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(MXFP4::SYNC_ATTNOUT_BUF_FLAG);
             Mxfp4VF::ProcessUpdateOCallVF<false>(oUBTensor, oTmpUBTensor, dm, globalRowSumUBTensor,
                                                  localRowSumUBTensor);
