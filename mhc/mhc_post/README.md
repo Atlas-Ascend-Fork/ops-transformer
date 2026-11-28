@@ -23,7 +23,7 @@
   x_{l+1} = (H_{l}^{res})^{T} \times x_l + h_{l}^{out} \otimes H_{t}^{post}
   $$
 
-  当 h_res 缺省时（仅 Ascend 950 支持）：
+  当 h_res 缺省时（仅 Ascend 950 的 aclnn 单算子接口支持，图模式（GEIR）不支持）：
 
   $$
   x_{l+1} = x_l + h_{l}^{out} \otimes H_{t}^{post}
@@ -57,14 +57,14 @@
     <tr>
       <td>h_res</td>
       <td>输入（可选）</td>
-      <td>mHC的h_res变换矩阵，是做完sinkhorn变换后的双随机矩阵。缺省时退化为直接残差连接（仅 Ascend 950 支持）。</td>
+      <td>mHC的h_res变换矩阵，是做完sinkhorn变换后的双随机矩阵。在Ascend 950上通过aclnn单算子接口调用时，缺省则退化为直接残差连接；图模式（GEIR）中h_res为必传输入。</td>
       <td>FLOAT32</td>
       <td>ND</td>
     </tr>
     <tr>
       <td>h_out</td>
       <td>输入</td>
-      <td>Atten/MLP层的输出。</td>
+      <td>Attention/MLP层的输出。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
     </tr>
@@ -87,13 +87,13 @@
 
 ## 约束说明
 
-- <term>Ascend 950PR&950DT系列产品</term>：h_res 支持传入 nullptr，此时退化为直接残差连接。
+- <term>Ascend 950PR&950DT系列产品</term>：通过 aclnn 单算子接口调用时，h_res 支持传入 nullptr，此时退化为直接残差连接；图模式（GEIR）中 h_res 为必传输入。
 - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：h_res 为必传参数，不支持传入 nullptr。
 
   | 规格项   | 规格               | 规格说明                                |
   | :------- | :----------------- | :------------------------------------- |
   | n        | 4                  | 固定为4                              |
-  | d        | 范围1到100000       | 128的倍数                             |
+  | d        | 大于0且小于100000       | 128的倍数                             |
 
 ## 调用说明
 

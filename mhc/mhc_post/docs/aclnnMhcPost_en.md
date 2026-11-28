@@ -113,7 +113,7 @@ aclnnStatus aclnnMhcPost(
     <tr>
       <td>hOut</td>
       <td>Input</td>
-      <td>Output of the Atten/MLP layer.</td>
+      <td>Output of the Attention/MLP layer.</td>
       <td>Same data type as x.</td>
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
@@ -138,7 +138,7 @@ aclnnStatus aclnnMhcPost(
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
       <td>[B,S,N,D], [T,N,D]</td>
-      <td>-</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
@@ -195,11 +195,6 @@ aclnnStatus aclnnMhcPost(
           <tr>
               <td>The data type or shape of x, hRes (when non-empty), hOut, hPost, or out does not match.</td>
           </tr>
-            <tr>
-              <td>ACLNN_ERR_INNER_NULLPTR</td>
-              <td>561103</td>
-              <td>n is not equal to 4; d is not within [1, 100000]; d is not divisible by 128.</td>
-          </tr>
       </tbody>
   </table>
 
@@ -249,6 +244,7 @@ aclnnStatus aclnnMhcPost(
 ## Constraints
 
 - aclnnMhcPost defaults to a deterministic implementation.
+- After parameter validation succeeds, if any of x, hOut, or hPost is an empty tensor, or if hRes is non-null and is an empty tensor, the two-phase API calls return success, workspaceSize is 0, no computation task is generated, and out is not written. The caller must skip consuming the output.
 
 <!-- npu="950" id7 -->
 - <term>Ascend 950PR&950DT products</term>: hRes supports passing in nullptr. In this case, it degrades to a direct residual connection.
@@ -259,7 +255,7 @@ aclnnStatus aclnnMhcPost(
   | Specification Item | Value              | Specification                          |
   | :------- | :----------------- | :------------------------------------- |
   | n        | 4                  | Fixed to 4.                            |
-  | d        | Range 1 to 100000  | Multiple of 128.                       |
+  | d        | Greater than 0 and less than 100000  | Multiple of 128.                       |
 
 <!-- end id8 -->
 
@@ -360,9 +356,9 @@ int main() {
     // 2. To construct input and output, it is necessary to customize the construction according to the API interface.
     // Example: BSND format (B, S, n, D)
     std::vector<int64_t> xShape = {1, 1024, 4, 5120};   // BSND
-    std::vector<int64_t> hResShape = {1, 1024, 4, 4};   // BSND
+    std::vector<int64_t> hResShape = {1, 1024, 4, 4};   // BSNN
     std::vector<int64_t> hOutShape = {1, 1024, 5120};   // BSD
-    std::vector<int64_t> hPostShape = {1, 1024, 4};     // BSn
+    std::vector<int64_t> hPostShape = {1, 1024, 4};     // BSN
     std::vector<int64_t> outShape = {1, 1024, 4, 5120};  // BSND
 
     void *xDeviceAddr = nullptr;

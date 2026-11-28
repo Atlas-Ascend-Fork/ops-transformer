@@ -25,7 +25,7 @@ English | [简体中文](./README.md)
   x_{l+1} = (H_{l}^{res})^{T} \times x_l + h_{l}^{out} \otimes H_{t}^{post}
   $$
 
-  When h_res is omitted (supported only by Ascend 950):
+  When h_res is omitted (supported only by the aclnn single-operator API on Ascend 950; not supported in graph mode (GEIR)):
 
   $$
   x_{l+1} = x_l + h_{l}^{out} \otimes H_{t}^{post}
@@ -59,14 +59,14 @@ English | [简体中文](./README.md)
     <tr>
       <td>h_res</td>
       <td>Input (optional)</td>
-      <td>h_res transformation matrix of mHC, which is the doubly stochastic matrix after the sinkhorn transformation. When omitted, the operator degrades to a direct residual connection (supported only by Ascend 950).</td>
+      <td>h_res transformation matrix of mHC, which is the doubly stochastic matrix after the sinkhorn transformation. When called through the aclnn single-operator API on Ascend 950, omitting h_res degrades the operator to a direct residual connection. In graph mode (GEIR), h_res is required.</td>
       <td>FLOAT32</td>
       <td>ND</td>
     </tr>
     <tr>
       <td>h_out</td>
       <td>Input</td>
-      <td>Output of the Atten/MLP layer.</td>
+      <td>Output of the Attention/MLP layer.</td>
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
     </tr>
@@ -89,13 +89,13 @@ English | [简体中文](./README.md)
 
 ## Constraints
 
-- <term>Ascend 950PR&950DT products</term>: h_res accepts nullptr. In this case, the operator degrades to a direct residual connection.
+- <term>Ascend 950PR&950DT products</term>: When called through the aclnn single-operator API, h_res accepts nullptr. In this case, the operator degrades to a direct residual connection. In graph mode (GEIR), h_res is required.
 - <term>Atlas A2 products</term> and <term>Atlas A3 products</term>: h_res is a required parameter and does not accept nullptr.
 
   | Specification Item   | Specification               | Description                                |
   | :------- | :----------------- | :------------------------------------- |
   | n        | 4                  | Fixed at 4                              |
-  | d        | Range 1 to 100000       | Multiple of 128                             |
+  | d        | Greater than 0 and less than 100000       | Multiple of 128                             |
 
 ## Calling Instructions
 

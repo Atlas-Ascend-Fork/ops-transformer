@@ -108,9 +108,9 @@ int main()
     // 2. To construct input and output, it is necessary to customize the construction according to the API interface.
     // Example: BSND format (B, S, n, D)
     std::vector<int64_t> xShape = {1, 1024, 4, 5120};   // BSND
-    std::vector<int64_t> hResShape = {1, 1024, 4, 4};   // BSND
+    std::vector<int64_t> hResShape = {1, 1024, 4, 4};   // BSNN
     std::vector<int64_t> hOutShape = {1, 1024, 5120};   // BSD
-    std::vector<int64_t> hPostShape = {1, 1024, 4};     // BSn
+    std::vector<int64_t> hPostShape = {1, 1024, 4};     // BSN
     std::vector<int64_t> outShape = {1, 1024, 4, 5120}; // BSND
 
     void* xDeviceAddr = nullptr;

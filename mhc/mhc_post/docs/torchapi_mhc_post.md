@@ -35,13 +35,13 @@
 
     其中：
 
-    - $(H_{l}^{res})^{T} \cdot x_{l}$ 表示对输入$x_{l}$进行残差矩阵的转置矩阵乘法。对于输出中的第$i$行（对应第$i$个head），计算过程为：
+    - $(H_{l}^{res})^{T} \cdot x_{l}$ 表示对输入$x_{l}$进行残差矩阵的转置矩阵乘法。对于输出中的第$i$行（对应第$i$个头），计算过程为：
 
       $$x_{l+1}[i] = \sum_{j=0}^{n-1} H_{l}^{res}[j, i] \cdot x_{l}[j]$$
 
       即将$H_{l}^{res}$矩阵按转置方式与$x_{l}$做矩阵乘法，$H_{l}^{res}[j, i]$为标量，对$x_{l}$的第$j$行做标量乘法后累加到第$i$行输出。
 
-    - $h_{l}^{out} \cdot H_{t}^{post}$ 表示输出状态$h_{l}^{out}$与后处理权重$H_{t}^{post}$的逐元素乘法与广播。对于第$i$个head：
+    - $h_{l}^{out} \cdot H_{t}^{post}$ 表示输出状态$h_{l}^{out}$与后处理权重$H_{t}^{post}$的逐元素乘法与广播。对于第$i$个头：
 
       $$x_{l+1}[i] += H_{t}^{post}[i] \cdot h_{l}^{out}$$
 
@@ -59,7 +59,7 @@
 
   >**说明：**
   >
-  > 输入支持两种维度格式：BSND（4维）和TND（3维）。其中B（Batch）表示批量大小，S（Seq-Length）表示序列长度，T表示所有Batch序列长度的累加和（$T = B \times S$），n表示头数（head数量），D表示每个头的隐藏维度大小（headdim）。
+  > 输入支持两种维度格式：BSND（4维）和TND（3维）。其中B（Batch）表示批量大小，S（Seq-Length）表示序列长度，T表示所有Batch序列长度的累加和（$T = B \times S$），n表示头数，D表示每个头的隐藏维度大小。
 
 ## 函数原型
 
@@ -120,7 +120,7 @@ cann_ops_transformer.mhc_post(x, h_res, h_out, h_post) -> Tensor
         <td>h_out</td>
         <td>Tensor</td>
         <td>必选</td>
-        <td>上一层的输出状态，对应公式中的h<sub>l</sub><sup>out</sup>。。</td>
+        <td>上一层的输出状态，对应公式中的h<sub>l</sub><sup>out</sup>。</td>
         <td>bfloat16、float16</td>
         <td>
             <ul>
@@ -222,6 +222,7 @@ cann_ops_transformer.mhc_post(x, h_res, h_out, h_post) -> Tensor
   import torch_npu
   from cann_ops_transformer.ops import mhc_post
 
+  # 单算子模式示例：B为批量大小，S为序列长度，n为头数，D为每个头的隐藏维度；输出y的shape与x相同。
   B = 2
   S = 8
   n = 4
@@ -250,6 +251,7 @@ cann_ops_transformer.mhc_post(x, h_res, h_out, h_post) -> Tensor
 
   torch_npu.npu.set_device(0)
 
+  # 图模式示例：使用torch.compile编译并执行MhcPost前向计算，输入含义与单算子模式示例相同，输出y的shape与x相同。
   B = 2
   S = 8
   n = 4

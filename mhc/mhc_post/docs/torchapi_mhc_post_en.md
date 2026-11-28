@@ -222,6 +222,8 @@ Deterministic computation is supported by default.
   import torch_npu
   from cann_ops_transformer.ops import mhc_post
 
+  # Single-operator example: B is the batch size, S is the sequence length, n is the number of heads,
+  # and D is the hidden size per head. The shape of output y is the same as that of x.
   B = 2
   S = 8
   n = 4
@@ -250,6 +252,8 @@ Deterministic computation is supported by default.
 
   torch_npu.npu.set_device(0)
 
+  # Graph-mode example: compile and run the MhcPost forward computation with torch.compile.
+  # The inputs and output shape are the same as those in the single-operator example.
   B = 2
   S = 8
   n = 4
