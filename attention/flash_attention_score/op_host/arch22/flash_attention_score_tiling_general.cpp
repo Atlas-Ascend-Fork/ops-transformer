@@ -152,6 +152,8 @@ static const int64_t S2_SPECIFIC_SIZE_18432 = 18432L;
 static const int64_t S1_BASIC_BLOCK_L1CARRY_MAX = 128L;
 static const int64_t D_SIZE_L1CARRY_MAX = 256L;
 static const int64_t D2_SIZE_L1CARRY_MAX = 256L;
+static const int64_t L1CARRY_OFF_MAX_HEAD = 16L;
+static const int64_t L1CARRY_OFF_MAX_BATCH = 8L;
 static const int64_t SOFTMAX_OUT_LAYOUT_INDEX = 12L;
 static const int64_t B4_SEQ_LIMIT = 48000L;
 static const int64_t SINK_INPUT_INDEX = 17L;
@@ -4237,6 +4239,54 @@ protected:
         return true;
     }
 
+    // causal 近三角负载下 Q 驻留 L1 的复用收益不足，关闭 L1Carry。
+    bool IsSquareLikeCausalTnd() const
+    {
+        if (tilingKeyLayout != LayoutType::LAYOUT_TND) {
+            return false;
+        }
+        if (inputDtype != ge::DT_BF16 && inputDtype != ge::DT_FLOAT16) {
+            return false;
+        }
+        // 仅 B1/B2/B3（L2 192MB）启用；B4/B4-1 L2 更小，保守保留 L1Carry。
+        if (l2CacheSize <= B4_1_L2_CACHESIZE) {
+            return false;
+        }
+        if (s1Size <= TND_S1_BASICBLOCK_256 || s2Size <= S2_REUSE_SIZE_1024) {
+            return false;
+        }
+        if (attenMaskExistFlag == 0) {
+            return false;
+        }
+        const bool isLeftUp = sparseMode == static_cast<int64_t>(LEFT_UP_CAUSAL);
+        const bool isRightDown = sparseMode == static_cast<int64_t>(RIGHT_DOWN_CAUSAL);
+        if (!isLeftUp && !isRightDown) {
+            return false;
+        }
+        if (n1Size <= 1 || n1Size > L1CARRY_OFF_MAX_HEAD || bSize > L1CARRY_OFF_MAX_BATCH ||
+            dSize != SAMEAB_D_LIMIT_128 || d2Size != SAMEAB_D_LIMIT_128 || s1Size < TND_S1_BASICBLOCK_128 * 8 ||
+            s2Size < S2_REUSE_SIZE_1024 * 2) {
+            return false;
+        }
+        // q 块超过一半没有 KV 时 Q 驻留收益不足，保留 L1Carry。
+        if (s1Size > 2 * s2Size) {
+            return false;
+        }
+        // left-up：有效 KV 跨度随 Q 块递增，恒为三角负载。
+        if (isLeftUp) {
+            return true;
+        }
+        // right-down：KV 只比 Q 多不超过一个 KV 基本块。
+        return s2Size <= s1Size + TND_S1_BASICBLOCK_128;
+    }
+
+    bool ShouldUseL1Carry() const
+    {
+        return !isSameAB && inputDtypeBytes != DATA_TYPE_FP32 && !hasRope &&
+               s1BasicBlock <= S1_BASIC_BLOCK_L1CARRY_MAX && dSize <= D_SIZE_L1CARRY_MAX &&
+               d2Size <= D2_SIZE_L1CARRY_MAX && !IsSquareLikeCausalTnd();
+    }
+
     bool SetBmm2TilingInput(int64_t tmpS1BasicBlock, int64_t tmpS2BasicBlock, [[maybe_unused]] int64_t tmpDBasicBlock,
                             [[maybe_unused]] int64_t batch, matmul_tiling::MatmulApiTiling& bmm2) override
     {
@@ -4249,8 +4299,7 @@ protected:
         bmm2.SetOrgShape(s1Size, vs2StrideSize, std::min(tmpS2BasicBlock * tilingData->coreParams.get_nRatio(), s2Size),
                          vs2StrideSize);
         bmm2.SetBias(false);
-        if (!isSameAB && inputDtypeBytes != DATA_TYPE_FP32 && !hasRope && s1BasicBlock <= S1_BASIC_BLOCK_L1CARRY_MAX &&
-            dSize <= D_SIZE_L1CARRY_MAX && d2Size <= D2_SIZE_L1CARRY_MAX) {
+        if (ShouldUseL1Carry()) {
             // bmm2L1Carry走MDL，不切M/N
             bmm2.SetFixSplit(AlignUp(std::min(tmpS1BasicBlock, s1Size), FRACTAL_NUM), AlignUp(d2Size, FRACTAL_NUM), -1);
         }
@@ -5069,8 +5118,7 @@ protected:
         auto& inputParams = tilingData->inputParams;
         // TND EOD+Padding 场景下 kernel侧使用t1Size复用s1Size
         inputParams.set_s1Size(realT1Size);
-        if (!isSameAB && inputDtypeBytes != DATA_TYPE_FP32 && !hasRope && s1BasicBlock <= S1_BASIC_BLOCK_L1CARRY_MAX &&
-            dSize <= D_SIZE_L1CARRY_MAX && d2Size <= D2_SIZE_L1CARRY_MAX) {
+        if (ShouldUseL1Carry()) {
             this->needL1Carry = true;
             tilingData->bmm1TilingData.shareL1Size = 0;
             tilingData->bmm2TilingData.shareL1Size = 0;
