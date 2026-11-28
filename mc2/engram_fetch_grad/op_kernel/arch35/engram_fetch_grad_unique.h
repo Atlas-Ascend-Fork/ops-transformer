@@ -596,7 +596,7 @@ private:
     __aicore__ inline void WriteSegCountStatus(uint32_t start, uint32_t localUniqueCount, GM_ADDR coreStartGM,
                                                GM_ADDR segCountGM);
     __aicore__ inline void AllocChunkColEvents(event_t* evtMte2V, event_t* evtVMte2, event_t* evtMte2Mte3,
-                                               event_t* evtMte3Mte2);
+                                               event_t* evtMte3Mte2, uint32_t evtBufs);
     __aicore__ inline void LoadPrevEntryBoundary(GM_ADDR recvLocalEntryOutGM, uint32_t start, int32_t& prevEntry,
                                                  bool& isFirstElement);
     __aicore__ inline void RunChunkSubTiles(uint32_t batchLen, uint32_t maxRows, uint32_t chunkIdx,
@@ -604,9 +604,9 @@ private:
                                             AscendC::LocalTensor<uint8_t>& gradBase, uint32_t& tileIdx,
                                             uint32_t& accumCursor, GM_ADDR recvGradGM, GM_ADDR gradUniqueOutGM,
                                             event_t* evtMte2V, event_t* evtVMte2, event_t* evtMte2Mte3,
-                                            event_t* evtMte3Mte2);
+                                            event_t* evtMte3Mte2, uint32_t evtBufs);
     __aicore__ inline void DrainChunkColEvents(uint32_t tileIdx, event_t* evtMte2V, event_t* evtVMte2,
-                                               event_t* evtMte2Mte3, event_t* evtMte3Mte2);
+                                               event_t* evtMte2Mte3, event_t* evtMte3Mte2, uint32_t evtBufs);
     __aicore__ inline void ClampCoreRange(uint32_t& start, uint32_t& end, uint32_t numRecv);
     __aicore__ inline void FlushAccumFp32(AscendC::LocalTensor<float>& accum, uint32_t bufIdx, uint64_t gmByteOffset,
                                           GM_ADDR gradUniqueOutGM);
@@ -975,9 +975,12 @@ __aicore__ inline void EngramFetchGradUnique::ChunkedScatterRange(uint32_t start
 }
 // 分块列通道：预取 4 组 MTE2/V/MTE3 事件
 __aicore__ inline void EngramFetchGradUnique::AllocChunkColEvents(event_t* evtMte2V, event_t* evtVMte2,
-                                                                  event_t* evtMte2Mte3, event_t* evtMte3Mte2)
+                                                                  event_t* evtMte2Mte3, event_t* evtMte3Mte2,
+                                                                  uint32_t evtBufs)
 {
-    for (uint32_t evtBufIdx = 0U; evtBufIdx < CHUNK_EVT_BUFS; evtBufIdx++) {
+    // evtBufs 同时是 UB 槽数与 4 元素事件数组的写上界：越界会溢出栈数组/越过分段容量
+    ascendc_assert(evtBufs > 0U && evtBufs <= CHUNK_EVT_BUFS, "evtBufs out of range: %u", evtBufs);
+    for (uint32_t evtBufIdx = 0U; evtBufIdx < evtBufs; evtBufIdx++) {
         evtMte2V[evtBufIdx] = static_cast<event_t>(pipe_->AllocEventID<AscendC::HardEvent::MTE2_V>());
         evtVMte2[evtBufIdx] = static_cast<event_t>(pipe_->AllocEventID<AscendC::HardEvent::V_MTE2>());
         evtMte2Mte3[evtBufIdx] = static_cast<event_t>(pipe_->AllocEventID<AscendC::HardEvent::MTE2_MTE3>());
@@ -1005,8 +1008,9 @@ __aicore__ inline void EngramFetchGradUnique::RunChunkSubTiles(
     uint32_t batchLen, uint32_t maxRows, uint32_t chunkIdx, uint32_t chunkSrcElems, uint32_t chunkSrcBytes,
     uint64_t srcByteOff, AscendC::LocalTensor<uint8_t>& gradBase, uint32_t& tileIdx, uint32_t& accumCursor,
     GM_ADDR recvGradGM, GM_ADDR gradUniqueOutGM, event_t* evtMte2V, event_t* evtVMte2, event_t* evtMte2Mte3,
-    event_t* evtMte3Mte2)
+    event_t* evtMte3Mte2, uint32_t evtBufs)
 {
+    ascendc_assert(evtBufs > 0U && evtBufs <= CHUNK_EVT_BUFS, "evtBufs out of range: %u", evtBufs);
     constexpr uint32_t kBufBytes = Mc2Kernel::GRAD_PING_BYTES / 2U;
     AscendC::DataCopyPadExtParams<uint8_t> gradPad{false, 0, 0, 0};
     for (uint32_t subStart = 0U; subStart < batchLen; subStart += maxRows) {
@@ -1014,9 +1018,9 @@ __aicore__ inline void EngramFetchGradUnique::RunChunkSubTiles(
         if (subLen > maxRows) {
             subLen = maxRows;
         }
-        uint32_t evtBufIdx = tileIdx % CHUNK_EVT_BUFS;
+        uint32_t evtBufIdx = tileIdx % evtBufs;
         AscendC::LocalTensor<uint8_t> gradRaw = gradBase[evtBufIdx * kBufBytes];
-        if (tileIdx >= CHUNK_EVT_BUFS) {
+        if (tileIdx >= evtBufs) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(evtVMte2[evtBufIdx]);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3Mte2[evtBufIdx]);
         }
@@ -1045,15 +1049,16 @@ __aicore__ inline void EngramFetchGradUnique::RunChunkSubTiles(
 // 分块列通道：排空未消费事件并归还全部事件 ID
 __aicore__ inline void EngramFetchGradUnique::DrainChunkColEvents(uint32_t tileIdx, event_t* evtMte2V,
                                                                   event_t* evtVMte2, event_t* evtMte2Mte3,
-                                                                  event_t* evtMte3Mte2)
+                                                                  event_t* evtMte3Mte2, uint32_t evtBufs)
 {
-    uint32_t drainFrom = (tileIdx > CHUNK_EVT_BUFS) ? (tileIdx - CHUNK_EVT_BUFS) : 0U;
+    ascendc_assert(evtBufs > 0U && evtBufs <= CHUNK_EVT_BUFS, "evtBufs out of range: %u", evtBufs);
+    uint32_t drainFrom = (tileIdx > evtBufs) ? (tileIdx - evtBufs) : 0U;
     for (uint32_t t = drainFrom; t < tileIdx; t++) {
-        uint32_t evtBufIdx = t % CHUNK_EVT_BUFS;
+        uint32_t evtBufIdx = t % evtBufs;
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(evtVMte2[evtBufIdx]);
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3Mte2[evtBufIdx]);
     }
-    for (uint32_t evtBufIdx = 0U; evtBufIdx < CHUNK_EVT_BUFS; evtBufIdx++) {
+    for (uint32_t evtBufIdx = 0U; evtBufIdx < evtBufs; evtBufIdx++) {
         pipe_->ReleaseEventID<AscendC::HardEvent::MTE2_V>(evtMte2V[evtBufIdx]);
         pipe_->ReleaseEventID<AscendC::HardEvent::V_MTE2>(evtVMte2[evtBufIdx]);
         pipe_->ReleaseEventID<AscendC::HardEvent::MTE2_MTE3>(evtMte2Mte3[evtBufIdx]);
@@ -1075,7 +1080,7 @@ __aicore__ inline void EngramFetchGradUnique::ChunkColumnPass(uint32_t chunkIdx,
     event_t evtVMte2[CHUNK_EVT_BUFS];
     event_t evtMte2Mte3[CHUNK_EVT_BUFS];
     event_t evtMte3Mte2[CHUNK_EVT_BUFS];
-    AllocChunkColEvents(evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2);
+    AllocChunkColEvents(evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2, CHUNK_EVT_BUFS);
     AscendC::LocalTensor<uint8_t> gradBase = gradBuf_->Get<uint8_t>();
     constexpr uint32_t kBufBytes = Mc2Kernel::GRAD_PING_BYTES / 2U;
     uint32_t bufRows = kBufBytes / chunkInStride_;
@@ -1114,10 +1119,11 @@ __aicore__ inline void EngramFetchGradUnique::ChunkColumnPass(uint32_t chunkIdx,
         runningOffset += inclusiveSum;
         uint32_t accumCursor = 0U;
         RunChunkSubTiles(batchLen, maxRows, chunkIdx, chunkSrcElems, chunkSrcBytes, srcByteOff, gradBase, tileIdx,
-                         accumCursor, recvGradGM, gradUniqueOutGM, evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2);
+                         accumCursor, recvGradGM, gradUniqueOutGM, evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2,
+                         CHUNK_EVT_BUFS);
         cur += batchLen;
     }
-    DrainChunkColEvents(tileIdx, evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2);
+    DrainChunkColEvents(tileIdx, evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2, CHUNK_EVT_BUFS);
 }
 __aicore__ inline void EngramFetchGradUnique::ProcessChunkTile(uint32_t subStart, uint32_t subLen, uint32_t chunkIdx,
                                                                uint32_t chunkSrcElems,
@@ -1905,7 +1911,7 @@ __aicore__ inline void EngramFetchGradUnique::ProcessDirectSubBatchLoopV2(uint32
     event_t evtVMte2[CHUNK_EVT_BUFS];
     event_t evtMte2Mte3[CHUNK_EVT_BUFS];
     event_t evtMte3Mte2[CHUNK_EVT_BUFS];
-    AllocChunkColEvents(evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2);
+    AllocChunkColEvents(evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2, CHUNK_EVT_BUFS);
     AscendC::LocalTensor<float> castRow = castBuf_->Get<float>();
     constexpr uint32_t kBufBytes = Mc2Kernel::GRAD_PING_BYTES / 2U;
     uint32_t bufRows = kBufBytes / inRowStride_;
@@ -1947,7 +1953,7 @@ __aicore__ inline void EngramFetchGradUnique::ProcessDirectSubBatchLoopV2(uint32
         tileIdx++;
     }
 
-    DrainChunkColEvents(tileIdx, evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2);
+    DrainChunkColEvents(tileIdx, evtMte2V, evtVMte2, evtMte2Mte3, evtMte3Mte2, CHUNK_EVT_BUFS);
 }
 
 // 非 list 路径：把一个 sub 批的 grad 行从 GM 搬入 UB（行按 inRowStride_ 排布）

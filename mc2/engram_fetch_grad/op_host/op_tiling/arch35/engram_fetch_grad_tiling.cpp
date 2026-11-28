@@ -1705,7 +1705,9 @@ static ge::graphStatus CalcRailPermanentUb(const char* nodeName, const EngramFet
     // ═══ UB 常驻 O(1)（与 world 无关——替换老的 O(rankSize) 三件套） ═══
     uint32_t rowBlockBytes = batchRows * rowStride;
     statusBytes = static_cast<uint32_t>(
-        AlignTo(2 * Mc2Kernel::STATE_OFFSET + static_cast<int64_t>(tilingData.aivNum) * 8, Mc2Kernel::UB_ALIGN));
+        AlignTo(Mc2Kernel::RAIL_STATUS_SLOT_NUM * Mc2Kernel::STATE_OFFSET +
+                    static_cast<int64_t>(tilingData.aivNum) * Mc2Kernel::RAIL_STATUS_PER_CORE_BYTES,
+                Mc2Kernel::UB_ALIGN));
     uint32_t coreArrayBytes = static_cast<uint32_t>(
         AlignTo(AlignTo(static_cast<int64_t>(tilingData.aivNum) * sizeof(int32_t), Mc2Kernel::UB_ALIGN) +
                     static_cast<int64_t>(tilingData.aivNum) * sizeof(int32_t),
@@ -2025,9 +2027,9 @@ static void CalcRailTransferSegs(const EngramFetchGradTilingData& tilingData, co
     // ③ 桶表：头部(taskCount+每核段数) + 核条带(段(dst,start,cnt)×3 int32) + 任务表((kind,dst,start,cnt)×4)
     //    条带容量 = 行/核+2；任务容量 = numTokens+核数（每核段数上界之和）
     int64_t stripCap = (numTokens + aivNum - 1) / aivNum + 2;
-    segs.bucketSeg = AlignTo((1 + aivNum) * 4, Mc2Kernel::UB_ALIGN) +
-                     static_cast<int64_t>(aivNum) * stripCap * 3 * static_cast<int64_t>(sizeof(int32_t)) +
-                     (numTokens + aivNum) * 4 * static_cast<int64_t>(sizeof(int32_t));
+    segs.bucketSeg = AlignTo((1 + aivNum) * static_cast<int64_t>(sizeof(int32_t)), Mc2Kernel::UB_ALIGN) +
+                     static_cast<int64_t>(aivNum) * stripCap * static_cast<int64_t>(Mc2Kernel::RAIL_STRIP_ENT_BYTES) +
+                     (numTokens + aivNum) * static_cast<int64_t>(Mc2Kernel::RAIL_TASK_ENT_BYTES);
     segs.bucketSeg = AlignTo(segs.bucketSeg, Mc2Kernel::UB_ALIGN);
     // ④ F 暂存环：fCoreCnt × ranksPerSupernode 槽 × batchRows 行 × P——每 (F核, owner 槽) 私有环格
     //    （SPSC：F 备行/属主 S 核发走；背压 = staged−drained < batchRows）
@@ -2039,7 +2041,7 @@ static void CalcRailTransferSegs(const EngramFetchGradTilingData& tilingData, co
         AlignTo(static_cast<int64_t>(tilingData.fwdCoreCnt) * static_cast<int64_t>(topo.ranksPerSupernode) *
                     static_cast<int64_t>(sizeof(int32_t)),
                 Mc2Kernel::UB_ALIGN);
-    segs.relayCtl = 3 * relayCtlBytes;
+    segs.relayCtl = static_cast<int64_t>(Mc2Kernel::RAIL_RELAY_CTL_TABLES) * relayCtlBytes;
     // ⑥ S 组拼块 GM 暂存：行头与 gradSorted 数据拼块后经此转 WriteNbi（每 S 核一格）
     segs.sStage = static_cast<int64_t>(tilingData.sendCoreCnt) * tilingData.batchRows * rowStride;
     // ⑦ collectEntry：O 组收集条目号
@@ -2189,7 +2191,7 @@ struct RailDispatchInfo {
 };
 
 // 推导分发判据：attr 缺省 128；ctx 长度/ sendCounts 长度仅作一致性判定输入
-static ge::graphStatus DeriveRailDispatchInfo(gert::TilingContext* context, const char* nodeName,
+static ge::graphStatus DeriveRailDispatchInfo(const gert::TilingContext* context, const char* nodeName,
                                               RailDispatchInfo& info)
 {
     auto railAttrs = context->GetAttrs();
