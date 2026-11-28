@@ -31,7 +31,7 @@ MoonEP 是面向 EP（Expert Parallelism）的通信库：用动态冗余专家�
 Buffer(
     S, H, Hp, K, E, num_ep_ranks, group,
     num_sms=None, token_padding=128,
-    *, weight_dtype="bf16", grad_dtype="bf16", slots=1,
+    *, weight_dtype="bf16", grad_dtype="bf16",
 )
 ```
 
@@ -48,7 +48,6 @@ Buffer(
 | `token_padding` | 可选输入 | 预留参数，当前不生效 | int | ND |
 | `weight_dtype` | 可选输入 | 权重数据类型定型值 | str 或 torch.dtype | ND |
 | `grad_dtype` | 可选输入 | 梯度数据类型定型值，缺省 `bf16` | str 或 torch.dtype | ND |
-| `slots` | 可选输入 | 权重窗口槽数，层间流水取 2 | int | ND |
 
 构造是集体调用：内含 workspace 注册与 UbMem 建连；ElasticBuffer 在首次 `dispatch` / `combine` 时懒构造。全 EP rank 须以相同参数、相同顺序执行。
 
@@ -60,7 +59,6 @@ Buffer(
 - `num_sms` 为预留参数，当前仅支持 `None`（按设备全部 AIV 核运行）；传其他值会被拒绝。
 - `token_padding` 为预留参数，当前不生效。
 - `weight_dtype` 取 `bf16` / `fp16` / `e4m3fn` / `e5m2`；`grad_dtype` 取 `bf16` / `fp16` / `fp32`。
-- `slots >= 1`，全链一致。
 
 ### dispatch
 
@@ -140,7 +138,7 @@ prefetch_weight(
     *, plan, local_gate_weight=None, local_up_weight=None,
     local_down_weight=None, local_gate_up_weight=None,
     local_gate_scales=None, local_up_scales=None, local_down_scales=None,
-    local_gate_up_scales=None, async_finish=False, slot=0,
+    local_gate_up_scales=None, async_finish=False,
 )
 
 # 3 组：返回值依次是权重视图元组与 scale 视图元组
@@ -168,7 +166,6 @@ prefetch_weight(
 | `local_down_scales` | 可选输入 | down 的 mxfp8 scale，shape `(epn, Sg)` 或 ≥2 维 `(epn, ..., Sg)`（首维 epn，尾部展平行宽 32B 倍数）；3 组与 W13 形态都使用 | FLOAT8_E8M0FNU | ND |
 | `local_gate_up_scales` | 可选输入 | W13 交织 scale，shape `(epn, 2Sg)` 或 ≥2 维，行宽覆盖 2W；仅 W13 形态使用 | FLOAT8_E8M0FNU | ND |
 | `async_finish` | 可选输入 | True 返回发起流事件 | BOOL | - |
-| `slot` | 可选输入 | 窗口槽位，`0 <= slot < slots` | int | - |
 | `gate_pb` | 输出 | gate 权重视图 `[2*epn, Wg]`；3 组形态返回 | 同权重 | ND |
 | `up_pb` | 输出 | up 权重视图 `[2*epn, Wg]`；3 组形态返回 | 同权重 | ND |
 | `down_pb` | 输出 | down 权重视图 `[2*epn, Wg]`；3 组与 W13 形态都返回 | 同权重 | ND |
@@ -191,7 +188,7 @@ prefetch_weight(
 - 3 组形态（gate / up / down）与 W13 交织形态（gate_up / down）二选一；W13 不接受 gate/up 独立参数。
 - 组数与各组行宽在首次调用后定型，后续必须一致；组间 dtype 一致且等于构造 `weight_dtype`。
 - mxfp8 双向契约：fp8 权重必须传 scales；传了 scales 权重就必须是 fp8；scale 类型固定 `float8_e8m0fnu`，首维为 `epn`，尾部展平后行宽须为 32B 倍数。
-- `0 <= slot < slots`；总宽不超过构造期按 `3W` 预留的容量；**空槽内容未定义**（等价 `torch.empty`，可能为零或上一轮残留值）——空槽在 `cu_seqlens` 中段长恒为 0，不参与计算。
+- 总宽不超过构造期按 `3W` 预留的容量。
 - 返回形状见上表；`async_finish=True` 时在最外层追加发起流事件。
 
 ### combine
@@ -278,7 +275,7 @@ gate_up_rb, down_rb = reduce_grad(
 
 - `barrier()`：组内对称堆自旋屏障（epoch 单调递增，flag 与数据同通道保序，不经 HCCL 集合通信）。返回时全组各 rank 在此前流上发起的工作都已完成。典型用法：① 阶段切换或调试时确认全组就绪；② 复用对端可读写的 MoonEP 缓冲（对称堆窗口、`prefetch_weight` 副本槽）前做跨 rank 先后保证——如多轮权重预取中"本 rank 写副本槽 → `barrier()` → 下一轮推送"，以及 `async_finish=True` 路径在复用或校验窗口前先对齐全组。
 - `destroy(*, release_group=False, release_eb=False)`：幂等释放。通信组由调用方创建和销毁，本方法不会销毁它（`release_group` 仅为兼容保留）；EB 缺省不销毁，传 `True` 才显式回收。
-- 查询属性：`rank`、`rank_size`、`epn`、`H`、`Hp`、`slots`、`weight_dtype`、`grad_dtype`、`layout_groups`、`heap_required_bytes`、`heap_bytes`、`destroyed`，以及预留参数当前值 `num_sms`、`token_padding`。
+- 查询属性：`rank`、`rank_size`、`epn`、`H`、`Hp`、`weight_dtype`、`grad_dtype`、`layout_groups`、`heap_required_bytes`、`heap_bytes`、`destroyed`，以及预留参数当前值 `num_sms`、`token_padding`。
 
 ## 约束说明
 
@@ -287,7 +284,7 @@ gate_up_rb, down_rb = reduce_grad(
 - **规模与形状**：`2 <= num_ep_ranks <= 128` 且等于通信组 world size；`E <= 1024`、`E % R == 0`、`S >= 1`、`K >= 1`；各 rank 的 S 一致。
 - **数据类型**：`tokens_per_expert` / `topk_experts_sk` / `experts_to_copy` 为 int32；权重支持 bf16 / fp16 / e4m3 / e5m2，组间一致；梯度支持 bf16 / fp16 / fp32 且等于构造定型值；`dispatch` / `combine` 的 token 支持 bf16 / fp16。
 - **分组与行宽**：权重/梯度支持 3 组形态（常见等宽 `(W, W, W)`）或 W13 交织形态（`(2W, W)`），总宽上限 `3W`（`W = H × Hp`）；`W` 须为 64 的倍数。
-- **槽位**：`slots >= 1`，全链一致；`num_sms`、`token_padding` 为预留参数，当前分别只接受 `None` 与缺省值。
+- **窗口**：权重窗口固定为单窗口；`num_sms`、`token_padding` 为预留参数，当前分别只接受 `None` 与缺省值。
 - **生命周期**：视图和 `plan` 返回的张量须在 `destroy()` 前用完；`destroy` 可重复调用。
 
 ## 调用说明
@@ -314,7 +311,7 @@ from moonep_buffer import Buffer
 S, H, Hp, K, E = 4096, 7168, 2048, 8, 64
 buf = Buffer(
     S, H, Hp, K, E, num_ep_ranks=dist.get_world_size(),
-    group=group, slots=2,
+    group=group,
 )
 
 hidden_nvsh, route_weights_nvs, cu_seqlens, plan = buf.dispatch(

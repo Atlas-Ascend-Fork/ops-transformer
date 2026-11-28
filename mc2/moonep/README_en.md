@@ -34,7 +34,7 @@ Construction, parameters, and call examples are given below.
 Buffer(
     S, H, Hp, K, E, num_ep_ranks, group,
     num_sms=None, token_padding=128,
-    *, weight_dtype="bf16", grad_dtype="bf16", slots=1,
+    *, weight_dtype="bf16", grad_dtype="bf16",
 )
 ```
 
@@ -51,7 +51,6 @@ Buffer(
 | `token_padding` | Optional input | Reserved parameter, currently has no effect | int | ND |
 | `weight_dtype` | Optional input | Weight data type used for specialization | str or torch.dtype | ND |
 | `grad_dtype` | Optional input | Gradient data type used for specialization, defaults to `bf16` | str or torch.dtype | ND |
-| `slots` | Optional input | Number of weight window slots; use 2 for layer pipelining | int | ND |
 
 Construction is a collective call: it performs workspace registration and UbMem connection setup; the ElasticBuffer is created lazily on the first `dispatch` / `combine`.
 All EP ranks must call it with the same parameters in the same order.
@@ -64,7 +63,6 @@ Interface constraints:
 - `num_sms` is reserved and currently only accepts `None` (run on all device AIV cores); other values are rejected.
 - `token_padding` is reserved and currently has no effect.
 - `weight_dtype` accepts `bf16` / `fp16` / `e4m3fn` / `e5m2`; `grad_dtype` accepts `bf16` / `fp16` / `fp32`.
-- `slots >= 1` and must be consistent along the whole chain.
 
 ### dispatch
 
@@ -146,7 +144,7 @@ prefetch_weight(
     *, plan, local_gate_weight=None, local_up_weight=None,
     local_down_weight=None, local_gate_up_weight=None,
     local_gate_scales=None, local_up_scales=None, local_down_scales=None,
-    local_gate_up_scales=None, async_finish=False, slot=0,
+    local_gate_up_scales=None, async_finish=False,
 )
 
 # 3-group form: returns the weight view tuple and the scale view tuple
@@ -174,7 +172,6 @@ prefetch_weight(
 | `local_down_scales` | Optional input | Down mxfp8 scales, shape `(epn, Sg)` or >=2-D `(epn, ..., Sg)` (leading dim epn; flattened row width a multiple of 32B); used in both forms | FLOAT8_E8M0FNU | ND |
 | `local_gate_up_scales` | Optional input | W13 interleaved scales, shape `(epn, 2Sg)` or >=2-D, row width covers 2W; used only in the W13 form | FLOAT8_E8M0FNU | ND |
 | `async_finish` | Optional input | True returns the launch stream event | BOOL | - |
-| `slot` | Optional input | Window slot, `0 <= slot < slots` | int | - |
 | `gate_pb` | Output | Gate weight view `[2*epn, Wg]`; returned in the 3-group form | Same as weights | ND |
 | `up_pb` | Output | Up weight view `[2*epn, Wg]`; returned in the 3-group form | Same as weights | ND |
 | `down_pb` | Output | Down weight view `[2*epn, Wg]`; returned in both forms | Same as weights | ND |
@@ -200,9 +197,7 @@ Interface constraints:
 - The number of groups and each group's row width are fixed after the first call and must stay consistent; all groups share the constructor `weight_dtype`.
 - mxfp8 contract in both directions: fp8 weights must be accompanied by scales, and passing scales requires fp8 weights;
   the scale type is fixed to `float8_e8m0fnu`, the leading dim is `epn`, and the flattened row width must be a multiple of 32B.
-- `0 <= slot < slots`; the total width must not exceed the `3W` capacity reserved at construction.
-  **Empty slots have undefined content** (equivalent to `torch.empty`: they may hold zeros or values left from a previous round);
-  empty slots always have length 0 in `cu_seqlens` and are never computed.
+- The total width must not exceed the `3W` capacity reserved at construction.
 - Return shapes are listed above; with `async_finish=True` the launch stream event is appended at the outermost level.
 
 ### combine
@@ -293,7 +288,7 @@ Interface constraints:
 - `barrier()`: group-wide symmetric-heap spin barrier (monotonically increasing epoch, flags ordered on the same channel as the data, without HCCL collectives). When it returns, all work previously launched on each rank's streams has completed. Typical uses: (1) confirming group readiness at phase switches or during debugging; (2) establishing cross-rank ordering before reusing MoonEP buffers that peers may read or write (the symmetric-heap window, `prefetch_weight` replica slots) — e.g. in multi-round weight prefetch, "this rank writes replica slots → `barrier()` → the next round's push" — and aligning the whole group before reusing or verifying windows on the `async_finish=True` path.
 - `destroy(*, release_group=False, release_eb=False)`: idempotent release. The communication group is owned by the caller and is never destroyed here (`release_group` is kept for compatibility only);
   the ElasticBuffer is not destroyed by default; pass `True` to release it explicitly.
-- Query properties: `rank`, `rank_size`, `epn`, `H`, `Hp`, `slots`, `weight_dtype`, `grad_dtype`, `layout_groups`,
+- Query properties: `rank`, `rank_size`, `epn`, `H`, `Hp`, `weight_dtype`, `grad_dtype`, `layout_groups`,
   `heap_required_bytes`, `heap_bytes`, `destroyed`, plus the current values of the reserved parameters `num_sms` and `token_padding`.
 
 ## Constraints
@@ -309,7 +304,7 @@ Interface constraints:
   the tokens of `dispatch` / `combine` support bf16 / fp16.
 - **Grouping and row width**: weights and gradients support either the 3-group form (commonly equal width `(W, W, W)`)
   or the W13 interleaved form (`(2W, W)`), with a total width cap of `3W` (`W = H × Hp`); `W` must be a multiple of 64.
-- **Slots**: `slots >= 1`, consistent along the whole chain; `num_sms` and `token_padding` are reserved and currently only accept `None` and the default value respectively.
+- **Window**: the weight window is fixed to a single window; `num_sms` and `token_padding` are reserved and currently only accept `None` and the default value respectively.
 - **Lifetime**: tensors returned as views and by `plan` must be used before `destroy()`; `destroy` may be called repeatedly.
 
 ## Usage
@@ -336,7 +331,7 @@ from moonep_buffer import Buffer
 S, H, Hp, K, E = 4096, 7168, 2048, 8, 64
 buf = Buffer(
     S, H, Hp, K, E, num_ep_ranks=dist.get_world_size(),
-    group=group, slots=2,
+    group=group,
 )
 
 hidden_nvsh, route_weights_nvs, cu_seqlens, plan = buf.dispatch(

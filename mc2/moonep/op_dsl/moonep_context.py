@@ -57,12 +57,12 @@ from moonep_layout import (  # noqa: F401
     WEIGHT_BYTES,
     WEIGHT_DTYPE,
     grad_slot_off,
-    group_slot_rows,
-    lcm_slot_stride,
+    group_row_offsets,
+    lcm_window_stride,
     prefetch_weight_off,
     reduce_region_end,
     reduce_stg_off,
-    slot_stride_bytes,
+    window_stride_bytes,
 )
 from moonep_comm import (
     MoonepCommCtx,
@@ -290,8 +290,6 @@ class MoonepContext:
         else:
             self.connection = None
             self.ctx_tensor = marshal_single_rank_ctx(self.rank, self.rank_size)
-        # 槽视图已用的 slots 值（一致性守卫——create_grad_slot_view 写入）。
-        self.pull_slots_used = None
         self.plan_workspace = None
         self.transport_stream = None
         self.transport_event = None
@@ -302,7 +300,6 @@ class MoonepContext:
         self.layout_scale_widths = None
         self.weight_dtype = None
         self.grad_dtype = None
-        self.window_slots = None
         self.pending_overflow = None
         self.weight_views = {}
         self.bar_epoch_tensors = deque(maxlen=128)

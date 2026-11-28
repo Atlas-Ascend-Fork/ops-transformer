@@ -55,12 +55,12 @@ from moonep_context import (
     SCALE_ALIGN_BYTES,
     check_heap_capacity,
     finish_op,
-    group_slot_rows,
+    group_row_offsets,
     next_barrier_epoch,
     prefetch_weight_off,
     reduce_stg_off,
     resident_blocks,
-    slot_stride_bytes,
+    window_stride_bytes,
     sync_transport_stream,
     workspace_base,
 )
@@ -187,7 +187,7 @@ class _MoonepPrefetchPushKernel:
         self._row_bytes = tuple(s * b for s, b in zip(self._sizes, self._elem_bytes))
         ngroups = self._ngroups
         actual = self._row_bytes[:ngroups]
-        self._group_rows, self._slot_rows = group_slot_rows(self._epn, actual)
+        self._group_rows = group_row_offsets(self._epn, actual)
         self._nblk = int(nblk)
         self._per_block = int(per_block)
         self._n_slices = int(n_slices)
@@ -201,7 +201,6 @@ class _MoonepPrefetchPushKernel:
         k4,
         k5,
         gm_etc,
-        slot,
         gm_epoch,
         ctx: StructRef[MoonepCommCtx],
     ):
@@ -233,7 +232,6 @@ class _MoonepPrefetchPushKernel:
                 epoch_addr,
                 push_base,
                 reals,
-                slot,
                 xfer_rb,
                 blk % n_rem,
                 blk // n_rem,
@@ -253,7 +251,6 @@ class _MoonepPrefetchPushKernel:
                         epoch_addr,
                         push_base,
                         reals,
-                        slot,
                         xfer_rb,
                         peer_id,
                         dtypes.int64(0),
@@ -272,7 +269,6 @@ class _MoonepPrefetchPushKernel:
         epoch_addr,
         push_base,
         reals,
-        slot,
         xfer_rb,
         peer_id,
         slice_id,
@@ -305,11 +301,7 @@ class _MoonepPrefetchPushKernel:
                 slot_row = epn64 + i
                 for g in range_constexpr(_MAX_GROUPS):
                     if g < ngroups:  # 编译期裁剪：缺组槽不发射
-                        dst = (
-                            dtypes.int64(self._group_rows[g])
-                            + slot * dtypes.int64(self._slot_rows[g])
-                            + slot_row
-                        )
+                        dst = dtypes.int64(self._group_rows[g]) + slot_row
                         remote_off = push_base + dtypes.uint64(dst) * dtypes.uint64(
                             row_bytes[g]
                         )
@@ -435,7 +427,6 @@ def _make_push_host(cfg):
         k4,
         k5,
         gm_etc,
-        slot: int,
         gm_epoch,
         ctx: StructRef[MoonepCommCtx],
     ):
@@ -448,7 +439,7 @@ def _make_push_host(cfg):
             cfg.nblk,
             cfg.per_block,
             cfg.n_slices,
-        )[cfg.nblk](k0, k1, k2, k3, k4, k5, gm_etc, slot, gm_epoch, ctx)
+        )[cfg.nblk](k0, k1, k2, k3, k4, k5, gm_etc, gm_epoch, ctx)
 
     return _push_host
 
@@ -505,7 +496,6 @@ def _get_push_program(
                 for s, b in zip(cfg.sizes, cfg.elem_bytes)
             ]
             specs.append(TensorSpec((rank_size, epn), dtypes.int32))
-            specs.append(dtypes.int64)  # 窗口槽位
             specs.append(TensorSpec((1,), dtypes.int32))  # 屏障 epoch
             specs.append(StructRef[MoonepCommCtx])
             prog = cannbotdsl.compile(_make_push_host(cfg), *specs)
@@ -574,17 +564,17 @@ def _freeze_layout(context, widths, scale_widths, *, what):
     elif scale_widths != context.layout_scale_widths:
         raise RuntimeError(
             f"scale 组宽不一致（已有 {context.layout_scale_widths}，"
-            f"本次 {scale_widths}）（{what}）：scale 随 slot 窗口轮转，"
+            f"本次 {scale_widths}）（{what}）：scale 随窗口轮转，"
             "宽度变化会使窗口步长错位"
         )
 
 
-def _create_weight_views(context, epn, sizes, scale_sizes, *, slot=0, slots=1, dtype):
+def _create_weight_views(context, epn, sizes, scale_sizes, *, dtype):
     """创建（或复用）权重视图 ``[2*epn, Wg]``。"""
     sizes = _as_sizes(sizes)
     scale_sizes = tuple(int(s) for s in scale_sizes) if scale_sizes else ()
     weight_bytes = int(dtype.itemsize)
-    group_slot_rows(
+    group_row_offsets(
         epn, tuple(int(w) * weight_bytes for w in sizes) + tuple(scale_sizes)
     )
     _freeze_layout(context, sizes, scale_sizes, what="prefetch 权重视图")
@@ -592,15 +582,7 @@ def _create_weight_views(context, epn, sizes, scale_sizes, *, slot=0, slots=1, d
         raise RuntimeError(
             "创建权重视图前请设置 context.last_plan_shape（输入形状与窗口布局）"
         )
-    if slot < 0 or slot >= slots:
-        raise ValueError(f"slot={slot} 超出槽位数 {slots}")
-    if context.window_slots is None:
-        context.window_slots = slots
-    elif context.window_slots != slots:
-        raise RuntimeError(
-            f"窗口槽位数不一致（已有 {context.window_slots}，本次 {slots}）"
-        )
-    key = ("views", int(epn), sizes, int(slot), int(slots), str(dtype))
+    key = ("views", int(epn), sizes, str(dtype))
     cached = context.weight_views.get(key)
     if cached is not None:
         return cached
@@ -609,17 +591,13 @@ def _create_weight_views(context, epn, sizes, scale_sizes, *, slot=0, slots=1, d
         HEAP_BASE
         + reduce_stg_off(
             epn,
-            slots=slots,
             widths=sizes,
             scale_widths=scale_sizes or None,
             weight_bytes=weight_bytes,
         ),
         "workspace 布局（多组权重发布区）",
     )
-    slot_bytes = slot_stride_bytes(epn, sizes, scale_sizes or None, weight_bytes)
-    addr = (
-        workspace_base(context) + HEAP_BASE + prefetch_weight_off() + slot * slot_bytes
-    )
+    addr = workspace_base(context) + HEAP_BASE + prefetch_weight_off()
     views = []
     for w in sizes:
         views.append(
@@ -633,12 +611,10 @@ def _create_weight_views(context, epn, sizes, scale_sizes, *, slot=0, slots=1, d
     return views
 
 
-def _create_scale_views(
-    context, epn, weight_sizes, scale_sizes, *, slot=0, slots=1, weight_bytes=2
-):
+def _create_scale_views(context, epn, weight_sizes, scale_sizes, *, weight_bytes=2):
     """创建（或复用）scale 视图 ``[2*epn, Sg]``。"""
     scale_sizes = _as_sizes(scale_sizes)
-    group_slot_rows(
+    group_row_offsets(
         epn, tuple(int(w) * weight_bytes for w in weight_sizes) + tuple(scale_sizes)
     )
     _freeze_layout(context, weight_sizes, scale_sizes, what="prefetch scale 视图")
@@ -649,18 +625,14 @@ def _create_scale_views(
         tuple(int(w) for w in weight_sizes),
         tuple(int(s) for s in scale_sizes),
         int(weight_bytes),
-        int(slot),
-        int(slots),
     )
     cached = context.weight_views.get(key)
     if cached is not None:
         return cached
-    slot_bytes = slot_stride_bytes(epn, weight_sizes, scale_sizes, weight_bytes)
     addr = (
         workspace_base(context)
         + HEAP_BASE
         + prefetch_weight_off()
-        + slot * slot_bytes
         + weight_bytes_total * ROWS_PER_EXPERT * epn
     )
     views = []
@@ -683,10 +655,9 @@ def _sync_transport(local_weights, views, epn):
             view_w[:epn] = real_w
 
 
-def _window_bytes(context, epn, sizes, scale_sizes, weight_bytes):
-    """发布窗口总字节数（slots × LCM 对齐步长——与 kernel SymBuffer 同式）。"""
-    slots = context.window_slots or 1
-    return slots * slot_stride_bytes(epn, sizes, scale_sizes or None, weight_bytes)
+def _window_bytes(epn, sizes, scale_sizes, weight_bytes):
+    """发布窗口总字节数（单槽 LCM 对齐步长——与 kernel SymBuffer 同式）。"""
+    return window_stride_bytes(epn, sizes, scale_sizes or None, weight_bytes)
 
 
 def _normalize_groups(local_weights, epn, context=None):
@@ -831,8 +802,6 @@ def prefetch_weight(
     epn,
     *,
     local_scales=None,
-    slot=0,
-    slots=1,
     async_finish=False,
 ) -> _PrefetchResult:
     """按 experts_to_copy 把本地权重（+ 可选 scale）推到各 rank 的预取槽。
@@ -853,8 +822,6 @@ def prefetch_weight(
         epn,
         sizes,
         scale_sizes,
-        slot=slot,
-        slots=slots,
         dtype=weight_dtype,
     )
     scale_views = (
@@ -863,8 +830,6 @@ def prefetch_weight(
             epn,
             sizes,
             scale_sizes,
-            slot=slot,
-            slots=slots,
             weight_bytes=weight_bytes,
         )
         if scale_sizes
@@ -898,13 +863,12 @@ def prefetch_weight(
         sizes,
         scale_sizes,
         weight_bytes,
-        _window_bytes(context, epn, sizes, scale_sizes, weight_bytes),
+        _window_bytes(epn, sizes, scale_sizes, weight_bytes),
         context.rank_size,
         _push_block_limit(),
     )(
         *reals6,
         experts_to_copy,
-        int(slot),
         gm_epoch,
         context.ctx_tensor,
     )

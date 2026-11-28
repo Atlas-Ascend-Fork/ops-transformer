@@ -10,7 +10,7 @@
 
 它把 MoonEP 通信上下文和 ElasticBuffer 收在一处，对外只露 dispatch /
 prefetch_weight / combine / reduce_grad 四个接口：构造时按形状算好
-workspace、建好 UbMem 连接、定好窗口槽位与 dtype；前向 dispatch 顺手把
+workspace、建好 UbMem 连接、定好窗口与 dtype；前向 dispatch 顺手把
 plan 算出来，prefetch_weight / combine / reduce_grad 拿着同一份 plan 干活，
 反向 dispatch 把 plan 递回来就能复用，不必重算。
 
@@ -79,18 +79,18 @@ _UE8M0_BLOCK = 32  # mxfp8 block scale 粒度（每 32 权重元素 1 个 ue8m0 
 _CHUNK_TRIAL_UB = 16384
 
 
-def _workspace_need(epn, w, slots, gdtype, wdtype):
+def _workspace_need(epn, w, gdtype, wdtype):
     """moonep workspace（通信 buffer）实际容量唯一真源。
 
     ``HEAP_BASE + reduce_region_end(...) + LAYOUT_TAIL_BYTES``：权重+scale
     发布区 + 梯度副本区 [epn, Wg] × 组 + 尾部对齐（副本区无 R 维度）。
-    3 组等宽与 W13 交织的 slot 步长不同，按两者较大者预留。
+    3 组等宽与 W13 交织的窗口步长不同，按两者较大者预留。
     """
     grad_elem = 2 if gdtype in (torch.bfloat16, torch.float16) else 4
     weight_elem = int(wdtype.itemsize)
     scale_upper = _scale_upper_bytes(w)
     fp8 = prefetch_weight._is_fp8_weight(wdtype)
-    # 3 组等宽与 W13 交织的 slot 步长不同（LCM 对齐），按两者较大者预留
+    # 3 组等宽与 W13 交织的窗口步长不同（LCM 对齐），按两者较大者预留
     if fp8:
         layouts = [
             ((w, w, w), (scale_upper,) * 3),
@@ -107,7 +107,6 @@ def _workspace_need(epn, w, slots, gdtype, wdtype):
                 epn,
                 w,
                 len(widths),
-                int(slots),
                 grad_bytes_per_elem=grad_elem,
                 widths=widths,
                 scale_widths=scale_widths,
@@ -187,7 +186,7 @@ class Buffer:
     reduce_grad；plan 在 dispatch 内部完成）。
 
     构造内化：workspace 精算 → 单通信组解析（moonep ctx 与 ElasticBuffer
-    复用同一 ``ProcessGroup``）→ MoonepContext → window_slots/dtype 定型。
+    复用同一 ``ProcessGroup``）→ MoonepContext → dtype 定型。
     ``num_sms`` / ``token_padding`` 为预留参数，当前分别只接受 None 与缺省值。
 
     单 group 说明：MoonEP 数据面使用本 rank 私有注册 workspace，EB 自建
@@ -211,7 +210,6 @@ class Buffer:
         *,
         weight_dtype: str | torch.dtype = "bf16",
         grad_dtype: str | torch.dtype = "bf16",
-        slots: int = 1,
     ) -> None:
         """构造（集体调用）。
 
@@ -230,7 +228,6 @@ class Buffer:
             token_padding: 预留参数（当前不生效）。
             weight_dtype: 权重 dtype（bf16/fp16/e4m3fn/e5m2）。
             grad_dtype: 梯度 dtype（bf16/fp16/fp32）。
-            slots: 权重窗口槽数（层间流水取 2）。
         """
         if not isinstance(group, torch.distributed.ProcessGroup):
             raise TypeError(
@@ -273,8 +270,6 @@ class Buffer:
             raise ValueError(
                 f"E={E} 必须能被 rank_size={rank_size} 整除（epn = E // rank_size）"
             )
-        if slots < 1:
-            raise ValueError(f"slots 须 >= 1，got {slots}")
         if H < 1:
             raise ValueError(f"H 须 >= 1，got {H}")
         if Hp < 1:
@@ -288,11 +283,10 @@ class Buffer:
             )
         pick_weight_chunk(w, _CHUNK_TRIAL_UB)
         epn = E // rank_size
-        heap_need = _workspace_need(epn, w, slots, gdtype, wdtype)
+        heap_need = _workspace_need(epn, w, gdtype, wdtype)
 
         self._group = group
         self._ctx = create_moonep_context(group=self._group, workspace_bytes=heap_need)
-        self._ctx.window_slots = slots
         self._ctx.weight_dtype = wdtype
         self._ctx.grad_dtype = gdtype
         check_heap_capacity(self._ctx, heap_need, "Buffer 构造")
@@ -303,7 +297,6 @@ class Buffer:
         self._H = int(H)
         self._epn = epn
         self._Hp = int(Hp)
-        self._slots = int(slots)
         self._weight_dtype = wdtype
         self._grad_dtype = gdtype
         self._heap_need = heap_need
@@ -581,7 +574,6 @@ class Buffer:
         local_down_scales: torch.Tensor | None = None,
         local_gate_up_scales: torch.Tensor | None = None,
         async_finish: bool = False,
-        slot: int = 0,
     ):
         """推送 home 权重到各 rank 预取槽。
 
@@ -630,8 +622,6 @@ class Buffer:
             weights,
             self._epn,
             local_scales=scales,
-            slot=int(slot),
-            slots=self._slots,
             async_finish=async_finish,
         )
         if async_finish:
@@ -838,7 +828,6 @@ class Buffer:
             plan.experts_to_copy,
             grads,
             self._epn,
-            slots=self._slots,
             async_finish=async_finish,
         )
         if async_finish:
@@ -892,11 +881,6 @@ class Buffer:
         """运行期组数（首次 prefetch/reduce 后定型）。"""
         ctx = self._require_alive()
         return ctx.layout_groups
-
-    @property
-    def slots(self) -> int:
-        """多槽窗口池层数。"""
-        return self._slots
 
     @property
     def grad_dtype(self) -> torch.dtype:
