@@ -695,7 +695,7 @@ uint64_t KvCompressEpilogTilingArch35::GetTilingKey() const
 
 ge::graphStatus KvCompressEpilogTilingArch35::GetShapeAttrsInfo()
 {
-    OP_CHECK_IF(context_ == nullptr, OP_LOGE(context_->GetNodeName(), "context can not be nullptr"),
+    OP_CHECK_IF(context_ == nullptr, OP_LOGE("KvCompressEpilog", "context can not be nullptr"),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(GetInputShapes() != ge::GRAPH_SUCCESS,
